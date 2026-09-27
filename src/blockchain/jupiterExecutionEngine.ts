@@ -30,12 +30,13 @@ export class JupiterExecutionEngine {
   private connection: Connection;
   private isDryRun: boolean;
   private dexAggregator: DexAggregatorService;
-  private static readonly JUPITER_SWAP_URL = 'https://quote-api.jup.ag/v6/swap';
+  private swapUrl: string;
 
   constructor(config?: JupiterEngineConfig) {
     this.connection = new Connection(config?.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
     this.isDryRun = config?.isDryRun !== undefined ? config.isDryRun : (process.env.DRY_RUN_MODE !== 'false');
     this.dexAggregator = config?.dexAggregator || new DexAggregatorService();
+    this.swapUrl = process.env.JUPITER_SWAP_URL || 'https://public.jupiterapi.com/swap';
   }
 
   public async executeSwap(req: SwapExecutionRequest): Promise<SwapExecutionResponse> {
@@ -60,7 +61,7 @@ export class JupiterExecutionEngine {
       }
 
       // 3. Montar a Transação Serializada V6 na Jupiter
-      const swapRes = await axios.post(JupiterExecutionEngine.JUPITER_SWAP_URL, {
+      const swapRes = await axios.post(this.swapUrl, {
         quoteResponse: quote,
         userPublicKey: req.userPublicKey,
         wrapAndUnwrapSol: true,

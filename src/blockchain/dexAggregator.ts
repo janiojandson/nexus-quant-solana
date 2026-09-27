@@ -21,7 +21,7 @@ export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
   public static readonly MAX_ALLOWED_SLIPPAGE_BPS = 500; // 5.0%
 
-  constructor(jupiterApiBaseUrl = 'https://quote-api.jup.ag/v6') {
+  constructor(jupiterApiBaseUrl = process.env.JUPITER_API_URL || 'https://public.jupiterapi.com') {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl;
   }
 
