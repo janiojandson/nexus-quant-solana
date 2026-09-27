@@ -42,7 +42,8 @@ export class MemeRiskGatekeeper {
     this.macroSentinelUrl = config?.macroSentinelUrl || process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
     // Tolerância estendida de latência para a CPU da Ayla (padrão 4000ms para acomodar 800ms-1500ms com folga)
     this.timeoutMs = config?.timeoutMs || 4000;
-    this.minLiquidityUsd = config?.minLiquidityUsd || 5000;
+    // Trava de Capital Ayla: Rejeição estrita se liquidez < $15k
+    this.minLiquidityUsd = config?.minLiquidityUsd || 15000;
     this.minHolders = config?.minHolders || 100;
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
   }

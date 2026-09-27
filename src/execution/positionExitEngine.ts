@@ -42,6 +42,11 @@ export class PositionExitEngine {
 
     const pnlPct = (currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd;
 
+    // 🛡️ Trava de Capital Ayla: Breakeven (+0R) automático ao atingir +40% de valorização
+    if (pnlPct >= 0.40 && position.stopLossPct < 0) {
+      position.stopLossPct = 0.0; // Puxa stop para o preço de entrada (Breakeven)
+    }
+
     // Gatilho de Take-Profit (Ex: >= +50%)
     if (pnlPct >= position.takeProfitPct) {
       return {
@@ -52,7 +57,7 @@ export class PositionExitEngine {
       };
     }
 
-    // Gatilho de Stop-Loss (Ex: <= -20%)
+    // Gatilho de Stop-Loss (Ex: <= -20% ou <= 0.0% se em Breakeven)
     if (pnlPct <= position.stopLossPct) {
       return {
         shouldExit: true,

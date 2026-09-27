@@ -7,6 +7,8 @@ export interface RugCheckReport {
   isRugged: boolean;
   isSafe: boolean;
   verified: boolean;
+  lpLockedPct?: number;
+  topHoldersPct?: number;
 }
 
 export interface RugCheckOptions {
@@ -39,8 +41,31 @@ export class RugCheckService {
       const isFreezeAuthActive = Boolean(data.token?.freezeAuthority);
       const isRugged = Boolean(data.rugged) || isMintAuthActive || isFreezeAuthActive;
 
-      // Token seguro apenas se score < 500 e não for rugged
-      const isSafe = !isRugged && score < RugCheckService.DANGER_SCORE_THRESHOLD;
+      // Extração de métricas de LP trancada e concentração dos top 10 holders
+      let lpLockedPct = 100;
+      if (Array.isArray(data.markets)) {
+        const raydiumMarket = data.markets.find((m: any) => m.lp);
+        if (raydiumMarket?.lp?.lpLockedPct !== undefined) {
+          lpLockedPct = Number(raydiumMarket.lp.lpLockedPct);
+        }
+      }
+
+      let topHoldersPct = 0;
+      if (Array.isArray(data.topHolders)) {
+        topHoldersPct = data.topHolders.slice(0, 10).reduce((acc: number, h: any) => acc + Number(h.pct || 0), 0);
+      }
+
+      // Token seguro apenas se score < 500, não for rugged, LP trancada >= 95% e top 10 <= 15%
+      const isLpLockedOk = lpLockedPct >= 95;
+      const isHoldersConcentrationOk = topHoldersPct <= 15;
+      const isSafe = !isRugged && score < RugCheckService.DANGER_SCORE_THRESHOLD && isLpLockedOk && isHoldersConcentrationOk;
+
+      if (!isLpLockedOk) {
+        riskNames.push(`LP Trancada insuficiente (${lpLockedPct.toFixed(1)}% < 95% exigido)`);
+      }
+      if (!isHoldersConcentrationOk) {
+        riskNames.push(`Concentração excessiva de Top 10 Holders (${topHoldersPct.toFixed(1)}% > 15% limite)`);
+      }
 
       return {
         mint,
@@ -48,7 +73,9 @@ export class RugCheckService {
         risks: riskNames,
         isRugged,
         isSafe,
-        verified: Boolean(data.verification?.verified)
+        verified: Boolean(data.verification?.verified),
+        lpLockedPct,
+        topHoldersPct
       };
     } catch (err: any) {
       // Fallback em caso de timeout de rede: proteção defensiva
@@ -58,7 +85,9 @@ export class RugCheckService {
         risks: [`RugCheck API offline (${err.message || 'Timeout'}) - Veto preventivo`],
         isRugged: false,
         isSafe: false,
-        verified: false
+        verified: false,
+        lpLockedPct: 0,
+        topHoldersPct: 100
       };
     }
   }

@@ -1,5 +1,6 @@
 import http from 'http';
 import dotenv from 'dotenv';
+import axios from 'axios';
 import { VitalityState, getAgentVitalityState } from './core/vitalityEngine.js';
 import { SolanaWalletService } from './blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
@@ -17,6 +18,7 @@ const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
 const IS_DRY_RUN = process.env.DRY_RUN_MODE !== 'false';
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const PORT = process.env.PORT || 3009;
+const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 
 // Inicia servidor HTTP para Healthcheck do Railway
 const server = http.createServer((req, res) => {
@@ -98,27 +100,53 @@ async function executeAutonomousCycle(
       }
     }
 
-    // Ciclo 2: Scanner On-Chain (DexScreener)
-    console.log('🔍 [1/3 Scanner DexScreener] Buscando tokens em tendência na rede Solana...');
-    const candidates = await scanner.scanSolanaTrends(5000);
-    console.log(`📡 Tokens brutos retornados: ${candidates.length}`);
+    // Ciclo 1.8: Conexão Explícita ao Macro Sentinel (:4005)
+    let macroRegime = 'NEUTRAL_RANGING';
+    let isCircuitBreaker = false;
+    try {
+      const sentinelRes = await axios.get(`${MACRO_SENTINEL_URL}/v1/sentinel/regime`, {
+        timeout: 2000
+      });
+      macroRegime = sentinelRes.data?.regime || 'NEUTRAL_RANGING';
+      isCircuitBreaker = Boolean(sentinelRes.data?.is_circuit_breaker_active);
+      const breakerStatusText = isCircuitBreaker ? 'LIGADO (Operações Bloqueadas)' : 'DESLIGADO (Seguro)';
+      console.log(`📡 [SENTINEL: ${macroRegime} | Disjuntor: ${breakerStatusText}]`);
+    } catch {
+      console.log(`⚠️ [AVISO] Sentinel inacessível, mantendo operação defensiva`);
+    }
 
-    // Filtra candidatos eliminando infraestrutura base (SOL/USDC) e tokens em quarentena
-    const eligibleCandidates = candidates.filter(token => {
+    if (isCircuitBreaker) {
+      console.log(`🛑 [CIRCUIT BREAKER ATIVO] Mercado em estresse macro (${macroRegime}). Scanner e swaps pausados.`);
+      return;
+    }
+
+    // Ciclo 2: Scanner On-Chain (DexScreener)
+    console.log('🔍 [1/3 Scanner DexScreener] Buscando tokens recém-perfilados e piscinas Raydium na rede Solana...');
+    const candidates = await scanner.scanSolanaTrends(10000);
+    const totalCaptured = candidates.length;
+
+    let technicalDiscardCount = 0;
+    let quarantineCount = 0;
+    const eligibleCandidates: typeof candidates = [];
+
+    for (const token of candidates) {
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
       if (!classification.isEligibleForMemeScan) {
-        return false;
+        technicalDiscardCount++;
+        continue;
       }
 
       const spamCheck = antiSpamMemory.shouldSkip(token.mint);
       if (spamCheck.skip) {
-        return false;
+        quarantineCount++;
+        continue;
       }
 
-      return true;
-    });
+      eligibleCandidates.push(token);
+    }
 
-    console.log(`🎯 Candidatos inéditos e elegíveis nesta rodada: ${eligibleCandidates.length}`);
+    // Log de triagem formatado estritamente conforme especificação
+    console.log(`📊 [Capturados: ${totalCaptured} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`);
 
     if (eligibleCandidates.length > 0) {
       const topCandidate = eligibleCandidates[0];
@@ -150,12 +178,12 @@ async function executeAutonomousCycle(
       } else {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
-        // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
-        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando swap (0.01 SOL)...`);
+        // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real) - Swap fixo de 0.015 SOL
+        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando swap (0.015 SOL)...`);
         const swapSim = await jupiterEngine.executeSwap({
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
-          amountLamports: 10000000, // 0.01 SOL
+          amountLamports: 15000000, // 0.015 SOL fixo por entrada (Diretriz de Sobrevivência Ayla)
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });
@@ -233,6 +261,7 @@ async function main() {
   const scanner = new DexScreenerScanner();
   const gatekeeper = new MemeRiskGatekeeper({
     layaBaseUrl: process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8080',
+    macroSentinelUrl: MACRO_SENTINEL_URL,
     timeoutMs: 4000
   });
 
