@@ -34,3 +34,33 @@ test('DexScreenerScanner: deve filtrar e retornar tokens com liquidez acima do m
   assert.strictEqual(results[0].liquidityUsd, 25000);
   assert.strictEqual(results[0].mint, 'MintTokenBom11111111111111111111111111111111');
 });
+
+test('DexScreenerScanner: deve rejeitar armadilhas de 1 minuto e aceitar apenas maturidade >= 20 min', async () => {
+  const mockFetch = async () => ({
+    data: [
+      {
+        chainId: 'solana',
+        baseToken: { address: 'MintTokenNovo1m', symbol: 'NEW1M', name: 'Token de 1 minuto' },
+        priceUsd: '0.001',
+        liquidity: { usd: 30000 },
+        volume: { h24: 10000 },
+        pairCreatedAt: Date.now() - (60 * 1000) // Criado há 1 minuto (armadilha)
+      },
+      {
+        chainId: 'solana',
+        baseToken: { address: 'MintTokenMaduro', symbol: 'MATURE', name: 'Token Maduro' },
+        priceUsd: '0.005',
+        liquidity: { usd: 30000 },
+        volume: { h24: 50000 },
+        pairCreatedAt: Date.now() - (35 * 60 * 1000) // Criado há 35 minutos (sobrevivente)
+      }
+    ]
+  });
+
+  const scanner = new DexScreenerScanner({ fetchClient: mockFetch as any });
+  const results = await scanner.scanSolanaTrends(15000);
+
+  assert.strictEqual(results.length, 1);
+  assert.strictEqual(results[0].symbol, 'MATURE');
+  assert.strictEqual(results[0].mint, 'MintTokenMaduro');
+});

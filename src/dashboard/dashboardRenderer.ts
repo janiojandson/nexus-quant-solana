@@ -8,10 +8,20 @@ export interface ClosedTradeView {
   exitTimestamp: number;
   pnlPct: number;
   pnlSolEst: number;
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
+}
+
+export interface WalletHoldingView {
+  mint: string;
+  symbol: string;
+  tokenAmount: number;
+  decimals: number;
+  ataAddress: string;
+  solscanUrl: string;
+  dexScreenerUrl: string;
 }
 
 export interface DashboardState {
@@ -39,6 +49,7 @@ export interface DashboardState {
     dexScreenerUrl: string;
     solscanUrl: string;
   }>;
+  walletHoldings?: WalletHoldingView[];
   closedTrades: ClosedTradeView[];
   recentAudits: Array<{
     mint: string;
@@ -100,8 +111,21 @@ export function renderDashboardHtml(state: DashboardState): string {
           </div>
         </td>
         <td style="padding: 12px 16px;">
-          <span style="padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background: ${c.exitReason === 'TAKE_PROFIT' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)'}; color: ${c.exitReason === 'TAKE_PROFIT' ? '#10B981' : '#EF4444'};">
-            ${c.exitReason === 'TAKE_PROFIT' ? '🟢 TAKE-PROFIT (+50%)' : '🔴 STOP-LOSS (-20%)'}
+          <span style="padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background: ${
+            c.exitReason === 'TAKE_PROFIT' ? 'rgba(16,185,129,0.15)' :
+            c.exitReason === 'TIME_STOP' ? 'rgba(245,158,11,0.15)' :
+            'rgba(239,68,68,0.15)'
+          }; color: ${
+            c.exitReason === 'TAKE_PROFIT' ? '#10B981' :
+            c.exitReason === 'TIME_STOP' ? '#F59E0B' :
+            '#EF4444'
+          };">
+            ${
+              c.exitReason === 'TAKE_PROFIT' ? '🟢 TAKE-PROFIT (+50%)' :
+              c.exitReason === 'TIME_STOP' ? '⏱️ TIME-STOP (15m)' :
+              c.exitReason === 'MANUAL' ? '🚨 MANUAL' :
+              '🔴 STOP-LOSS (-20%)'
+            }
           </span>
         </td>
         <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(c.entryPriceUsd)}</td>
@@ -221,8 +245,8 @@ export function renderDashboardHtml(state: DashboardState): string {
     <!-- Tabela de Posições Abertas -->
     <div class="table-container">
       <div class="table-header">
-        <h2>📊 Posições em Custódia e Gestão de Saída (Take-Profit & Stop-Loss)</h2>
-        <span style="font-size: 12px; color: #94A3B8;">Take-Profit: +50% | Stop-Loss: -20% | Trailing Breakeven: Ativo</span>
+        <h2>📊 Posições Ativas Monitoradas (1.5s Ultra-Fast Jupiter Exit)</h2>
+        <span style="font-size: 12px; color: #94A3B8;">Take-Profit: +50% | Stop-Loss: -20% | Time-Stop: 15 min | Trailing Breakeven: Ativo</span>
       </div>
       <table>
         <thead>
@@ -238,6 +262,49 @@ export function renderDashboardHtml(state: DashboardState): string {
         </thead>
         <tbody>
           ${positionsRows}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Tabela de Ativos Custodiados na Carteira On-Chain (Detectados via RPC) -->
+    <div class="table-container">
+      <div class="table-header">
+        <h2>🪙 Todos os Tokens Custodiados na Phantom (Varredura On-Chain em Tempo Real)</h2>
+        <span style="font-size: 12px; color: #38BDF8;">Detecta qualquer SPL com saldo > 0 e permite liquidação imediata para SOL</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Token / Mint</th>
+            <th>Saldo em Tokens</th>
+            <th>Conta Token (ATA)</th>
+            <th style="text-align: right;">Ação Imediata</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(!state.walletHoldings || state.walletHoldings.length === 0)
+            ? '<tr><td colspan="4" style="text-align: center; color: #10B981; padding: 20px; font-weight: 500;">✅ Nenhum resíduo ou token avulso pendente. Carteira 100% consolidada em SOL livre!</td></tr>'
+            : state.walletHoldings.map(h => `
+              <tr style="border-bottom: 1px solid #1E293B;">
+                <td style="padding: 12px 16px; font-weight: 600;">
+                  <a href="${h.solscanUrl}" target="_blank" style="color: #38BDF8; text-decoration: none;">${h.symbol}</a>
+                  <div style="font-size: 11px; color: #64748B; font-family: monospace;">${h.mint}</div>
+                </td>
+                <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1; font-weight: 600;">
+                  ${h.tokenAmount.toLocaleString()}
+                </td>
+                <td style="padding: 12px 16px; font-family: monospace; font-size: 11px; color: #64748B;">
+                  ${h.ataAddress.substring(0, 6)}...${h.ataAddress.substring(h.ataAddress.length - 4)}
+                </td>
+                <td style="padding: 12px 16px; text-align: right;">
+                  <button onclick="liquidateHolding('${h.mint}', '${h.symbol}', ${h.tokenAmount}, ${h.decimals})" style="font-size: 11px; font-weight: 700; color: #FFFFFF; background: #DC2626; border: 1px solid #EF4444; padding: 6px 12px; border-radius: 4px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#B91C1C'" onmouseout="this.style.background='#DC2626'">
+                    ⚡ Liquidar para SOL & Fechar Conta
+                  </button>
+                  <a href="${h.dexScreenerUrl}" target="_blank" style="margin-left: 8px; font-size: 11px; color: #38BDF8; text-decoration: none; padding: 4px 8px; background: rgba(56,189,248,0.1); border-radius: 4px;">Gráfico</a>
+                </td>
+              </tr>
+            `).join('')
+          }
         </tbody>
       </table>
     </div>
@@ -317,7 +384,6 @@ export function renderDashboardHtml(state: DashboardState): string {
         }
       } catch (err) {
         alert('❌ Erro de conexão ao solicitar venda: ' + err.message);
-      }
     }
 
     async function liquidateAll() {
@@ -334,6 +400,28 @@ export function renderDashboardHtml(state: DashboardState): string {
         window.location.reload();
       } catch (err) {
         alert('❌ Erro de conexão na liquidação: ' + err.message);
+      }
+    }
+
+    async function liquidateHolding(mint, symbol, amount, decimals) {
+      if (!confirm('⚡ Deseja liquidar IMEDIATAMENTE a mercado ' + Number(amount).toLocaleString() + ' ' + symbol + ' para SOL via Jupiter e resgatar a caução da conta ATA?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/wallet/liquidate-holding', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mint, symbol, amount, decimals })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert('✅ Liquidação de ' + symbol + ' concluída com sucesso! Tx: ' + (data.txSignature || 'OK'));
+          window.location.reload();
+        } else {
+          alert('❌ Falha na liquidação: ' + (data.error || 'Erro desconhecido'));
+        }
+      } catch (err) {
+        alert('❌ Erro de conexão ao solicitar liquidação: ' + err.message);
       }
     }
   </script>

@@ -107,3 +107,26 @@ test('PositionExitEngine: deve disparar TAKE_PROFIT quando valor em SOL atingir 
   assert.strictEqual(signal.type, 'TAKE_PROFIT');
   assert.ok(signal.pnlPct >= 0.50);
 });
+
+test('PositionExitEngine: deve disparar TIME_STOP após 15 minutos de estagnação', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TokenStagnant';
+  const entryTime = Date.now() - (16 * 60 * 1000); // Entrou há 16 minutos
+
+  engine.addPosition({
+    mint,
+    symbol: 'STAG',
+    tokenAmount: 5000,
+    entryPriceUsd: 0.001,
+    entryTimestamp: entryTime,
+    stopLossPct: -0.20,
+    takeProfitPct: 0.50,
+    entrySol: 0.015
+  });
+
+  // Preço quase inalterado (+2%), mas tempo estourou 15 min
+  const signal = engine.evaluateExitBySol(mint, 0.0153, Date.now());
+  assert.strictEqual(signal.shouldExit, true);
+  assert.strictEqual(signal.type, 'TIME_STOP');
+});
+

@@ -64,6 +64,7 @@ const latestState: DashboardState = {
   totalRealizedPnlSol: 0,
   totalNetworkFeesSolEst: 0,
   positions: [],
+  walletHoldings: [],
   closedTrades: [],
   recentAudits: [],
   quarantineCount: 0,
@@ -79,7 +80,7 @@ const latestState: DashboardState = {
  */
 async function executeExitOrder(
   mint: string,
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL',
+  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'MANUAL',
   pnlPct: number,
   exitSolValue: number
 ): Promise<{ success: boolean; txSignature?: string; error?: string }> {
@@ -107,8 +108,8 @@ async function executeExitOrder(
     console.warn(`⚠️ [Aviso Fechamento ATA] Não foi possível fechar ATA de ${pos.symbol}:`, err?.message || err);
   }
 
-  // 3. Quarentena Severa de 24 Horas em caso de Stop-Loss ou Venda Manual para evitar churn
-  if (exitReason === 'STOP_LOSS' || exitReason === 'MANUAL') {
+  // 3. Quarentena Severa de 24 Horas em caso de Stop-Loss, Time-Stop ou Venda Manual
+  if (exitReason === 'STOP_LOSS' || exitReason === 'TIME_STOP' || exitReason === 'MANUAL') {
     const quarantine24hMs = 24 * 60 * 60 * 1000;
     antiSpamMemory.recordVeto(pos.mint, `Quarentena Pós-Saída (${exitReason}): bloqueio de recompra por 24h`, quarantine24hMs);
     console.log(`🛑 [Quarentena 24h Aplicada] Token ${pos.symbol} bloqueado para novas compras até amanhã.`);
@@ -238,6 +239,57 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Rota de Liquidação Direta de Qualquer Token On-Chain (mesmo fora da memória do robô)
+  if (pathname === '/api/wallet/liquidate-holding' && method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const mint = payload.mint;
+        const symbol = payload.symbol || 'TOKEN';
+        const amount = Number(payload.amount || 0);
+        const decimals = Number(payload.decimals || 6);
+
+        if (!mint || amount <= 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Mint e amount válidos são obrigatórios.' }));
+          return;
+        }
+
+        console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint}) | Qtd: ${amount}`);
+        const rawLamports = Math.floor(amount * Math.pow(10, decimals));
+
+        // 1. Swap na Jupiter V6
+        const exitSwap = await jupiterEngine.executeSwap({
+          inputMint: mint,
+          outputMint: 'So11111111111111111111111111111111111111112', // SOL
+          amountLamports: rawLamports,
+          userPublicKey: OFFICIAL_PHANTOM_WALLET,
+          keypair: wallet.getKeypair()
+        });
+
+        // 2. Fechamento da ATA para resgatar ~0.00204 SOL de caução
+        await new Promise(r => setTimeout(r, 2000));
+        await wallet.closeTokenAccount(mint);
+
+        // 3. Aplica quarentena de 24h
+        antiSpamMemory.recordVeto(mint, 'Quarentena Pós-Liquidação Manual On-Chain', 24 * 60 * 60 * 1000);
+
+        // Remove do gerenciador se estivesse lá
+        positionEngine.removePosition(mint);
+
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ success: true, txSignature: exitSwap.txSignature }));
+      } catch (err: any) {
+        console.error('❌ Erro na liquidação avulsa:', err?.message || err);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err?.message || 'Falha na execução on-chain' }));
+      }
+    });
+    return;
+  }
+
   // Rota Dashboard Web Visual
   if (pathname === '/' || pathname === '/dashboard') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -288,10 +340,10 @@ async function runUltraFastExitMonitor() {
           dashPos.currentPriceUsd = (currentSolValue / pos.tokenAmount) * 130; // Aproximação em USD
         }
 
-        // Avalia Saída por Sol: TP (+50%) ou SL (-20%)
+        // Avalia Saída por Sol: TP (+50%), SL (-20%) ou TIME_STOP (15 min de estagnação)
         const exitSignal = positionEngine.evaluateExitBySol(pos.mint, currentSolValue);
-        if (exitSignal.shouldExit && (exitSignal.type === 'TAKE_PROFIT' || exitSignal.type === 'STOP_LOSS')) {
-          console.log(`🎯 [ULTRA-FAST EXIT ACIONADO] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
+        if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
+          console.log(`🎯 [EXIT ENGINE ACIONADO] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
           await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue);
         }
       } catch (quoteErr: any) {
@@ -342,11 +394,28 @@ async function executeAutonomousCycle() {
     // Sincronização On-Chain de Custódia (Reconcilia tokens reais da carteira Phantom)
     try {
       const splAccounts = await wallet.getSplTokenAccounts();
+      
+      // Alimenta a tabela de Ativos Custodiados On-Chain para o Dashboard
+      latestState.walletHoldings = splAccounts.map(spl => ({
+        mint: spl.mint,
+        symbol: spl.mint.slice(0, 4) + '...' + spl.mint.slice(-4),
+        tokenAmount: spl.tokenAmount,
+        decimals: spl.decimals,
+        ataAddress: spl.ataAddress,
+        solscanUrl: `https://solscan.io/token/${spl.mint}`,
+        dexScreenerUrl: `https://dexscreener.com/solana/${spl.mint}`
+      }));
+
       for (const spl of splAccounts) {
         if (!positionEngine.getPosition(spl.mint)) {
           const meta = await scanner.fetchTokenMetadata(spl.mint);
           const price = (meta && meta.priceUsd > 0) ? meta.priceUsd : 0.00001;
           const symbol = meta?.symbol || (spl.mint.slice(0, 4) + '...' + spl.mint.slice(-4));
+          
+          // Atualiza símbolo no walletHoldings se disponível
+          const h = latestState.walletHoldings.find(x => x.mint === spl.mint);
+          if (h && meta?.symbol) h.symbol = meta.symbol;
+
           positionEngine.addPosition({
             mint: spl.mint,
             symbol,

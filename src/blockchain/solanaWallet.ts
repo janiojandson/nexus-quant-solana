@@ -64,17 +64,23 @@ export class SolanaWalletService {
     }
   }
 
-  public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number }>> {
+  public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number; decimals: number; ataAddress: string }>> {
     try {
+      const { PublicKey } = await import('@solana/web3.js');
       const response = await this.connection.getParsedTokenAccountsByOwner(
         this.keypair.publicKey,
-        { programId: new (await import('@solana/web3.js')).PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
+        { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
       );
       return response.value
-        .map(a => ({
-          mint: a.account.data.parsed.info.mint as string,
-          tokenAmount: Number(a.account.data.parsed.info.tokenAmount.uiAmount || 0)
-        }))
+        .map(a => {
+          const info = a.account.data.parsed.info;
+          return {
+            mint: info.mint as string,
+            tokenAmount: Number(info.tokenAmount.uiAmount || 0),
+            decimals: Number(info.tokenAmount.decimals || 0),
+            ataAddress: a.pubkey.toBase58()
+          };
+        })
         .filter(t => t.tokenAmount > 0);
     } catch {
       return [];

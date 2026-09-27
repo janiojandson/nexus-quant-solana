@@ -63,8 +63,8 @@ export class DexScreenerScanner {
       }
 
       const now = Date.now();
-      const tenMinMs = 10 * 60 * 1000;
-      const sixtyMinMs = 60 * 60 * 1000;
+      const twentyMinMs = 20 * 60 * 1000; // Mínimo 20 minutos de vida (sobreviveu ao dump inicial do dev)
+      const maxAgeMs = 24 * 60 * 60 * 1000; // Máximo 24 horas (ainda em fase de momentum)
 
       const candidates: TokenCandidate[] = [];
       const seenMints = new Set<string>();
@@ -85,13 +85,12 @@ export class DexScreenerScanner {
         seenMints.add(mint);
 
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
-        // Filtro de maturidade da piscina: aceita se criado entre 10 e 60 min, ou se recém-perfilado, ou pool ativa
+        // Filtro de maturidade estrita da piscina: rejeita lançamentos com menos de 20 minutos
         const ageMs = pairCreatedAt > 0 ? (now - pairCreatedAt) : 0;
-        const isIdealWindow = pairCreatedAt > 0 ? (ageMs >= tenMinMs && ageMs <= 24 * 60 * 60 * 1000) : true;
-        const isProfiled = tokenMintsFromProfiles.includes(mint);
+        const isIdealWindow = pairCreatedAt > 0 ? (ageMs >= twentyMinMs && ageMs <= maxAgeMs) : false;
 
-        // Se tiver carimbo de criação fora da janela de operação e não for perfil novo, descarta
-        if (pairCreatedAt > 0 && !isIdealWindow && !isProfiled) {
+        // Se a piscina tiver carimbo de criação e não estiver na janela ideal de maturidade (20m - 24h), descarta
+        if (pairCreatedAt > 0 && !isIdealWindow) {
           continue;
         }
 
