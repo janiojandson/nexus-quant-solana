@@ -90,15 +90,17 @@ async function executeExitOrder(
   }
 
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | PnL: ${(pnlPct * 100).toFixed(2)}%`);
-  console.log(`⚡ [Jupiter V6] Executando Swap de Venda de Volta para SOL...`);
+  console.log(`⚡ [Jupiter V6] Saída com slippage 5% e priority HIGH para furar fila em dump...`);
 
-  // 1. Swap na Jupiter V6
+  // 1. Swap na Jupiter V6 — Blindagem de saída: 500bps slippage + priority HIGH
   const exitSwap = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
     amountLamports: Math.floor(pos.tokenAmount),
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
-    keypair: wallet.getKeypair()
+    keypair: wallet.getKeypair(),
+    slippageBps: 500,       // 5.0% — evita erro 0x177e em dumps rápidos
+    priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
   });
 
   // 2. Recuperação de Rent Exemption (Fechar Conta ATA e recolher os ~0.00204 SOL)
@@ -108,11 +110,23 @@ async function executeExitOrder(
     console.warn(`⚠️ [Aviso Fechamento ATA] Não foi possível fechar ATA de ${pos.symbol}:`, err?.message || err);
   }
 
-  // 3. Quarentena Severa de 24 Horas em caso de Stop-Loss, Time-Stop ou Venda Manual
-  if (exitReason === 'STOP_LOSS' || exitReason === 'TIME_STOP' || exitReason === 'MANUAL') {
-    const quarantine24hMs = 24 * 60 * 60 * 1000;
-    antiSpamMemory.recordVeto(pos.mint, `Quarentena Pós-Saída (${exitReason}): bloqueio de recompra por 24h`, quarantine24hMs);
-    console.log(`🛑 [Quarentena 24h Aplicada] Token ${pos.symbol} bloqueado para novas compras até amanhã.`);
+  // 3. Quarentena Inteligente por Motivo de Saída
+  //    STOP_LOSS : 3h  — pode ter novo catalisador após resfriamento
+  //    TIME_STOP : 30min — apenas esfriou, não morreu
+  //    MANUAL    : 24h  — decisão consciente, respeitar
+  //    TAKE_PROFIT: sem quarentena — sucesso; pode ter nova oportunidade
+  const QUARANTINE_MS: Record<string, number> = {
+    STOP_LOSS:  3 * 60 * 60 * 1000,  // 3 horas
+    TIME_STOP:  30 * 60 * 1000,       // 30 minutos
+    MANUAL:     24 * 60 * 60 * 1000,  // 24 horas
+    TAKE_PROFIT: 0
+  };
+  const quarantineMs = QUARANTINE_MS[exitReason] ?? 0;
+  if (quarantineMs > 0) {
+    const labels: Record<string, string> = { STOP_LOSS: '3h', TIME_STOP: '30min', MANUAL: '24h' };
+    const label = labels[exitReason] || '?h';
+    antiSpamMemory.recordVeto(pos.mint, `Quarentena Pós-${exitReason}: cooldown de ${label}`, quarantineMs);
+    console.log(`🛑 [Quarentena ${label}] ${pos.symbol} bloqueado para recompra (${exitReason}).`);
   }
 
   // 4. Registra Trade Fechado
@@ -333,14 +347,24 @@ async function runUltraFastExitMonitor() {
         const entrySol = pos.entrySol || 0.015;
         const pnlPct = (currentSolValue - entrySol) / entrySol;
 
-        // Atualiza PnL flutuante no estado do Dashboard
+        // Atualiza PnL flutuante e pico no estado do Dashboard
+        const peakSolValue = positionEngine.getPeakSolValue(pos.mint);
+        const trailingStopSolValue = peakSolValue * (1 - 0.10);
+        const peakPnlPct = (peakSolValue - (pos.entrySol || 0.015)) / (pos.entrySol || 0.015);
+        const trailPnlPct = (trailingStopSolValue - (pos.entrySol || 0.015)) / (pos.entrySol || 0.015);
+        const elapsedMin = Math.floor((Date.now() - pos.entryTimestamp) / 60000);
         const dashPos = latestState.positions.find(p => p.mint === pos.mint);
         if (dashPos) {
           dashPos.pnlPct = pnlPct;
-          dashPos.currentPriceUsd = (currentSolValue / pos.tokenAmount) * 130; // Aproximação em USD
+          dashPos.currentPriceUsd = (currentSolValue / pos.tokenAmount) * 130;
         }
 
-        // Avalia Saída por Sol: TP (+50%), SL (-20%) ou TIME_STOP (15 min de estagnação)
+        // 📊 Log Sintético de Monitor de Posição (a cada ciclo de 1.5s)
+        const pnlSign = pnlPct >= 0 ? '+' : '';
+        const peakSign = peakPnlPct >= 0 ? '+' : '';
+        const trailSign = trailPnlPct >= 0 ? '+' : '';
+        console.log(`🟡 [SNIPER ATIVO] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | Stop Dinâmico: ${trailSign}${(trailPnlPct * 100).toFixed(2)}% | Tempo: ${elapsedMin}min`);
+
         const exitSignal = positionEngine.evaluateExitBySol(pos.mint, currentSolValue);
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
           console.log(`🎯 [EXIT ENGINE ACIONADO] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);

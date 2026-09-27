@@ -8,7 +8,10 @@ export interface SwapExecutionRequest {
   amountLamports: number;
   userPublicKey: string;
   keypair?: Keypair;
+  /** Tolerância de slippage em basis points. Padrão compra: 50 (0.5%). Saída de emergência: 500 (5.0%) */
   slippageBps?: number;
+  /** Nível de prioridade para a taxa de gas: 'medium' (compra), 'high' (saída de emergência) */
+  priorityLevel?: 'low' | 'medium' | 'high' | 'veryHigh';
 }
 
 export interface SwapExecutionResponse {
@@ -81,6 +84,7 @@ export class JupiterExecutionEngine {
         priceImpactPct: String(quote.priceImpactPct)
       };
 
+      const priorityLevel = req.priorityLevel || 'medium';
       const swapRes = await axios.post(this.swapUrl, {
         quoteResponse: payloadQuote,
         userPublicKey: req.userPublicKey,
@@ -88,8 +92,8 @@ export class JupiterExecutionEngine {
         dynamicComputeUnitLimit: true,
         prioritizationFeeLamports: {
           priorityLevelWithMaxLamports: {
-            maxLamports: 2000000,
-            priorityLevel: 'medium'
+            maxLamports: priorityLevel === 'high' || priorityLevel === 'veryHigh' ? 5000000 : 2000000,
+            priorityLevel
           }
         }
       }, { timeout: 8000 });

@@ -30,18 +30,28 @@ export interface ExitSignal {
   type: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'HOLD';
   pnlPct: number;
   currentPriceUsd: number;
+  /** Pico máximo de valor em SOL atingido durante a custódia */
+  peakSolValue?: number;
+  /** Stop dinâmico atual do trailing: peakSolValue * (1 - TRAILING_DISTANCE) */
+  trailingStopSolValue?: number;
 }
 
 export class PositionExitEngine {
   private activePositions = new Map<string, PositionTracking>();
   private closedPositions: ClosedTrade[] = [];
+  /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
+  private peakSolValues = new Map<string, number>();
   public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos
+  /** Trailing agressivo: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
+  public static readonly TRAILING_DISTANCE = 0.10; // -10% do pico
 
   public addPosition(position: PositionTracking): void {
     if (!position.maxHoldDurationMs) {
       position.maxHoldDurationMs = PositionExitEngine.DEFAULT_TIME_STOP_MS;
     }
     this.activePositions.set(position.mint, position);
+    // Inicializa pico com o valor de entrada
+    this.peakSolValues.set(position.mint, position.entrySol || 0.015);
   }
 
   public getPosition(mint: string): PositionTracking | undefined {
@@ -56,6 +66,10 @@ export class PositionExitEngine {
     return [...this.closedPositions];
   }
 
+  public getPeakSolValue(mint: string): number {
+    return this.peakSolValues.get(mint) || 0;
+  }
+
   public recordClosedTrade(trade: ClosedTrade): void {
     this.closedPositions.unshift(trade);
     if (this.closedPositions.length > 50) this.closedPositions.pop();
@@ -63,8 +77,21 @@ export class PositionExitEngine {
 
   public removePosition(mint: string): void {
     this.activePositions.delete(mint);
+    this.peakSolValues.delete(mint);
   }
 
+  /**
+   * Avalia a saída de uma posição em SOL com Trailing Stop Agressivo (-10% do pico).
+   *
+   * Prioridade de disparo:
+   * 1. Take-Profit fixo (>= +takeProfitPct): realiza lucro imediato no alvo
+   * 2. Trailing Stop (-10% do pico): protege lucro acumulado em movimentos fortes
+   *    — Ativa apenas quando o pico superou +10% (evita falsos positivos na entrada)
+   *    — Exemplo: sobe +80% → pico em 0.027 SOL → trailing_stop = 0.0243 SOL (+62%)
+   *       Se recuar de 0.027 para 0.0243 → realiza lucro de +62%
+   * 3. Stop-Loss fixo inicial (<= stopLossPct, ou 0% após Breakeven em +40%)
+   * 4. Time-Stop biológico (>= maxHoldDurationMs sem atingir TP)
+   */
   public evaluateExitBySol(mint: string, currentSolValue: number, currentTimestamp: number = Date.now()): ExitSignal {
     const position = this.activePositions.get(mint);
     const entrySol = position?.entrySol || 0.015;
@@ -72,34 +99,60 @@ export class PositionExitEngine {
       return { shouldExit: false, type: 'HOLD', pnlPct: 0, currentPriceUsd: 0 };
     }
 
-    const pnlPct = (currentSolValue - entrySol) / entrySol;
+    // Atualiza pico máximo se valor atual superou o anterior
+    const previousPeak = this.peakSolValues.get(mint) || entrySol;
+    const newPeak = Math.max(previousPeak, currentSolValue);
+    this.peakSolValues.set(mint, newPeak);
 
-    // 🛡️ Trava de Capital Ayla: Breakeven (+0R) automático ao atingir +40% de valorização
+    const pnlPct = (currentSolValue - entrySol) / entrySol;
+    const peakPnlPct = (newPeak - entrySol) / entrySol;
+
+    // Trailing Stop: SL dinâmico = pico * (1 - TRAILING_DISTANCE)
+    const trailingStopSolValue = newPeak * (1 - PositionExitEngine.TRAILING_DISTANCE);
+
+    // 🛡️ Breakeven (+0R) automático ao atingir +40%: jamais volta a perder o investimento
     if (pnlPct >= 0.40 && position.stopLossPct < 0) {
       position.stopLossPct = 0.0;
     }
 
-    // 1. Gatilho de Take-Profit (Ex: >= +50%)
+    // 1. Gatilho de Take-Profit fixo (>= +takeProfitPct)
     if (pnlPct >= position.takeProfitPct) {
       return {
         shouldExit: true,
         type: 'TAKE_PROFIT',
         pnlPct,
-        currentPriceUsd: currentSolValue
+        currentPriceUsd: currentSolValue,
+        peakSolValue: newPeak,
+        trailingStopSolValue
       };
     }
 
-    // 2. Gatilho de Stop-Loss (Ex: <= -20% ou <= 0.0% se em Breakeven)
+    // 2. Trailing Stop Agressivo (-10% do pico)
+    //    Ativa somente quando o pico superou +10% para não disparar em oscilação de entrada
+    if (peakPnlPct >= 0.10 && currentSolValue <= trailingStopSolValue) {
+      return {
+        shouldExit: true,
+        type: 'STOP_LOSS',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        peakSolValue: newPeak,
+        trailingStopSolValue
+      };
+    }
+
+    // 3. Stop-Loss fixo inicial (<= stopLossPct)
     if (pnlPct <= position.stopLossPct) {
       return {
         shouldExit: true,
         type: 'STOP_LOSS',
         pnlPct,
-        currentPriceUsd: currentSolValue
+        currentPriceUsd: currentSolValue,
+        peakSolValue: newPeak,
+        trailingStopSolValue
       };
     }
 
-    // 3. ⏱️ Time-Stop Biológico: Se completou 15 min e não andou para Take-Profit, encerra a mercado
+    // 4. ⏱️ Time-Stop Biológico: posição estagnada por mais de maxHoldDurationMs
     const maxDuration = position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS;
     const elapsedMs = currentTimestamp - position.entryTimestamp;
     if (elapsedMs >= maxDuration) {
@@ -107,7 +160,9 @@ export class PositionExitEngine {
         shouldExit: true,
         type: 'TIME_STOP',
         pnlPct,
-        currentPriceUsd: currentSolValue
+        currentPriceUsd: currentSolValue,
+        peakSolValue: newPeak,
+        trailingStopSolValue
       };
     }
 
@@ -115,7 +170,9 @@ export class PositionExitEngine {
       shouldExit: false,
       type: 'HOLD',
       pnlPct,
-      currentPriceUsd: currentSolValue
+      currentPriceUsd: currentSolValue,
+      peakSolValue: newPeak,
+      trailingStopSolValue
     };
   }
 
@@ -127,36 +184,19 @@ export class PositionExitEngine {
 
     const pnlPct = (currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd;
 
-    // 🛡️ Trava de Capital Ayla: Breakeven (+0R) automático ao atingir +40% de valorização
+    // 🛡️ Trava de Capital: Breakeven (+0R) automático ao atingir +40%
     if (pnlPct >= 0.40 && position.stopLossPct < 0) {
-      position.stopLossPct = 0.0; // Puxa stop para o preço de entrada (Breakeven)
+      position.stopLossPct = 0.0;
     }
 
-    // Gatilho de Take-Profit (Ex: >= +50%)
     if (pnlPct >= position.takeProfitPct) {
-      return {
-        shouldExit: true,
-        type: 'TAKE_PROFIT',
-        pnlPct,
-        currentPriceUsd
-      };
+      return { shouldExit: true, type: 'TAKE_PROFIT', pnlPct, currentPriceUsd };
     }
 
-    // Gatilho de Stop-Loss (Ex: <= -20% ou <= 0.0% se em Breakeven)
     if (pnlPct <= position.stopLossPct) {
-      return {
-        shouldExit: true,
-        type: 'STOP_LOSS',
-        pnlPct,
-        currentPriceUsd
-      };
+      return { shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd };
     }
 
-    return {
-      shouldExit: false,
-      type: 'HOLD',
-      pnlPct,
-      currentPriceUsd
-    };
+    return { shouldExit: false, type: 'HOLD', pnlPct, currentPriceUsd };
   }
 }
