@@ -77,7 +77,12 @@ export class JupiterExecutionEngine {
         userPublicKey: req.userPublicKey,
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 'auto'
+        prioritizationFeeLamports: {
+          priorityLevelWithMaxLamports: {
+            maxLamports: 2000000,
+            priorityLevel: 'medium'
+          }
+        }
       }, { timeout: 8000 });
 
       const swapTransactionBuf = Buffer.from(swapRes.data.swapTransaction, 'base64');
@@ -100,6 +105,7 @@ export class JupiterExecutionEngine {
         isDryRun: false
       };
     } catch (err: any) {
+      console.error('❌ [JUPITER SWAP ERROR DETALHADO]:', err.response?.data || err.message || err);
       const errorMsg = err.response?.data?.error || err.response?.data?.message || err.response?.data || err.message || String(err);
       return {
         txSignature: '',

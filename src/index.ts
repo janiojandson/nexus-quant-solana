@@ -184,7 +184,7 @@ async function executeAutonomousCycle(
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
           amountLamports: 15000000, // 0.015 SOL fixo por entrada (Diretriz de Sobrevivência Ayla)
-          slippageBps: 150, // 1.5% tolerância para memecoins de alta volatilidade (previne 0x177e)
+          slippageBps: 250, // 2.5% tolerância para memecoins de alta volatilidade (previne 0x177e)
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });
@@ -264,6 +264,11 @@ async function main() {
     secretKeyRaw: SECRET_KEY_RAW,
     rpcUrl: process.env.SOLANA_RPC_URL
   });
+
+  console.log(`🔑 Keypair Derivado On-Chain: ${wallet.getPublicKey()}`);
+  if (wallet.getPublicKey() !== OFFICIAL_PHANTOM_WALLET) {
+    console.warn(`⚠️ [ALERTA DE CHAVE] Chave pública derivada (${wallet.getPublicKey()}) diverge da carteira oficial configurada (${OFFICIAL_PHANTOM_WALLET})!`);
+  }
 
   const scanner = new DexScreenerScanner();
   const gatekeeper = new MemeRiskGatekeeper({
