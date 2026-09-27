@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { RugCheckService } from './rugCheckService.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
@@ -14,7 +15,7 @@ export interface SecurityAuditResult {
   safe: boolean;
   reason?: string;
   score: number; // 0 a 100
-  validatedBy: 'AYLA_LAYA_ENGINE' | 'LOCAL_HEURISTICS_FALLBACK';
+  validatedBy: 'AYLA_LAYA_ENGINE' | 'RUGCHECK_API' | 'LOCAL_HEURISTICS_FALLBACK';
   latencyMs?: number;
 }
 
@@ -23,6 +24,7 @@ export interface MemeGatekeeperConfig {
   timeoutMs?: number;
   minLiquidityUsd?: number;
   minHolders?: number;
+  rugCheckService?: RugCheckService;
 }
 
 export class MemeRiskGatekeeper {
@@ -30,6 +32,7 @@ export class MemeRiskGatekeeper {
   private timeoutMs: number;
   private minLiquidityUsd: number;
   private minHolders: number;
+  private rugCheckService: RugCheckService;
 
   constructor(config?: MemeGatekeeperConfig) {
     // Malha interna do Railway ou URL configurada
@@ -38,6 +41,7 @@ export class MemeRiskGatekeeper {
     this.timeoutMs = config?.timeoutMs || 4000;
     this.minLiquidityUsd = config?.minLiquidityUsd || 5000;
     this.minHolders = config?.minHolders || 100;
+    this.rugCheckService = config?.rugCheckService || new RugCheckService();
   }
 
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
@@ -84,7 +88,19 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    // 2. Consulta à Ayla/Laya (Decisão Reflexiva com timeout tolerante de até 4000ms)
+    // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
+    const rugReport = await this.rugCheckService.auditToken(token.mint);
+    if (!rugReport.isSafe) {
+      return {
+        safe: false,
+        reason: `Veto por risco on-chain (RugCheck): ${rugReport.risks.join(' | ') || 'Score de perigo excedido'}`,
+        score: Math.max(0, 100 - (rugReport.score / 10)),
+        validatedBy: 'RUGCHECK_API',
+        latencyMs: Date.now() - startTime
+      };
+    }
+
+    // 3. Consulta à Ayla/Laya (Decisão Reflexiva com timeout tolerante de até 4000ms)
     try {
       const response = await axios.post(
         `${this.layaBaseUrl}/v1/systemone/evaluate`,

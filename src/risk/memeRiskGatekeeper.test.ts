@@ -40,9 +40,21 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
   it('deve respeitar timeout estendido de até 4000ms para a Ayla/Laya sem quebrar o fluxo', async () => {
     // Simula uma chamada onde o gatekeeper aguarda até 4000ms confortavelmente
+    const mockRugCheck = {
+      auditToken: async () => ({
+        mint: 'Meme333333333333333333333333333333333333333',
+        score: 100,
+        risks: [],
+        isRugged: false,
+        isSafe: true,
+        verified: true
+      })
+    };
+
     const gatekeeper = new MemeRiskGatekeeper({
       layaBaseUrl: 'http://127.0.0.1:9999', // URL sem serviço ativo para acionar fallback seguro
-      timeoutMs: 4000
+      timeoutMs: 500,
+      rugCheckService: mockRugCheck as any
     });
 
     const token: TokenSecurityMetadata = {

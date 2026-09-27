@@ -3,12 +3,13 @@ FROM node:22-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm install
 
 COPY . .
-RUN npm run build || true
+RUN npm run build
 
 ENV NODE_ENV=production
-ENV PORT=5000
+ENV PORT=3009
 
-CMD ["node", "dist/index.js"]
+CMD ["npm", "start"]
+
