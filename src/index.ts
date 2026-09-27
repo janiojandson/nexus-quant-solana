@@ -127,12 +127,39 @@ async function executeAutonomousCycle(
       return;
     }
 
+    // Sincronização On-Chain de Custódia (Reconcilia tokens reais da carteira Phantom)
+    try {
+      const splAccounts = await wallet.getSplTokenAccounts();
+      for (const spl of splAccounts) {
+        if (!positionEngine.getPosition(spl.mint)) {
+          // Busca símbolo e preço da moeda on-chain se ainda não estiver mapeada
+          const meta = await scanner.fetchTokenMetadata(spl.mint);
+          const price = (meta && meta.priceUsd > 0) ? meta.priceUsd : 0.00001;
+          const symbol = meta?.symbol || (spl.mint.slice(0, 4) + '...' + spl.mint.slice(-4));
+          positionEngine.addPosition({
+            mint: spl.mint,
+            symbol,
+            tokenAmount: spl.tokenAmount,
+            entryPriceUsd: price,
+            entryTimestamp: Date.now(),
+            stopLossPct: -0.20,
+            takeProfitPct: 0.50
+          });
+          console.log(`📦 [Custódia On-Chain Detectada] ${spl.tokenAmount.toLocaleString()} de ${symbol} (${spl.mint}) adicionados ao monitoramento.`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`⚠️ [Aviso Custódia] Falha ao ler tokens SPL: ${err?.message || err}`);
+    }
+
+    const currentPositions = positionEngine.getAllPositions();
+
     // Ciclo 1.5: Monitoramento de Posições Abertas (Take-Profit & Stop-Loss com Preço ao Vivo)
     const positionEvaluations = new Map<string, { currentPriceUsd: number; pnlPct: number }>();
 
-    if (openPositions.length > 0) {
-      console.log(`📊 [Gestor de Posições] Monitorando ${openPositions.length} posições abertas com cotação em tempo real...`);
-      for (const pos of openPositions) {
+    if (currentPositions.length > 0) {
+      console.log(`📊 [Gestor de Posições] Monitorando ${currentPositions.length} posições abertas com cotação em tempo real...`);
+      for (const pos of currentPositions) {
         // Busca cotação real via DexScreener
         const livePrice = await scanner.fetchCurrentTokenPriceUsd(pos.mint);
         const currentPriceUsd = (livePrice && livePrice > 0) ? livePrice : pos.entryPriceUsd;

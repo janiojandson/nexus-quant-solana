@@ -114,6 +114,11 @@ export class DexScreenerScanner {
   }
 
   public async fetchCurrentTokenPriceUsd(mint: string): Promise<number | null> {
+    const meta = await this.fetchTokenMetadata(mint);
+    return meta ? meta.priceUsd : null;
+  }
+
+  public async fetchTokenMetadata(mint: string): Promise<{ symbol: string; priceUsd: number } | null> {
     try {
       const res = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
       const data = res.data;
@@ -121,10 +126,12 @@ export class DexScreenerScanner {
       if (!Array.isArray(pairs) || pairs.length === 0) {
         return null;
       }
-      // Ordena pelas pools com maior liquidez para garantir preço representativo
+      // Ordena pelas pools com maior liquidez para garantir preço e dados representativos
       const sortedPairs = [...pairs].sort((a, b) => Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0));
-      const bestPrice = Number(sortedPairs[0]?.priceUsd || 0);
-      return bestPrice > 0 ? bestPrice : null;
+      const best = sortedPairs[0];
+      const bestPrice = Number(best?.priceUsd || 0);
+      const symbol = best?.baseToken?.symbol || mint.slice(0, 4) + '...' + mint.slice(-4);
+      return bestPrice > 0 ? { symbol, priceUsd: bestPrice } : null;
     } catch {
       return null;
     }

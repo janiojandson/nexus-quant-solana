@@ -64,6 +64,23 @@ export class SolanaWalletService {
     }
   }
 
+  public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number }>> {
+    try {
+      const response = await this.connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { programId: new (await import('@solana/web3.js')).PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
+      );
+      return response.value
+        .map(a => ({
+          mint: a.account.data.parsed.info.mint as string,
+          tokenAmount: Number(a.account.data.parsed.info.tokenAmount.uiAmount || 0)
+        }))
+        .filter(t => t.tokenAmount > 0);
+    } catch {
+      return [];
+    }
+  }
+
   public validateTradeAllocation(tradeAmountSol: number, totalBalanceSol: number): TradeValidationResult {
     const maxAllowed = totalBalanceSol * SolanaWalletService.MAX_TRADE_ALLOCATION_RATIO;
 
