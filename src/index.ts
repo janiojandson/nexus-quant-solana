@@ -7,6 +7,7 @@ import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
+import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 
 dotenv.config();
 
@@ -38,6 +39,7 @@ server.listen(PORT, () => {
 });
 
 let isRunningCycle = false;
+const antiSpamMemory = new AntiSpamMemory(60); // 60 minutos de quarentena sem incomodar
 
 async function executeAutonomousCycle(
   wallet: SolanaWalletService,
@@ -54,8 +56,9 @@ async function executeAutonomousCycle(
 
   isRunningCycle = true;
   try {
+    const memoryStats = antiSpamMemory.getStats();
     console.log(`\n====================================================`);
-    console.log(`⏱️ [${new Date().toLocaleTimeString()}] INICIANDO NOVO CICLO AUTÔNOMO 24/7`);
+    console.log(`⏱️ [${new Date().toLocaleTimeString()}] CICLO AUTÔNOMO 24/7 (Quarentena Ativa: ${memoryStats.vettedCount} tokens)`);
     console.log(`====================================================`);
 
     // Ciclo 1: Leitura de Vitalidade
@@ -71,12 +74,31 @@ async function executeAutonomousCycle(
     // Ciclo 2: Scanner On-Chain (DexScreener)
     console.log('🔍 [1/3 Scanner DexScreener] Buscando tokens em tendência na rede Solana...');
     const candidates = await scanner.scanSolanaTrends(5000);
-    console.log(`📡 Tokens qualificados encontrados na varredura: ${candidates.length}`);
+    console.log(`📡 Tokens brutos retornados: ${candidates.length}`);
 
-    if (candidates.length > 0) {
-      const topCandidate = candidates[0];
-      console.log(`🎯 Candidato em Destaque: ${topCandidate.symbol} (${topCandidate.name})`);
-      console.log(`   Mint: ${topCandidate.mint}`);
+    // Filtra candidatos eliminando infraestrutura base (SOL/USDC) e tokens em quarentena
+    const eligibleCandidates = candidates.filter(token => {
+      const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
+      if (!classification.isEligibleForMemeScan) {
+        return false;
+      }
+
+      const spamCheck = antiSpamMemory.shouldSkip(token.mint);
+      if (spamCheck.skip) {
+        return false;
+      }
+
+      return true;
+    });
+
+    console.log(`🎯 Candidatos inéditos e elegíveis nesta rodada: ${eligibleCandidates.length}`);
+
+    if (eligibleCandidates.length > 0) {
+      const topCandidate = eligibleCandidates[0];
+      const classification = TokenClassifier.classify(topCandidate.mint, topCandidate.symbol, topCandidate.liquidityUsd);
+
+      console.log(`🔥 Analisando Candidato: ${topCandidate.symbol} (${topCandidate.name})`);
+      console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
       console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
 
       // Ciclo 3: Sentinela de Risco (RugCheck + Laya)
@@ -96,7 +118,11 @@ async function executeAutonomousCycle(
 
       if (!audit.safe) {
         console.log(`   Motivo do Veto: ${audit.reason}`);
+        // Coloca em quarentena de 60 min para não incomodar com o mesmo token
+        antiSpamMemory.recordVeto(topCandidate.mint, audit.reason || 'Veto preventivo');
       } else {
+        antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
+
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
         console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando swap (0.01 SOL)...`);
         const swapSim = await jupiterEngine.executeSwap({
@@ -127,6 +153,8 @@ async function executeAutonomousCycle(
         dryRun: IS_DRY_RUN,
         txSignature
       });
+    } else {
+      console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
     }
 
     // Ciclo 5: Verificação de Reprodução Darwinista
