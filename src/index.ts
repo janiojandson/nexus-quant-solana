@@ -184,6 +184,7 @@ async function executeAutonomousCycle(
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
           amountLamports: 15000000, // 0.015 SOL fixo por entrada (Diretriz de Sobrevivência Ayla)
+          slippageBps: 150, // 1.5% tolerância para memecoins de alta volatilidade (previne 0x177e)
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });
