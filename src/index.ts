@@ -10,6 +10,7 @@ import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { PositionExitEngine } from './execution/positionExitEngine.js';
+import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 
 dotenv.config();
 
@@ -21,30 +22,68 @@ const PORT = process.env.PORT || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
-// Inicia servidor HTTP para Healthcheck do Railway
-const server = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'ONLINE',
-      agent: 'NEXUS_QUANT_SOLANA_V1',
-      wallet: OFFICIAL_PHANTOM_WALLET,
-      dryRun: IS_DRY_RUN,
-      timestamp: new Date().toISOString()
-    }));
-  } else {
-    res.writeHead(404);
-    res.end();
-  }
-});
-
-server.listen(PORT, () => {
-  console.log(`🌐 [Railway Healthcheck] Servidor ativo na porta ${PORT}`);
-});
-
 let isRunningCycle = false;
 const antiSpamMemory = new AntiSpamMemory(60); // 60 minutos de quarentena sem incomodar
 const positionEngine = new PositionExitEngine();
+
+// Estado compartilhado em memória para o Dashboard
+const latestState: DashboardState = {
+  agent: 'NEXUS_QUANT_SOLANA_V1',
+  wallet: OFFICIAL_PHANTOM_WALLET,
+  balanceSol: 0,
+  vitalityState: 'NORMAL',
+  dryRun: IS_DRY_RUN,
+  macroRegime: 'NEUTRAL_RANGING',
+  circuitBreakerActive: false,
+  activeRpcUrl: ACTIVE_SOLANA_RPC_URL.split('?')[0],
+  positions: [],
+  recentAudits: [],
+  quarantineCount: 0,
+  lastUpdated: new Date().toISOString()
+};
+
+// Inicia servidor HTTP para Healthcheck do Railway e Dashboard Visual
+const server = http.createServer((req, res) => {
+  const url = req.url || '/';
+
+  // Rota Healthcheck padrão do Railway
+  if (url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ONLINE',
+      agent: latestState.agent,
+      wallet: latestState.wallet,
+      balanceSol: latestState.balanceSol,
+      positionsCount: latestState.positions.length,
+      timestamp: new Date().toISOString()
+    }));
+    return;
+  }
+
+  // Rota API JSON para integrações (ex: MarketFlow Pro)
+  if (url === '/api/status') {
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*'
+    });
+    res.end(JSON.stringify(latestState, null, 2));
+    return;
+  }
+
+  // Rota Dashboard Web Visual
+  if (url === '/' || url === '/dashboard') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(renderDashboardHtml(latestState));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 [Railway Healthcheck & Dashboard] Servidor ativo na porta ${PORT}`);
+});
 
 async function executeAutonomousCycle(
   wallet: SolanaWalletService,
@@ -72,6 +111,12 @@ async function executeAutonomousCycle(
     const balanceSol = await wallet.getBalanceSol();
     const vitalityState = getAgentVitalityState(balanceSol);
     console.log(`📊 Saldo On-Chain: ${balanceSol.toFixed(4)} SOL | Estado Vital: [${vitalityState}]`);
+
+    // Sincroniza estado para o Dashboard Web
+    latestState.balanceSol = balanceSol;
+    latestState.vitalityState = vitalityState;
+    latestState.quarantineCount = memoryStats.vettedCount;
+    latestState.lastUpdated = new Date().toISOString();
 
     if (vitalityState === VitalityState.DEAD) {
       console.log('⚠️ [Vitality: DEAD] Saldo zerado. Aguardando aporte para operar.');
@@ -101,6 +146,24 @@ async function executeAutonomousCycle(
       }
     }
 
+    // Atualiza lista de posições no Dashboard
+    latestState.positions = positionEngine.getAllPositions().map(p => {
+      const exitSig = positionEngine.evaluateExit(p.mint, p.entryPriceUsd);
+      return {
+        mint: p.mint,
+        symbol: p.symbol,
+        tokenAmount: p.tokenAmount,
+        entryPriceUsd: p.entryPriceUsd,
+        currentPriceUsd: exitSig.currentPriceUsd,
+        pnlPct: exitSig.pnlPct,
+        stopLossPct: p.stopLossPct,
+        takeProfitPct: p.takeProfitPct,
+        entryTimestamp: p.entryTimestamp,
+        dexScreenerUrl: `https://dexscreener.com/solana/${p.mint}`,
+        solscanUrl: `https://solscan.io/token/${p.mint}`
+      };
+    });
+
     // Ciclo 1.8: Conexão Explícita ao Macro Sentinel (:4005)
     let macroRegime = 'NEUTRAL_RANGING';
     let isCircuitBreaker = false;
@@ -115,6 +178,9 @@ async function executeAutonomousCycle(
     } catch {
       console.log(`⚠️ [AVISO] Sentinel inacessível, mantendo operação defensiva`);
     }
+
+    latestState.macroRegime = macroRegime;
+    latestState.circuitBreakerActive = isCircuitBreaker;
 
     if (isCircuitBreaker) {
       console.log(`🛑 [CIRCUIT BREAKER ATIVO] Mercado em estresse macro (${macroRegime}). Scanner e swaps pausados.`);
@@ -230,6 +296,17 @@ async function executeAutonomousCycle(
         dryRun: IS_DRY_RUN,
         txSignature
       });
+
+      // Registra no histórico do Dashboard
+      latestState.recentAudits.unshift({
+        mint: topCandidate.mint,
+        symbol: topCandidate.symbol,
+        isSafe: audit.safe,
+        score: audit.score,
+        reason: audit.reason,
+        timestamp: Date.now()
+      });
+      if (latestState.recentAudits.length > 20) latestState.recentAudits.pop();
     } else {
       console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
     }
