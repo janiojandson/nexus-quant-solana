@@ -1,0 +1,33 @@
+{
+  "name": "nexus-quant-solana",
+  "version": "1.0.0",
+  "description": "Agente Economico Soberano e Gestor Quantitativo Solana com Sobrevivencia Darwinista",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx --test src/**/*.test.ts"
+  },
+  "keywords": [
+    "solana",
+    "autonomous-agent",
+    "trading",
+    "dex",
+    "jupiter",
+    "laya",
+    "memecoins"
+  ],
+  "author": "Janio Jandson",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/web3.js": "^1.98.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
