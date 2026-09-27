@@ -127,14 +127,24 @@ async function executeAutonomousCycle(
       return;
     }
 
-    // Ciclo 1.5: Monitoramento de Posições Abertas (Take-Profit & Stop-Loss)
+    // Ciclo 1.5: Monitoramento de Posições Abertas (Take-Profit & Stop-Loss com Preço ao Vivo)
+    const positionEvaluations = new Map<string, { currentPriceUsd: number; pnlPct: number }>();
+
     if (openPositions.length > 0) {
-      console.log(`📊 [Gestor de Posições] Monitorando ${openPositions.length} posições abertas...`);
+      console.log(`📊 [Gestor de Posições] Monitorando ${openPositions.length} posições abertas com cotação em tempo real...`);
       for (const pos of openPositions) {
-        // Simula ou busca preço atual (usando o preço salvo com pequena flutuação ou scanner)
-        const exitSignal = positionEngine.evaluateExit(pos.mint, pos.entryPriceUsd);
+        // Busca cotação real via DexScreener
+        const livePrice = await scanner.fetchCurrentTokenPriceUsd(pos.mint);
+        const currentPriceUsd = (livePrice && livePrice > 0) ? livePrice : pos.entryPriceUsd;
+
+        const exitSignal = positionEngine.evaluateExit(pos.mint, currentPriceUsd);
+        positionEvaluations.set(pos.mint, { currentPriceUsd, pnlPct: exitSignal.pnlPct });
+
+        const pnlDisplay = (exitSignal.pnlPct * 100).toFixed(2);
+        console.log(`   🏷️ [${pos.symbol}] Entrada: $${pos.entryPriceUsd.toFixed(6)} | Atual: $${currentPriceUsd.toFixed(6)} | PnL: ${pnlDisplay}%`);
+
         if (exitSignal.shouldExit) {
-          console.log(`🎯 [Gatilho de Saída Ativado] ${pos.symbol}: ${exitSignal.type} | PnL: ${(exitSignal.pnlPct * 100).toFixed(2)}%`);
+          console.log(`🎯 [Gatilho de Saída Ativado] ${pos.symbol}: ${exitSignal.type} | PnL: ${pnlDisplay}%`);
           console.log(`⚡ [Jupiter V6] Executando Swap de Venda de Volta para SOL...`);
           // Executa swap de saída: Token -> SOL
           const exitSwap = await jupiterEngine.executeSwap({
@@ -167,16 +177,16 @@ async function executeAutonomousCycle(
       }
     }
 
-    // Atualiza lista de posições e histórico fechado no Dashboard
+    // Atualiza lista de posições e histórico fechado no Dashboard com preços ao vivo
     latestState.positions = positionEngine.getAllPositions().map(p => {
-      const exitSig = positionEngine.evaluateExit(p.mint, p.entryPriceUsd);
+      const evalData = positionEvaluations.get(p.mint) || { currentPriceUsd: p.entryPriceUsd, pnlPct: 0 };
       return {
         mint: p.mint,
         symbol: p.symbol,
         tokenAmount: p.tokenAmount,
         entryPriceUsd: p.entryPriceUsd,
-        currentPriceUsd: exitSig.currentPriceUsd,
-        pnlPct: exitSig.pnlPct,
+        currentPriceUsd: evalData.currentPriceUsd,
+        pnlPct: evalData.pnlPct,
         stopLossPct: p.stopLossPct,
         takeProfitPct: p.takeProfitPct,
         entryTimestamp: p.entryTimestamp,

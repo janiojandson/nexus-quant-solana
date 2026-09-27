@@ -112,4 +112,21 @@ export class DexScreenerScanner {
       return [];
     }
   }
+
+  public async fetchCurrentTokenPriceUsd(mint: string): Promise<number | null> {
+    try {
+      const res = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+      const data = res.data;
+      const pairs = Array.isArray(data) ? data : (data?.pairs || []);
+      if (!Array.isArray(pairs) || pairs.length === 0) {
+        return null;
+      }
+      // Ordena pelas pools com maior liquidez para garantir preço representativo
+      const sortedPairs = [...pairs].sort((a, b) => Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0));
+      const bestPrice = Number(sortedPairs[0]?.priceUsd || 0);
+      return bestPrice > 0 ? bestPrice : null;
+    } catch {
+      return null;
+    }
+  }
 }
