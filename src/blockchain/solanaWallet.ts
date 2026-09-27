@@ -1,4 +1,5 @@
 import { Keypair, Connection, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import bs58 from 'bs58';
 
 export interface WalletServiceConfig {
   secretKeyRaw: string;
@@ -24,13 +25,22 @@ export class SolanaWalletService {
 
   private parseKeypair(raw: string): Keypair {
     try {
-      const trimmed = raw.trim();
+      const trimmed = (raw || '').trim();
       if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
         const secretBytes = Uint8Array.from(JSON.parse(trimmed));
         return Keypair.fromSecretKey(secretBytes);
       }
-      // Se for formato Base58
-      return Keypair.fromSecretKey(Buffer.from(trimmed, 'hex'));
+      if (trimmed.length > 0) {
+        // Tenta decodificar Base58 (formato padrão Phantom)
+        try {
+          const decoded = bs58.decode(trimmed);
+          return Keypair.fromSecretKey(decoded);
+        } catch {
+          // Fallback para buffer hex se aplicável
+          return Keypair.fromSecretKey(Buffer.from(trimmed, 'hex'));
+        }
+      }
+      return Keypair.generate();
     } catch {
       // Fallback para geracao segura em mock/test se nao parsear
       return Keypair.generate();

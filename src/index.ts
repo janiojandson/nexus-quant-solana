@@ -190,7 +190,10 @@ async function executeAutonomousCycle(
 
         txSignature = swapSim.txSignature;
         console.log(`   Status do Swap: ${swapSim.status}`);
-        console.log(`   Assinatura Tx: ${swapSim.txSignature}`);
+        if (swapSim.error) {
+          console.log(`   ⚠️ Erro Swap: ${swapSim.error}`);
+        }
+        console.log(`   Assinatura Tx: ${swapSim.txSignature || 'N/A'}`);
         console.log(`   Retorno: ${swapSim.outAmount.toLocaleString()} tokens`);
 
         // Adiciona à gestão de posições ativas com Take-Profit (+50%) e Stop-Loss (-20%)
