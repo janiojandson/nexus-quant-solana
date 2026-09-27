@@ -19,6 +19,7 @@ const IS_DRY_RUN = process.env.DRY_RUN_MODE !== 'false';
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const PORT = process.env.PORT || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
+const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
 // Inicia servidor HTTP para Healthcheck do Railway
 const server = http.createServer((req, res) => {
@@ -184,7 +185,7 @@ async function executeAutonomousCycle(
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
           amountLamports: 15000000, // 0.015 SOL fixo por entrada (Diretriz de Sobrevivência Ayla)
-          slippageBps: 250, // 2.5% tolerância para memecoins de alta volatilidade (previne 0x177e)
+          slippageBps: 400, // 4.0% tolerância para memecoins de alta velocidade/pump.fun (evita 0x177e)
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });
@@ -258,11 +259,12 @@ async function main() {
   console.log(`🪙 Carteira Phantom Oficial: ${OFFICIAL_PHANTOM_WALLET}`);
   console.log(`🛡️ Modo Operacional: ${IS_DRY_RUN ? 'SIMULAÇÃO ATIVA (DRY-RUN 🟢)' : 'EXECUÇÃO REAL ON-CHAIN ⚠️'}`);
   console.log(`⏱️ Intervalo de Varredura: ${SCAN_INTERVAL_MS / 1000}s`);
+  console.log(`⚡ RPC Solana Ativa: ${ACTIVE_SOLANA_RPC_URL.split('?')[0]}`);
   console.log('====================================================');
 
   const wallet = new SolanaWalletService({
     secretKeyRaw: SECRET_KEY_RAW,
-    rpcUrl: process.env.SOLANA_RPC_URL
+    rpcUrl: ACTIVE_SOLANA_RPC_URL
   });
 
   console.log(`🔑 Keypair Derivado On-Chain: ${wallet.getPublicKey()}`);
@@ -278,7 +280,7 @@ async function main() {
   });
 
   const jupiterEngine = new JupiterExecutionEngine({
-    rpcUrl: process.env.SOLANA_RPC_URL,
+    rpcUrl: ACTIVE_SOLANA_RPC_URL,
     isDryRun: IS_DRY_RUN
   });
 
