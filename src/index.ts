@@ -209,6 +209,9 @@ async function executeAutonomousCycle(
             takeProfitPct: 0.50
           });
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (SL: -20% | TP: +50%)`);
+        } else {
+          // Se o swap falhou (ex: pool sem liquidez no momento ou slippage), isola em quarentena temporária
+          antiSpamMemory.recordVeto(topCandidate.mint, `Swap Jupiter falhou: ${swapSim.error || '0x177e'}`);
         }
       }
 
