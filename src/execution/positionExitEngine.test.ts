@@ -63,3 +63,47 @@ test('PositionExitEngine: deve manter HOLD dentro da margem de oscilação norma
   assert.strictEqual(signal.shouldExit, false);
   assert.strictEqual(signal.type, 'HOLD');
 });
+
+test('PositionExitEngine: deve disparar STOP_LOSS quando valor em SOL cair <= 80% do investido', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TokenSolStop';
+
+  engine.addPosition({
+    mint,
+    symbol: 'MEME',
+    tokenAmount: 10000,
+    entryPriceUsd: 0.0001,
+    entryTimestamp: Date.now(),
+    stopLossPct: -0.20,
+    takeProfitPct: 0.50,
+    entrySol: 0.015 // 0.015 SOL investidos
+  });
+
+  // Se o valor de saída for 0.0119 SOL (~ -20.67%)
+  const signal = engine.evaluateExitBySol(mint, 0.0119);
+  assert.strictEqual(signal.shouldExit, true);
+  assert.strictEqual(signal.type, 'STOP_LOSS');
+  assert.ok(signal.pnlPct <= -0.20);
+});
+
+test('PositionExitEngine: deve disparar TAKE_PROFIT quando valor em SOL atingir >= 150% do investido', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TokenSolTP';
+
+  engine.addPosition({
+    mint,
+    symbol: 'MEME2',
+    tokenAmount: 10000,
+    entryPriceUsd: 0.0001,
+    entryTimestamp: Date.now(),
+    stopLossPct: -0.20,
+    takeProfitPct: 0.50,
+    entrySol: 0.015
+  });
+
+  // Se o valor de saída for 0.023 SOL (+53.3%)
+  const signal = engine.evaluateExitBySol(mint, 0.023);
+  assert.strictEqual(signal.shouldExit, true);
+  assert.strictEqual(signal.type, 'TAKE_PROFIT');
+  assert.ok(signal.pnlPct >= 0.50);
+});

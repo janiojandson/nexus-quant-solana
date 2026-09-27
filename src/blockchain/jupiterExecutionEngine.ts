@@ -39,6 +39,15 @@ export class JupiterExecutionEngine {
     this.swapUrl = process.env.JUPITER_SWAP_URL || 'https://public.jupiterapi.com/swap';
   }
 
+  public async getQuote(inputMint: string, outputMint: string, amountLamports: number, slippageBps = 50) {
+    return this.dexAggregator.getQuote({
+      inputMint,
+      outputMint,
+      amountLamports,
+      slippageBps
+    });
+  }
+
   public async executeSwap(req: SwapExecutionRequest): Promise<SwapExecutionResponse> {
     try {
       // 1. Obter Cotação Oficial da Jupiter

@@ -79,6 +79,7 @@ export function renderDashboardHtml(state: DashboardState): string {
           SL: ${(p.stopLossPct * 100).toFixed(0)}% | TP: +${(p.takeProfitPct * 100).toFixed(0)}%
         </td>
         <td style="padding: 14px 16px; text-align: right;">
+          <button onclick="emergencyExit('${p.mint}', '${p.symbol}')" style="margin-right: 8px; font-size: 11px; font-weight: 700; color: #FFFFFF; background: #EF4444; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#DC2626'" onmouseout="this.style.background='#EF4444'">🚨 Vender a Mercado</button>
           <a href="${p.dexScreenerUrl}" target="_blank" style="margin-right: 8px; font-size: 12px; color: #38BDF8; text-decoration: none; padding: 4px 8px; background: rgba(56,189,248,0.1); border-radius: 4px;">DexScreener ↗</a>
           <a href="https://solscan.io/token/${p.mint}" target="_blank" style="font-size: 12px; color: #A855F7; text-decoration: none; padding: 4px 8px; background: rgba(168,85,247,0.1); border-radius: 4px;">Solana Explorer ↗</a>
         </td>
@@ -178,7 +179,10 @@ export function renderDashboardHtml(state: DashboardState): string {
         <h1 style="font-size: 22px; font-weight: 700; letter-spacing: -0.02em;">🚀 Nexus Quant Solana</h1>
         <div class="status-badge"><div class="pulse-dot"></div> 24/7 ONLINE</div>
       </div>
-      <div>
+      <div style="display: flex; align-items: center; gap: 16px;">
+        <button onclick="liquidateAll()" style="font-size: 13px; font-weight: 700; color: #FFFFFF; background: #DC2626; border: 1px solid #EF4444; padding: 8px 16px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 0 15px rgba(220,38,38,0.4);" onmouseover="this.style.background='#B91C1C'" onmouseout="this.style.background='#DC2626'">
+          <span>🛑</span> Liquidar Tudo (Panic Button)
+        </button>
         <span style="font-size: 12px; color: #64748B;">Auto-refresh: 5s | Última leitura: ${new Date(state.lastUpdated).toLocaleTimeString()}</span>
       </div>
     </div>
@@ -293,6 +297,46 @@ export function renderDashboardHtml(state: DashboardState): string {
       </div>
     </div>
   </div>
+
+  <script>
+    async function emergencyExit(mint, symbol) {
+      if (!confirm('Deseja vender imediatamente a mercado o token ' + symbol + ' via Jupiter, resgatar a caução da ATA e colocá-lo em quarentena de 24h?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/positions/' + encodeURIComponent(mint) + '/exit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert('✅ Venda de ' + symbol + ' executada com sucesso! Tx: ' + (data.txSignature || 'OK'));
+          window.location.reload();
+        } else {
+          alert('❌ Falha na venda de ' + symbol + ': ' + (data.error || 'Erro desconhecido'));
+        }
+      } catch (err) {
+        alert('❌ Erro de conexão ao solicitar venda: ' + err.message);
+      }
+    }
+
+    async function liquidateAll() {
+      if (!confirm('⚠️ ALERTA MÁXIMO: Deseja liquidar TODAS as posições em custódia imediatamente a mercado, resgatar as contas ATA e pausar as entradas?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/positions/liquidate-all', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+        alert('🛑 Ordem de liquidação global disparada! ' + (data.message || ''));
+        window.location.reload();
+      } catch (err) {
+        alert('❌ Erro de conexão na liquidação: ' + err.message);
+      }
+    }
+  </script>
 </body>
 </html>`;
 }

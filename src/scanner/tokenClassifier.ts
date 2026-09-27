@@ -60,13 +60,13 @@ export class TokenClassifier {
 }
 
 export class AntiSpamMemory {
-  // Mapa de Mints já analisados -> timestamp de expiração
-  private vettedTokens = new Map<string, { timestamp: number; reason: string }>();
+  // Mapa de Mints já analisados -> timestamp de expiração e expiração personalizada
+  private vettedTokens = new Map<string, { timestamp: number; reason: string; expiresAt: number }>();
   private approvedTokens = new Map<string, { timestamp: number; score: number }>();
-  private ttlMs: number;
+  private defaultTtlMs: number;
 
   constructor(ttlMinutes: number = 60) {
-    this.ttlMs = ttlMinutes * 60 * 1000;
+    this.defaultTtlMs = ttlMinutes * 60 * 1000;
   }
 
   public shouldSkip(mint: string): { skip: boolean; reason?: string } {
@@ -75,8 +75,9 @@ export class AntiSpamMemory {
     // Checa veto recente
     const veto = this.vettedTokens.get(mint);
     if (veto) {
-      if (now - veto.timestamp < this.ttlMs) {
-        return { skip: true, reason: `Em quarentena (vetado recentemente): ${veto.reason}` };
+      if (now < veto.expiresAt) {
+        const remainingHours = Math.ceil((veto.expiresAt - now) / (60 * 60 * 1000));
+        return { skip: true, reason: `Em quarentena (${remainingHours}h restantes): ${veto.reason}` };
       }
       this.vettedTokens.delete(mint);
     }
@@ -84,7 +85,7 @@ export class AntiSpamMemory {
     // Checa aprovação recente
     const approved = this.approvedTokens.get(mint);
     if (approved) {
-      if (now - approved.timestamp < this.ttlMs) {
+      if (now - approved.timestamp < this.defaultTtlMs) {
         return { skip: true, reason: `Já auditado e aprovado recentemente com Score ${approved.score}/100.` };
       }
       this.approvedTokens.delete(mint);
@@ -93,8 +94,10 @@ export class AntiSpamMemory {
     return { skip: false };
   }
 
-  public recordVeto(mint: string, reason: string): void {
-    this.vettedTokens.set(mint, { timestamp: Date.now(), reason });
+  public recordVeto(mint: string, reason: string, customTtlMs?: number): void {
+    const now = Date.now();
+    const expiresAt = now + (customTtlMs !== undefined ? customTtlMs : this.defaultTtlMs);
+    this.vettedTokens.set(mint, { timestamp: now, reason, expiresAt });
   }
 
   public recordApproval(mint: string, score: number): void {

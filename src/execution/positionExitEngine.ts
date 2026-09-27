@@ -6,6 +6,7 @@ export interface PositionTracking {
   entryTimestamp: number;
   stopLossPct: number;    // Ex: -20% (-0.20)
   takeProfitPct: number;  // Ex: +50% (+0.50)
+  entrySol?: number;      // Ex: 0.015 SOL investidos na entrada
 }
 
 export interface ClosedTrade {
@@ -20,6 +21,7 @@ export interface ClosedTrade {
   pnlUsdEst: number;
   exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'HOLD';
   txSignature?: string;
+  pnlSolEst?: number;
 }
 
 export interface ExitSignal {
@@ -56,6 +58,48 @@ export class PositionExitEngine {
 
   public removePosition(mint: string): void {
     this.activePositions.delete(mint);
+  }
+
+  public evaluateExitBySol(mint: string, currentSolValue: number): ExitSignal {
+    const position = this.activePositions.get(mint);
+    const entrySol = position?.entrySol || 0.015;
+    if (!position || entrySol <= 0) {
+      return { shouldExit: false, type: 'HOLD', pnlPct: 0, currentPriceUsd: 0 };
+    }
+
+    const pnlPct = (currentSolValue - entrySol) / entrySol;
+
+    // 🛡️ Trava de Capital Ayla: Breakeven (+0R) automático ao atingir +40% de valorização
+    if (pnlPct >= 0.40 && position.stopLossPct < 0) {
+      position.stopLossPct = 0.0;
+    }
+
+    // Gatilho de Take-Profit (Ex: >= +50%)
+    if (pnlPct >= position.takeProfitPct) {
+      return {
+        shouldExit: true,
+        type: 'TAKE_PROFIT',
+        pnlPct,
+        currentPriceUsd: currentSolValue
+      };
+    }
+
+    // Gatilho de Stop-Loss (Ex: <= -20% ou <= 0.0% se em Breakeven)
+    if (pnlPct <= position.stopLossPct) {
+      return {
+        shouldExit: true,
+        type: 'STOP_LOSS',
+        pnlPct,
+        currentPriceUsd: currentSolValue
+      };
+    }
+
+    return {
+      shouldExit: false,
+      type: 'HOLD',
+      pnlPct,
+      currentPriceUsd: currentSolValue
+    };
   }
 
   public evaluateExit(mint: string, currentPriceUsd: number): ExitSignal {

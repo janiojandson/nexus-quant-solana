@@ -115,4 +115,39 @@ export class SolanaWalletService {
       network: 'solana-mainnet'
     };
   }
+
+  public async closeTokenAccount(mintAddress: string): Promise<{ txSignature: string | null; success: boolean }> {
+    try {
+      const { PublicKey, Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
+      const { createCloseAccountInstruction, getAssociatedTokenAddress } = await import('@solana/spl-token');
+
+      const mint = new PublicKey(mintAddress);
+      const owner = this.keypair.publicKey;
+      const ata = await getAssociatedTokenAddress(mint, owner);
+
+      // Verifica se a conta existe antes de tentar fechar
+      const accountInfo = await this.connection.getAccountInfo(ata);
+      if (!accountInfo) {
+        return { txSignature: null, success: true };
+      }
+
+      const closeIx = createCloseAccountInstruction(
+        ata,          // Conta associada a ser fechada
+        owner,        // Destino do SOL de aluguel (a própria carteira Phantom)
+        owner         // Proprietário/Autoridade da conta
+      );
+
+      const transaction = new Transaction().add(closeIx);
+      const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = owner;
+
+      const txid = await sendAndConfirmTransaction(this.connection, transaction, [this.keypair]);
+      console.log(`💰 [Rent Exemption Resgatado] ATA de ${mintAddress} fechada com sucesso. ~0.00204 SOL devolvidos! Tx: ${txid}`);
+      return { txSignature: txid, success: true };
+    } catch (err: any) {
+      console.warn(`⚠️ [Aviso Fechamento ATA] Não foi possível fechar ATA de ${mintAddress}: ${err?.message || err}`);
+      return { txSignature: null, success: false };
+    }
+  }
 }
