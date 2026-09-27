@@ -6,6 +6,7 @@ import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
 import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
+import { SolanaPostgresRepository } from './database/postgresClient.js';
 
 dotenv.config();
 
@@ -43,7 +44,8 @@ async function executeAutonomousCycle(
   scanner: DexScreenerScanner,
   gatekeeper: MemeRiskGatekeeper,
   jupiterEngine: JupiterExecutionEngine,
-  reproduction: ReproductionEngine
+  reproduction: ReproductionEngine,
+  postgresRepo: SolanaPostgresRepository
 ) {
   if (isRunningCycle) {
     console.log('⏳ Ciclo anterior ainda em processamento. Pulando iteração...');
@@ -90,6 +92,8 @@ async function executeAutonomousCycle(
       console.log(`   Veredito de Segurança: ${audit.safe ? 'APROVADO ✅' : 'VETADO ⛔'}`);
       console.log(`   Score: ${audit.score}/100 | Validador: ${audit.validatedBy}`);
 
+      let txSignature: string | null = null;
+
       if (!audit.safe) {
         console.log(`   Motivo do Veto: ${audit.reason}`);
       } else {
@@ -103,10 +107,26 @@ async function executeAutonomousCycle(
           keypair: wallet.getKeypair()
         });
 
+        txSignature = swapSim.txSignature;
         console.log(`   Status do Swap: ${swapSim.status}`);
         console.log(`   Assinatura Tx: ${swapSim.txSignature}`);
         console.log(`   Retorno: ${swapSim.outAmount.toLocaleString()} tokens`);
       }
+
+      // Persistência no Postgres Central (Stateless Event Store)
+      await postgresRepo.saveAudit({
+        mint: topCandidate.mint,
+        symbol: topCandidate.symbol,
+        name: topCandidate.name,
+        liquidityUsd: topCandidate.liquidityUsd,
+        priceUsd: topCandidate.priceUsd,
+        isSafe: audit.safe,
+        score: audit.score,
+        validatedBy: audit.validatedBy,
+        vetoReason: audit.reason || null,
+        dryRun: IS_DRY_RUN,
+        txSignature
+      });
     }
 
     // Ciclo 5: Verificação de Reprodução Darwinista
@@ -153,13 +173,14 @@ async function main() {
   });
 
   const reproduction = new ReproductionEngine();
+  const postgresRepo = new SolanaPostgresRepository();
 
   // Executa o primeiro ciclo imediatamente
-  await executeAutonomousCycle(wallet, scanner, gatekeeper, jupiterEngine, reproduction);
+  await executeAutonomousCycle(wallet, scanner, gatekeeper, jupiterEngine, reproduction, postgresRepo);
 
   // Agenda execuções contínuas em loop infinito 24/7
   setInterval(() => {
-    executeAutonomousCycle(wallet, scanner, gatekeeper, jupiterEngine, reproduction);
+    executeAutonomousCycle(wallet, scanner, gatekeeper, jupiterEngine, reproduction, postgresRepo);
   }, SCAN_INTERVAL_MS);
 }
 
