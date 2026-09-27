@@ -57,6 +57,8 @@ export interface DashboardState {
     isSafe: boolean;
     score: number;
     reason?: string;
+    /** Preenchido quando o token foi aprovado mas o swap falhou (ex: 0x177e) */
+    swapFailReason?: string;
     timestamp: number;
   }>;
   quarantineCount: number;
@@ -82,8 +84,8 @@ export function renderDashboardHtml(state: DashboardState): string {
         </td>
         <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${Number(p.tokenAmount).toLocaleString()}</td>
         <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(p.entryPriceUsd)}</td>
-        <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(p.currentPriceUsd)}</td>
-        <td style="padding: 14px 16px; font-weight: 700; font-family: monospace; color: ${pnlColor(p.pnlPct)};">
+        <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;" id="price-${p.mint}">${formatUsd(p.currentPriceUsd)}</td>
+        <td id="pnl-${p.mint}" style="padding: 14px 16px; font-weight: 700; font-family: monospace; color: ${pnlColor(p.pnlPct)};">
           ${p.pnlPct >= 0 ? '+' : ''}${(p.pnlPct * 100).toFixed(2)}%
         </td>
         <td style="padding: 14px 16px; font-size: 12px; font-family: monospace; color: #94A3B8;">
@@ -152,12 +154,15 @@ export function renderDashboardHtml(state: DashboardState): string {
         </a>
       </td>
       <td style="padding: 10px 16px;">
-        <span style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: ${a.isSafe ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)'}; color: ${a.isSafe ? '#10B981' : '#EF4444'};">
-          ${a.isSafe ? 'APROVADO' : 'VETADO'}
-        </span>
+        ${a.isSafe && a.swapFailReason
+          ? `<span style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(234,179,8,0.15); color: #EAB308;">APROVADO (Falha no Swap)</span>`
+          : `<span style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: ${a.isSafe ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)'}; color: ${a.isSafe ? '#10B981' : '#EF4444'};">${a.isSafe ? 'APROVADO' : 'VETADO'}</span>`
+        }
       </td>
       <td style="padding: 10px 16px; font-family: monospace; color: #CBD5E1;">${a.score}/100</td>
-      <td style="padding: 10px 16px; color: #94A3B8; font-size: 12px;">${a.reason || 'Verificação concluída'}</td>
+      <td style="padding: 10px 16px; color: #94A3B8; font-size: 12px;">${
+        a.swapFailReason ? `⚠️ Swap falhou: ${a.swapFailReason}` : (a.reason || 'Verificação concluída')
+      }</td>
       <td style="padding: 10px 16px; text-align: right; color: #64748B; font-size: 11px;">
         <a href="https://dexscreener.com/solana/${a.mint}" target="_blank" style="color: #38BDF8; text-decoration: none; margin-right: 8px;">DexScreener</a>
         <a href="https://solscan.io/token/${a.mint}" target="_blank" style="color: #A855F7; text-decoration: none;">Solana</a>
@@ -171,7 +176,7 @@ export function renderDashboardHtml(state: DashboardState): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nexus Quant Solana - Terminal Institucional</title>
-  <meta http-equiv="refresh" content="5">
+  <!-- SEM meta refresh: atualização via JS polling assíncrono a cada 4s -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
@@ -377,8 +382,8 @@ export function renderDashboardHtml(state: DashboardState): string {
         });
         const data = await res.json();
         if (data.success) {
-          alert('✅ Venda de ' + symbol + ' executada com sucesso! Tx: ' + (data.txSignature || 'OK'));
-          window.location.reload();
+          alert('✅ Venda de ' + symbol + ' executada! Tx: ' + (data.txSignature || 'OK') + ' — posição removida em até 4s.');
+          // Sem reload: polling assíncrono irá remover a linha em até 4s
         } else {
           alert('❌ Falha na venda de ' + symbol + ': ' + (data.error || 'Erro desconhecido'));
         }
@@ -397,7 +402,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         });
         const data = await res.json();
         alert('🛑 Ordem de liquidação global disparada! ' + (data.message || ''));
-        window.location.reload();
+        // Sem reload — o polling assíncrono irá atualizar os dados automaticamente em até 4s
       } catch (err) {
         alert('❌ Erro de conexão na liquidação: ' + err.message);
       }
@@ -415,8 +420,8 @@ export function renderDashboardHtml(state: DashboardState): string {
         });
         const data = await res.json();
         if (data.success) {
-          alert('✅ Liquidação de ' + symbol + ' concluída com sucesso! Tx: ' + (data.txSignature || 'OK'));
-          window.location.reload();
+          alert('✅ Liquidação de ' + symbol + ' concluída! Tx: ' + (data.txSignature || 'OK') + ' — dados atualizarão em até 4s.');
+          // Sem reload: polling assíncrono atualiza automaticamente
         } else {
           alert('❌ Falha na liquidação: ' + (data.error || 'Erro desconhecido'));
         }
@@ -424,6 +429,53 @@ export function renderDashboardHtml(state: DashboardState): string {
         alert('❌ Erro de conexão ao solicitar liquidação: ' + err.message);
       }
     }
+  </script>
+
+  <script>
+    // ── Polling Assíncrono sem Reload de Página (a cada 4s) ──────────────────
+    // Atualiza os cards de saldo/vitalidade e PnL das posições abertas
+    // sem causar piscar de tela ou resetar o scroll do usuário
+    const POLL_INTERVAL_MS = 4000;
+
+    async function pollDashboard() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // Atualiza timestamp de atualização
+        const tsEl = document.getElementById('last-updated');
+        if (tsEl) tsEl.textContent = new Date(data.lastUpdated || Date.now()).toLocaleTimeString();
+
+        // Atualiza saldo SOL
+        const balEl = document.getElementById('balance-sol');
+        if (balEl && data.balanceSol !== undefined) {
+          balEl.textContent = Number(data.balanceSol).toFixed(4) + ' SOL';
+        }
+
+        // Atualiza linhas de posição aberta (PnL e preço atual)
+        if (data.positions && Array.isArray(data.positions)) {
+          data.positions.forEach(pos => {
+            const pnlEl = document.getElementById('pnl-' + pos.mint);
+            const priceEl = document.getElementById('price-' + pos.mint);
+            if (pnlEl) {
+              const pct = (pos.pnlPct * 100).toFixed(2);
+              pnlEl.textContent = (pos.pnlPct >= 0 ? '+' : '') + pct + '%';
+              pnlEl.style.color = pos.pnlPct >= 0 ? '#10B981' : '#EF4444';
+            }
+            if (priceEl) {
+              priceEl.textContent = '$' + Number(pos.currentPriceUsd).toFixed(6);
+            }
+          });
+        }
+      } catch (_) {
+        // Silencioso: RPC pode ter latência pontual
+      }
+    }
+
+    // Inicia o polling imediatamente e repete a cada POLL_INTERVAL_MS
+    pollDashboard();
+    setInterval(pollDashboard, POLL_INTERVAL_MS);
   </script>
 </body>
 </html>`;

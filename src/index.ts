@@ -340,7 +340,7 @@ async function runUltraFastExitMonitor() {
           pos.mint,
           'So11111111111111111111111111111111111111112', // SOL
           tokenLamports,
-          50 // 0.5% slippage
+          400 // 4.0% — reflete preço real de liquidação em memecoins voláteis
         );
 
         const currentSolValue = (quote.outAmount || 0) / 1e9;
@@ -576,7 +576,10 @@ async function executeAutonomousCycle() {
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (SL: -20% | TP: +50%)`);
           updateDashboardViews();
         } else {
-          antiSpamMemory.recordVeto(topCandidate.mint, `Swap Jupiter falhou: ${swapSim.error || '0x177e'}`);
+          const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';
+          antiSpamMemory.recordVeto(topCandidate.mint, `Swap Jupiter falhou: ${failReason}`);
+          // Registra falha no dashboard como auditoria com swapFailReason visivel
+          latestState.recentAudits[0] = { ...latestState.recentAudits[0], swapFailReason: failReason } as any;
         }
       }
 
@@ -601,8 +604,9 @@ async function executeAutonomousCycle() {
         isSafe: audit.safe,
         score: audit.score,
         reason: audit.reason,
+        swapFailReason: undefined, // preenchido abaixo se o swap falhar
         timestamp: Date.now()
-      });
+      } as any);
       if (latestState.recentAudits.length > 20) latestState.recentAudits.pop();
     } else {
       console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');

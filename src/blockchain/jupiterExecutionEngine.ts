@@ -8,7 +8,9 @@ export interface SwapExecutionRequest {
   amountLamports: number;
   userPublicKey: string;
   keypair?: Keypair;
-  /** Tolerância de slippage em basis points. Padrão compra: 50 (0.5%). Saída de emergência: 500 (5.0%) */
+  /** Tolerância de slippage em basis points.
+   *  Compra padrão: 400bps (4.0%) — obrigatório para memecoins Solana evitar erro 0x177e.
+   *  Saída de emergência: 500bps (5.0%) via parâmetro explícito. */
   slippageBps?: number;
   /** Nível de prioridade para a taxa de gas: 'medium' (compra), 'high' (saída de emergência) */
   priorityLevel?: 'low' | 'medium' | 'high' | 'veryHigh';
@@ -42,7 +44,7 @@ export class JupiterExecutionEngine {
     this.swapUrl = process.env.JUPITER_SWAP_URL || 'https://public.jupiterapi.com/swap';
   }
 
-  public async getQuote(inputMint: string, outputMint: string, amountLamports: number, slippageBps = 50) {
+  public async getQuote(inputMint: string, outputMint: string, amountLamports: number, slippageBps = 400) {
     return this.dexAggregator.getQuote({
       inputMint,
       outputMint,
@@ -58,7 +60,7 @@ export class JupiterExecutionEngine {
         inputMint: req.inputMint,
         outputMint: req.outputMint,
         amountLamports: req.amountLamports,
-        slippageBps: req.slippageBps || 50
+        slippageBps: req.slippageBps ?? 400  // Padrão memecoin: 400bps (4.0%). Saída: 500bps via parâmetro
       });
 
       // 2. Se for Modo Simulação (DRY RUN): Retorna sucesso teórico sem gastar SOL
