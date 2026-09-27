@@ -15,12 +15,13 @@ export interface SecurityAuditResult {
   safe: boolean;
   reason?: string;
   score: number; // 0 a 100
-  validatedBy: 'AYLA_LAYA_ENGINE' | 'RUGCHECK_API' | 'LOCAL_HEURISTICS_FALLBACK';
+  validatedBy: 'AYLA_LAYA_ENGINE' | 'RUGCHECK_API' | 'LOCAL_HEURISTICS_FALLBACK' | 'MACRO_CIRCUIT_BREAKER';
   latencyMs?: number;
 }
 
 export interface MemeGatekeeperConfig {
   layaBaseUrl?: string;
+  macroSentinelUrl?: string;
   timeoutMs?: number;
   minLiquidityUsd?: number;
   minHolders?: number;
@@ -29,6 +30,7 @@ export interface MemeGatekeeperConfig {
 
 export class MemeRiskGatekeeper {
   private layaBaseUrl: string;
+  private macroSentinelUrl: string;
   private timeoutMs: number;
   private minLiquidityUsd: number;
   private minHolders: number;
@@ -37,6 +39,7 @@ export class MemeRiskGatekeeper {
   constructor(config?: MemeGatekeeperConfig) {
     // Malha interna do Railway ou URL configurada
     this.layaBaseUrl = config?.layaBaseUrl || process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8080';
+    this.macroSentinelUrl = config?.macroSentinelUrl || process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
     // Tolerância estendida de latência para a CPU da Ayla (padrão 4000ms para acomodar 800ms-1500ms com folga)
     this.timeoutMs = config?.timeoutMs || 4000;
     this.minLiquidityUsd = config?.minLiquidityUsd || 5000;
@@ -44,8 +47,35 @@ export class MemeRiskGatekeeper {
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
   }
 
+  public async checkMacroCircuitBreaker(): Promise<{ isBreakerActive: boolean; regime?: string }> {
+    try {
+      const res = await axios.get(`${this.macroSentinelUrl}/v1/sentinel/regime`, {
+        timeout: 2500
+      });
+      return {
+        isBreakerActive: Boolean(res.data?.is_circuit_breaker_active),
+        regime: res.data?.regime
+      };
+    } catch {
+      // Se o macro estiver indisponível temporariamente, opera gracioso
+      return { isBreakerActive: false };
+    }
+  }
+
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
     const startTime = Date.now();
+
+    // 0. Consulta ao Disjuntor Macro Institucional (nexus-macro-sentinel :4005)
+    const macroCheck = await this.checkMacroCircuitBreaker();
+    if (macroCheck.isBreakerActive) {
+      return {
+        safe: false,
+        reason: `Disjuntor Macro Ativado pelo Nexus Sentinel: Mercado em colapso/sangria (${macroCheck.regime || 'BEARISH_DUMP'}). Compras suspensas.`,
+        score: 0,
+        validatedBy: 'MACRO_CIRCUIT_BREAKER',
+        latencyMs: Date.now() - startTime
+      };
+    }
 
     // 1. Pré-Filtro Local Imediato (0ms): Honeypot e Risco de Rug Pull
     if (token.mintAuthority !== null) {
