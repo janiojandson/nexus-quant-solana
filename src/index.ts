@@ -8,6 +8,7 @@ import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
+import { PositionExitEngine } from './execution/positionExitEngine.js';
 
 dotenv.config();
 
@@ -40,6 +41,7 @@ server.listen(PORT, () => {
 
 let isRunningCycle = false;
 const antiSpamMemory = new AntiSpamMemory(60); // 60 minutos de quarentena sem incomodar
+const positionEngine = new PositionExitEngine();
 
 async function executeAutonomousCycle(
   wallet: SolanaWalletService,
@@ -57,8 +59,10 @@ async function executeAutonomousCycle(
   isRunningCycle = true;
   try {
     const memoryStats = antiSpamMemory.getStats();
+    const openPositions = positionEngine.getAllPositions();
+
     console.log(`\n====================================================`);
-    console.log(`⏱️ [${new Date().toLocaleTimeString()}] CICLO AUTÔNOMO 24/7 (Quarentena Ativa: ${memoryStats.vettedCount} tokens)`);
+    console.log(`⏱️ [${new Date().toLocaleTimeString()}] CICLO AUTÔNOMO 24/7 (Quarentena: ${memoryStats.vettedCount} | Posições Abertas: ${openPositions.length})`);
     console.log(`====================================================`);
 
     // Ciclo 1: Leitura de Vitalidade
@@ -69,6 +73,29 @@ async function executeAutonomousCycle(
     if (vitalityState === VitalityState.DEAD) {
       console.log('⚠️ [Vitality: DEAD] Saldo zerado. Aguardando aporte para operar.');
       return;
+    }
+
+    // Ciclo 1.5: Monitoramento de Posições Abertas (Take-Profit & Stop-Loss)
+    if (openPositions.length > 0) {
+      console.log(`📊 [Gestor de Posições] Monitorando ${openPositions.length} posições abertas...`);
+      for (const pos of openPositions) {
+        // Simula ou busca preço atual (usando o preço salvo com pequena flutuação ou scanner)
+        const exitSignal = positionEngine.evaluateExit(pos.mint, pos.entryPriceUsd);
+        if (exitSignal.shouldExit) {
+          console.log(`🎯 [Gatilho de Saída Ativado] ${pos.symbol}: ${exitSignal.type} | PnL: ${(exitSignal.pnlPct * 100).toFixed(2)}%`);
+          console.log(`⚡ [Jupiter V6] Executando Swap de Venda de Volta para SOL...`);
+          // Executa swap de saída: Token -> SOL
+          await jupiterEngine.executeSwap({
+            inputMint: pos.mint,
+            outputMint: 'So11111111111111111111111111111111111111112', // SOL
+            amountLamports: Math.floor(pos.tokenAmount),
+            userPublicKey: OFFICIAL_PHANTOM_WALLET,
+            keypair: wallet.getKeypair()
+          });
+          positionEngine.removePosition(pos.mint);
+          console.log(`✅ Posição em ${pos.symbol} encerrada com sucesso.`);
+        }
+      }
     }
 
     // Ciclo 2: Scanner On-Chain (DexScreener)
@@ -137,6 +164,20 @@ async function executeAutonomousCycle(
         console.log(`   Status do Swap: ${swapSim.status}`);
         console.log(`   Assinatura Tx: ${swapSim.txSignature}`);
         console.log(`   Retorno: ${swapSim.outAmount.toLocaleString()} tokens`);
+
+        // Adiciona à gestão de posições ativas com Take-Profit (+50%) e Stop-Loss (-20%)
+        if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
+          positionEngine.addPosition({
+            mint: topCandidate.mint,
+            symbol: topCandidate.symbol,
+            tokenAmount: swapSim.outAmount,
+            entryPriceUsd: topCandidate.priceUsd,
+            entryTimestamp: Date.now(),
+            stopLossPct: -0.20,
+            takeProfitPct: 0.50
+          });
+          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (SL: -20% | TP: +50%)`);
+        }
       }
 
       // Persistência no Postgres Central (Stateless Event Store)
