@@ -15,6 +15,7 @@ export interface SwapQuoteResult {
   priceImpactPct: number;
   slippageBps: number;
   routePlanSummary: string;
+  rawQuote?: any;
 }
 
 export class DexAggregatorService {
@@ -51,7 +52,8 @@ export class DexAggregatorService {
         outAmount: Number(data.outAmount || 0),
         priceImpactPct: Number(data.priceImpactPct || 0),
         slippageBps: slippageBps,
-        routePlanSummary: data.routePlan?.map((r: { swapInfo: { label: string } }) => r.swapInfo?.label).join(' -> ') || 'Direct'
+        routePlanSummary: data.routePlan?.map((r: { swapInfo: { label: string } }) => r.swapInfo?.label).join(' -> ') || 'Direct',
+        rawQuote: data
       };
     } catch {
       // Fallback determinístico para testes e ambientes offline

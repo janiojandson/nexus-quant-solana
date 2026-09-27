@@ -61,8 +61,19 @@ export class JupiterExecutionEngine {
       }
 
       // 3. Montar a Transação Serializada V6 na Jupiter
+      const payloadQuote = quote.rawQuote || {
+        inputMint: quote.inputMint,
+        outputMint: quote.outputMint,
+        inAmount: String(quote.inAmount),
+        outAmount: String(quote.outAmount),
+        otherAmountThreshold: String(quote.outAmount),
+        swapMode: 'ExactIn',
+        slippageBps: quote.slippageBps,
+        priceImpactPct: String(quote.priceImpactPct)
+      };
+
       const swapRes = await axios.post(this.swapUrl, {
-        quoteResponse: quote,
+        quoteResponse: payloadQuote,
         userPublicKey: req.userPublicKey,
         wrapAndUnwrapSol: true,
         dynamicComputeUnitLimit: true,
@@ -89,13 +100,14 @@ export class JupiterExecutionEngine {
         isDryRun: false
       };
     } catch (err: any) {
+      const errorMsg = err.response?.data?.error || err.response?.data?.message || err.response?.data || err.message || String(err);
       return {
         txSignature: '',
         status: 'FAILED',
         inAmount: req.amountLamports,
         outAmount: 0,
         isDryRun: this.isDryRun,
-        error: err.message || String(err)
+        error: typeof errorMsg === 'object' ? JSON.stringify(errorMsg) : String(errorMsg)
       };
     }
   }
