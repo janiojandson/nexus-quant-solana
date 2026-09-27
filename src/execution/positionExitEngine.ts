@@ -8,6 +8,20 @@ export interface PositionTracking {
   takeProfitPct: number;  // Ex: +50% (+0.50)
 }
 
+export interface ClosedTrade {
+  mint: string;
+  symbol: string;
+  tokenAmount: number;
+  entryPriceUsd: number;
+  exitPriceUsd: number;
+  entryTimestamp: number;
+  exitTimestamp: number;
+  pnlPct: number;
+  pnlUsdEst: number;
+  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'HOLD';
+  txSignature?: string;
+}
+
 export interface ExitSignal {
   shouldExit: boolean;
   type: 'TAKE_PROFIT' | 'STOP_LOSS' | 'HOLD';
@@ -17,6 +31,7 @@ export interface ExitSignal {
 
 export class PositionExitEngine {
   private activePositions = new Map<string, PositionTracking>();
+  private closedPositions: ClosedTrade[] = [];
 
   public addPosition(position: PositionTracking): void {
     this.activePositions.set(position.mint, position);
@@ -28,6 +43,15 @@ export class PositionExitEngine {
 
   public getAllPositions(): PositionTracking[] {
     return Array.from(this.activePositions.values());
+  }
+
+  public getClosedTrades(): ClosedTrade[] {
+    return [...this.closedPositions];
+  }
+
+  public recordClosedTrade(trade: ClosedTrade): void {
+    this.closedPositions.unshift(trade);
+    if (this.closedPositions.length > 50) this.closedPositions.pop();
   }
 
   public removePosition(mint: string): void {

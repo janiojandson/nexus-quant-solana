@@ -1,12 +1,31 @@
+export interface ClosedTradeView {
+  mint: string;
+  symbol: string;
+  tokenAmount: number;
+  entryPriceUsd: number;
+  exitPriceUsd: number;
+  entryTimestamp: number;
+  exitTimestamp: number;
+  pnlPct: number;
+  pnlSolEst: number;
+  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'MANUAL' | 'HOLD';
+  txSignature?: string;
+  dexScreenerUrl: string;
+  solscanUrl: string;
+}
+
 export interface DashboardState {
   agent: string;
   wallet: string;
   balanceSol: number;
+  initialDepositSol: number;
   vitalityState: string;
   dryRun: boolean;
   macroRegime: string;
   circuitBreakerActive: boolean;
   activeRpcUrl: string;
+  totalRealizedPnlSol: number;
+  totalNetworkFeesSolEst: number;
   positions: Array<{
     mint: string;
     symbol: string;
@@ -20,6 +39,7 @@ export interface DashboardState {
     dexScreenerUrl: string;
     solscanUrl: string;
   }>;
+  closedTrades: ClosedTradeView[];
   recentAudits: Array<{
     mint: string;
     symbol: string;
@@ -40,9 +60,14 @@ export function renderDashboardHtml(state: DashboardState): string {
     ? `<tr><td colspan="7" style="text-align: center; color: #94A3B8; padding: 24px;">Nenhuma posição aberta no momento. O scanner está caçando novas oportunidades elegíveis...</td></tr>`
     : state.positions.map(p => `
       <tr style="border-bottom: 1px solid #1E293B;">
-        <td style="padding: 14px 16px; font-weight: 600; color: #F8FAFC;">
-          ${p.symbol}
-          <div style="font-size: 11px; color: #64748B; font-family: monospace;">${p.mint.substring(0, 6)}...${p.mint.substring(p.mint.length - 4)}</div>
+        <td style="padding: 14px 16px; font-weight: 600;">
+          <a href="https://solscan.io/token/${p.mint}" target="_blank" title="Ver token na Solana (Solscan)" style="color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+            <span>${p.symbol}</span>
+            <span style="font-size: 11px;">↗</span>
+          </a>
+          <div style="font-size: 11px; color: #64748B; font-family: monospace;">
+            <a href="https://solscan.io/token/${p.mint}" target="_blank" style="color: #64748B; text-decoration: none;">${p.mint.substring(0, 6)}...${p.mint.substring(p.mint.length - 4)}</a>
+          </div>
         </td>
         <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${Number(p.tokenAmount).toLocaleString()}</td>
         <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(p.entryPriceUsd)}</td>
@@ -55,14 +80,52 @@ export function renderDashboardHtml(state: DashboardState): string {
         </td>
         <td style="padding: 14px 16px; text-align: right;">
           <a href="${p.dexScreenerUrl}" target="_blank" style="margin-right: 8px; font-size: 12px; color: #38BDF8; text-decoration: none; padding: 4px 8px; background: rgba(56,189,248,0.1); border-radius: 4px;">DexScreener ↗</a>
-          <a href="${p.solscanUrl}" target="_blank" style="font-size: 12px; color: #A855F7; text-decoration: none; padding: 4px 8px; background: rgba(168,85,247,0.1); border-radius: 4px;">Solscan ↗</a>
+          <a href="https://solscan.io/token/${p.mint}" target="_blank" style="font-size: 12px; color: #A855F7; text-decoration: none; padding: 4px 8px; background: rgba(168,85,247,0.1); border-radius: 4px;">Solana Explorer ↗</a>
         </td>
       </tr>
     `).join('');
 
-  const auditsRows = state.recentAudits.slice(0, 6).map(a => `
+  const closedRows = state.closedTrades.length === 0
+    ? `<tr><td colspan="7" style="text-align: center; color: #94A3B8; padding: 24px;">Nenhum trade encerrado ainda. As operações fechadas com lucro (+TP) ou proteção (-SL) aparecerão detalhadas aqui.</td></tr>`
+    : state.closedTrades.map(c => `
+      <tr style="border-bottom: 1px solid #1E293B;">
+        <td style="padding: 12px 16px; font-weight: 600;">
+          <a href="https://solscan.io/token/${c.mint}" target="_blank" title="Ver token na Solana (Solscan)" style="color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+            <span>${c.symbol}</span>
+            <span style="font-size: 11px;">↗</span>
+          </a>
+          <div style="font-size: 11px; color: #64748B; font-family: monospace;">
+            <a href="https://solscan.io/token/${c.mint}" target="_blank" style="color: #64748B; text-decoration: none;">${c.mint.substring(0, 6)}...${c.mint.substring(c.mint.length - 4)}</a>
+          </div>
+        </td>
+        <td style="padding: 12px 16px;">
+          <span style="padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background: ${c.exitReason === 'TAKE_PROFIT' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)'}; color: ${c.exitReason === 'TAKE_PROFIT' ? '#10B981' : '#EF4444'};">
+            ${c.exitReason === 'TAKE_PROFIT' ? '🟢 TAKE-PROFIT (+50%)' : '🔴 STOP-LOSS (-20%)'}
+          </span>
+        </td>
+        <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(c.entryPriceUsd)}</td>
+        <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(c.exitPriceUsd)}</td>
+        <td style="padding: 12px 16px; font-weight: 700; font-family: monospace; color: ${pnlColor(c.pnlPct)};">
+          ${c.pnlPct >= 0 ? '+' : ''}${(c.pnlPct * 100).toFixed(2)}%
+          <div style="font-size: 11px; color: ${pnlColor(c.pnlSolEst)}; font-weight: 500;">${c.pnlSolEst >= 0 ? '+' : ''}${c.pnlSolEst.toFixed(4)} SOL</div>
+        </td>
+        <td style="padding: 12px 16px; font-size: 12px; color: #94A3B8;">${new Date(c.exitTimestamp).toLocaleTimeString()}</td>
+        <td style="padding: 12px 16px; text-align: right;">
+          <a href="${c.dexScreenerUrl}" target="_blank" style="margin-right: 6px; font-size: 11px; color: #38BDF8; text-decoration: none; padding: 3px 6px; background: rgba(56,189,248,0.1); border-radius: 4px;">Gráfico</a>
+          <a href="https://solscan.io/token/${c.mint}" target="_blank" style="margin-right: 6px; font-size: 11px; color: #A855F7; text-decoration: none; padding: 3px 6px; background: rgba(168,85,247,0.1); border-radius: 4px;">Solana</a>
+          ${c.txSignature ? `<a href="https://solscan.io/tx/${c.txSignature}" target="_blank" style="font-size: 11px; color: #10B981; text-decoration: none; padding: 3px 6px; background: rgba(16,185,129,0.1); border-radius: 4px;">Tx</a>` : ''}
+        </td>
+      </tr>
+    `).join('');
+
+  const auditsRows = state.recentAudits.slice(0, 8).map(a => `
     <tr style="border-bottom: 1px solid #1E293B; font-size: 13px;">
-      <td style="padding: 10px 16px; color: #F1F5F9; font-weight: 500;">${a.symbol}</td>
+      <td style="padding: 10px 16px; font-weight: 500;">
+        <a href="https://solscan.io/token/${a.mint}" target="_blank" style="color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+          <span>${a.symbol}</span>
+          <span style="font-size: 10px;">↗</span>
+        </a>
+      </td>
       <td style="padding: 10px 16px;">
         <span style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: ${a.isSafe ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)'}; color: ${a.isSafe ? '#10B981' : '#EF4444'};">
           ${a.isSafe ? 'APROVADO' : 'VETADO'}
@@ -70,7 +133,10 @@ export function renderDashboardHtml(state: DashboardState): string {
       </td>
       <td style="padding: 10px 16px; font-family: monospace; color: #CBD5E1;">${a.score}/100</td>
       <td style="padding: 10px 16px; color: #94A3B8; font-size: 12px;">${a.reason || 'Verificação concluída'}</td>
-      <td style="padding: 10px 16px; text-align: right; color: #64748B; font-size: 11px;">${new Date(a.timestamp).toLocaleTimeString()}</td>
+      <td style="padding: 10px 16px; text-align: right; color: #64748B; font-size: 11px;">
+        <a href="https://dexscreener.com/solana/${a.mint}" target="_blank" style="color: #38BDF8; text-decoration: none; margin-right: 8px;">DexScreener</a>
+        <a href="https://solscan.io/token/${a.mint}" target="_blank" style="color: #A855F7; text-decoration: none;">Solana</a>
+      </td>
     </tr>
   `).join('');
 
@@ -79,7 +145,7 @@ export function renderDashboardHtml(state: DashboardState): string {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nexus Quant Solana - Terminal Autônomo</title>
+  <title>Nexus Quant Solana - Terminal Institucional</title>
   <meta http-equiv="refresh" content="5">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -92,14 +158,14 @@ export function renderDashboardHtml(state: DashboardState): string {
     .title-box { display: flex; align-items: center; gap: 12px; }
     .status-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 9999px; background: rgba(16, 185, 129, 0.1); color: #10B981; font-weight: 600; }
     .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #10B981; box-shadow: 0 0 10px #10B981; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .card { background: #131B2B; border: 1px solid #1E293B; border-radius: 10px; padding: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
-    .card-label { font-size: 12px; font-weight: 500; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
-    .card-value { font-size: 24px; font-weight: 700; color: #F8FAFC; font-family: 'JetBrains Mono', monospace; }
-    .card-sub { font-size: 12px; color: #64748B; margin-top: 6px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .card { background: #131B2B; border: 1px solid #1E293B; border-radius: 10px; padding: 18px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
+    .card-label { font-size: 11px; font-weight: 600; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+    .card-value { font-size: 22px; font-weight: 700; color: #F8FAFC; font-family: 'JetBrains Mono', monospace; }
+    .card-sub { font-size: 11px; color: #64748B; margin-top: 5px; }
     .table-container { background: #131B2B; border: 1px solid #1E293B; border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
     .table-header { padding: 16px 20px; border-bottom: 1px solid #1E293B; display: flex; justify-content: space-between; align-items: center; }
-    .table-header h2 { font-size: 16px; font-weight: 600; }
+    .table-header h2 { font-size: 15px; font-weight: 600; }
     table { width: 100%; border-collapse: collapse; text-align: left; }
     th { padding: 12px 16px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748B; background: #0E1626; border-bottom: 1px solid #1E293B; }
     .wallet-pill { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #38BDF8; background: rgba(56,189,248,0.1); padding: 4px 10px; border-radius: 6px; display: inline-block; word-break: break-all; }
@@ -117,32 +183,34 @@ export function renderDashboardHtml(state: DashboardState): string {
       </div>
     </div>
 
-    <!-- Cards de Métricas -->
+    <!-- Cards de Métricas e Governança Financeira -->
     <div class="grid">
       <div class="card">
         <div class="card-label">Saldo On-Chain (Phantom)</div>
-        <div class="card-value" style="color: #38BDF8;">${state.balanceSol.toFixed(4)} <span style="font-size: 16px;">SOL</span></div>
-        <div class="card-sub">Estado Vital: <strong style="color: #10B981;">${state.vitalityState}</strong></div>
+        <div class="card-value" style="color: #38BDF8;">${state.balanceSol.toFixed(4)} <span style="font-size: 14px;">SOL</span></div>
+        <div class="card-sub">Vitalidade: <strong style="color: #10B981;">${state.vitalityState}</strong></div>
       </div>
 
       <div class="card">
-        <div class="card-label">Disjuntor Macro Sentinel</div>
-        <div class="card-value" style="color: ${state.circuitBreakerActive ? '#EF4444' : '#10B981'};">
-          ${state.circuitBreakerActive ? '🛑 LIGADO' : '🛡️ SEGURO'}
+        <div class="card-label">PnL Realizado Fechado</div>
+        <div class="card-value" style="color: ${pnlColor(state.totalRealizedPnlSol)};">
+          ${state.totalRealizedPnlSol >= 0 ? '+' : ''}${state.totalRealizedPnlSol.toFixed(4)} <span style="font-size: 14px;">SOL</span>
         </div>
-        <div class="card-sub">Regime: <strong>${state.macroRegime}</strong></div>
+        <div class="card-sub">Trades Encerrados: <strong>${state.closedTrades.length}</strong></div>
       </div>
 
       <div class="card">
-        <div class="card-label">Posições Abertas</div>
-        <div class="card-value">${state.positions.length} <span style="font-size: 16px;">Ativas</span></div>
-        <div class="card-sub">Risco por entrada: <strong>0.015 SOL (Ayla)</strong></div>
+        <div class="card-label">Taxas de Rede & ATA Estimadas</div>
+        <div class="card-value" style="color: #F59E0B;">~${state.totalNetworkFeesSolEst.toFixed(4)} <span style="font-size: 14px;">SOL</span></div>
+        <div class="card-sub">Criação de Contas ATA + Prioridade</div>
       </div>
 
       <div class="card">
-        <div class="card-label">Filtro & Quarentena Anti-Spam</div>
-        <div class="card-value" style="color: #F59E0B;">${state.quarantineCount} <span style="font-size: 16px;">Tokens</span></div>
-        <div class="card-sub">Modo: <strong>${state.dryRun ? 'Simulação (Dry-Run)' : 'Real On-Chain ⚠️'}</strong></div>
+        <div class="card-label">Posições Abertas / Sentinel</div>
+        <div class="card-value" style="color: ${state.positions.length > 0 ? '#38BDF8' : '#94A3B8'};">
+          ${state.positions.length} <span style="font-size: 14px;">Em Custódia</span>
+        </div>
+        <div class="card-sub">Sentinel: <strong style="color: ${state.circuitBreakerActive ? '#EF4444' : '#10B981'};">${state.circuitBreakerActive ? '🛑 DISJUNTOR ATIVO' : '🛡️ SEGURO'}</strong></div>
       </div>
     </div>
 
@@ -159,13 +227,37 @@ export function renderDashboardHtml(state: DashboardState): string {
             <th>Quantidade</th>
             <th>Preço Entrada</th>
             <th>Preço Atual</th>
-            <th>PnL %</th>
+            <th>PnL % Flutuante</th>
             <th>Alvos de Risco</th>
             <th style="text-align: right;">Ações On-Chain</th>
           </tr>
         </thead>
         <tbody>
           ${positionsRows}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Tabela de Histórico de Trades Fechados -->
+    <div class="table-container">
+      <div class="table-header">
+        <h2>🏁 Histórico de Trades Fechados (Realized PnL & Saídas On-Chain)</h2>
+        <span style="font-size: 12px; color: #94A3B8;">Histórico das últimas 50 posições encerradas</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Ativo</th>
+            <th>Gatilho de Saída</th>
+            <th>Preço Entrada</th>
+            <th>Preço Saída</th>
+            <th>PnL Líquido</th>
+            <th>Horário Fechamento</th>
+            <th style="text-align: right;">Auditoria</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${closedRows}
         </tbody>
       </table>
     </div>

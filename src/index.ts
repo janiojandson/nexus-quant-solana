@@ -31,12 +31,16 @@ const latestState: DashboardState = {
   agent: 'NEXUS_QUANT_SOLANA_V1',
   wallet: OFFICIAL_PHANTOM_WALLET,
   balanceSol: 0,
+  initialDepositSol: 0.3133,
   vitalityState: 'NORMAL',
   dryRun: IS_DRY_RUN,
   macroRegime: 'NEUTRAL_RANGING',
   circuitBreakerActive: false,
   activeRpcUrl: ACTIVE_SOLANA_RPC_URL.split('?')[0],
+  totalRealizedPnlSol: 0,
+  totalNetworkFeesSolEst: 0,
   positions: [],
+  closedTrades: [],
   recentAudits: [],
   quarantineCount: 0,
   lastUpdated: new Date().toISOString()
@@ -133,20 +137,37 @@ async function executeAutonomousCycle(
           console.log(`🎯 [Gatilho de Saída Ativado] ${pos.symbol}: ${exitSignal.type} | PnL: ${(exitSignal.pnlPct * 100).toFixed(2)}%`);
           console.log(`⚡ [Jupiter V6] Executando Swap de Venda de Volta para SOL...`);
           // Executa swap de saída: Token -> SOL
-          await jupiterEngine.executeSwap({
+          const exitSwap = await jupiterEngine.executeSwap({
             inputMint: pos.mint,
             outputMint: 'So11111111111111111111111111111111111111112', // SOL
             amountLamports: Math.floor(pos.tokenAmount),
             userPublicKey: OFFICIAL_PHANTOM_WALLET,
             keypair: wallet.getKeypair()
           });
+
+          // Registra Trade Fechado
+          const pnlSol = (exitSignal.pnlPct * 0.015);
+          positionEngine.recordClosedTrade({
+            mint: pos.mint,
+            symbol: pos.symbol,
+            tokenAmount: pos.tokenAmount,
+            entryPriceUsd: pos.entryPriceUsd,
+            exitPriceUsd: exitSignal.currentPriceUsd,
+            entryTimestamp: pos.entryTimestamp,
+            exitTimestamp: Date.now(),
+            pnlPct: exitSignal.pnlPct,
+            pnlUsdEst: (exitSignal.currentPriceUsd - pos.entryPriceUsd) * pos.tokenAmount,
+            exitReason: exitSignal.type,
+            txSignature: exitSwap.txSignature
+          });
+
           positionEngine.removePosition(pos.mint);
           console.log(`✅ Posição em ${pos.symbol} encerrada com sucesso.`);
         }
       }
     }
 
-    // Atualiza lista de posições no Dashboard
+    // Atualiza lista de posições e histórico fechado no Dashboard
     latestState.positions = positionEngine.getAllPositions().map(p => {
       const exitSig = positionEngine.evaluateExit(p.mint, p.entryPriceUsd);
       return {
@@ -163,6 +184,29 @@ async function executeAutonomousCycle(
         solscanUrl: `https://solscan.io/token/${p.mint}`
       };
     });
+
+    latestState.closedTrades = positionEngine.getClosedTrades().map(c => ({
+      mint: c.mint,
+      symbol: c.symbol,
+      tokenAmount: c.tokenAmount,
+      entryPriceUsd: c.entryPriceUsd,
+      exitPriceUsd: c.exitPriceUsd,
+      entryTimestamp: c.entryTimestamp,
+      exitTimestamp: c.exitTimestamp,
+      pnlPct: c.pnlPct,
+      pnlSolEst: c.pnlPct * 0.015,
+      exitReason: c.exitReason,
+      txSignature: c.txSignature,
+      dexScreenerUrl: `https://dexscreener.com/solana/${c.mint}`,
+      solscanUrl: `https://solscan.io/token/${c.mint}`
+    }));
+
+    // Calcula PnL Realizado acumulado e Taxas de Rede Estimadas (criação de ATA ~0.002039 SOL + fees)
+    latestState.totalRealizedPnlSol = latestState.closedTrades.reduce((acc, t) => acc + t.pnlSolEst, 0);
+    const activePositionsCount = latestState.positions.length;
+    const closedCount = latestState.closedTrades.length;
+    // Cada token novo cria 1 ATA (aluguel de ~0.002039 SOL) + taxa de prioridade
+    latestState.totalNetworkFeesSolEst = (activePositionsCount + closedCount) * 0.0025;
 
     // Ciclo 1.8: Conexão Explícita ao Macro Sentinel (:4005)
     let macroRegime = 'NEUTRAL_RANGING';
@@ -276,6 +320,24 @@ async function executeAutonomousCycle(
             takeProfitPct: 0.50
           });
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (SL: -20% | TP: +50%)`);
+
+          // Sincroniza imediatamente com o Dashboard
+          latestState.positions = positionEngine.getAllPositions().map(p => {
+            const exitSig = positionEngine.evaluateExit(p.mint, p.entryPriceUsd);
+            return {
+              mint: p.mint,
+              symbol: p.symbol,
+              tokenAmount: p.tokenAmount,
+              entryPriceUsd: p.entryPriceUsd,
+              currentPriceUsd: exitSig.currentPriceUsd,
+              pnlPct: exitSig.pnlPct,
+              stopLossPct: p.stopLossPct,
+              takeProfitPct: p.takeProfitPct,
+              entryTimestamp: p.entryTimestamp,
+              dexScreenerUrl: `https://dexscreener.com/solana/${p.mint}`,
+              solscanUrl: `https://solscan.io/token/${p.mint}`
+            };
+          });
         } else {
           // Se o swap falhou (ex: pool sem liquidez no momento ou slippage), isola em quarentena temporária
           antiSpamMemory.recordVeto(topCandidate.mint, `Swap Jupiter falhou: ${swapSim.error || '0x177e'}`);
