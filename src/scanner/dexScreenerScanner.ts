@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { MintCooldownCache } from './mintCooldownCache.js';
+import { MaturityIncubator } from '../services/maturityIncubator.js';
 
 export interface TokenCandidate {
   mint: string;
@@ -19,21 +20,32 @@ export interface TokenCandidate {
   h1HighPriceUsd?: number;
 }
 
+export interface IncubatorScanStats {
+  waiting: number;
+  mature: number;
+  expired: number;
+  technicalDiscards: number;
+}
+
 export interface ScannerOptions {
   fetchClient?: (url: string) => Promise<{ data: any }>;
+  incubator?: MaturityIncubator;
 }
 
 export class DexScreenerScanner {
   private fetchClient: (url: string) => Promise<{ data: any }>;
   public readonly cooldownCache: MintCooldownCache;
+  public readonly incubator: MaturityIncubator;
+  public lastIncubatorStats: IncubatorScanStats = { waiting: 0, mature: 0, expired: 0, technicalDiscards: 0 };
   private static readonly SOLANA_SEARCH_URL = 'https://api.dexscreener.com/latest/dex/search?q=solana';
   private static readonly RAYDIUM_POOLS_URL = 'https://api.dexscreener.com/latest/dex/search?q=raydium%20solana';
   private static readonly GECKOTERMINAL_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 
-  private static lastGeckoFetchTime = 0;
+  private lastGeckoFetchTime = 0;
 
   constructor(options?: ScannerOptions) {
     this.cooldownCache = new MintCooldownCache(5);
+    this.incubator = options?.incubator || new MaturityIncubator({ minMaturityMinutes: 15, maxMaturityMinutes: 60 });
     this.fetchClient = options?.fetchClient || (async (url: string) => {
       const startTime = Date.now();
       try {
@@ -72,9 +84,9 @@ export class DexScreenerScanner {
 
       // Controla taxa do GeckoTerminal (máximo 1 chamada a cada 60s para respeitar rate limits públicos)
       const nowTs = Date.now();
-      const canFetchGecko = (nowTs - DexScreenerScanner.lastGeckoFetchTime) >= 60000;
+      const canFetchGecko = (nowTs - this.lastGeckoFetchTime) >= 60000;
       if (canFetchGecko) {
-        DexScreenerScanner.lastGeckoFetchTime = nowTs;
+        this.lastGeckoFetchTime = nowTs;
       }
 
       // 1. Endpoints Qualificados On-Chain (DexScreener Search + GeckoTerminal new_pools)
@@ -104,36 +116,69 @@ export class DexScreenerScanner {
         }
       }
 
-      // Extrai de GeckoTerminal Solana new_pools
+      // Extrai de GeckoTerminal Solana new_pools e alimenta a Incubadora de Maturação
       if (geckoRes.status === 'fulfilled') {
         sourcesCount++;
         const geckoPools = geckoRes.value.data?.data || [];
         for (const gp of geckoPools) {
           const attr = gp.attributes || {};
           const mint = gp.relationships?.base_token?.data?.id?.replace(/^solana_/, '');
-          if (mint && this.cooldownCache.shouldProcess(mint)) {
-            discoveredMints.add(mint);
+          if (!mint || !this.cooldownCache.shouldProcess(mint)) {
+            continue;
           }
-          rawPairs.push({
-            chainId: 'solana',
-            dexId: 'geckoterminal',
-            baseToken: {
-              address: mint,
+
+          const poolCreatedAt = attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : nowTs;
+          const ageMinutes = (nowTs - poolCreatedAt) / (60 * 1000);
+
+          if (ageMinutes < 15) {
+            // Token recém-nascido (< 15 min): NÃO descarta sumariamente!
+            // Envia para a Incubadora aguardar os 15 minutos pós-dump inicial.
+            this.incubator.add({
+              mint,
+              poolAddress: attr.address || gp.id || '',
               symbol: attr.name ? attr.name.split(' / ')[0] : 'UNKNOWN',
-              name: attr.name || 'Unknown'
-            },
-            priceUsd: Number(attr.base_token_price_usd || 0),
-            liquidity: { usd: Number(attr.reserve_in_usd || 0) },
-            volume: {
-              h24: Number(attr.volume_usd?.h24 || 0),
-              m5: Number(attr.volume_usd?.m5 || 0)
-            },
-            pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : Date.now()
-          });
+              name: attr.name || 'Unknown',
+              pairCreatedAt: poolCreatedAt
+            }, nowTs);
+          } else if (ageMinutes <= 60) {
+            // Se já tiver entre 15 e 60 minutos na captura: avalia imediatamente
+            discoveredMints.add(mint);
+            rawPairs.push({
+              chainId: 'solana',
+              dexId: 'geckoterminal',
+              baseToken: {
+                address: mint,
+                symbol: attr.name ? attr.name.split(' / ')[0] : 'UNKNOWN',
+                name: attr.name || 'Unknown'
+              },
+              priceUsd: Number(attr.base_token_price_usd || 0),
+              liquidity: { usd: Number(attr.reserve_in_usd || 0) },
+              volume: {
+                h24: Number(attr.volume_usd?.h24 || 0),
+                m5: Number(attr.volume_usd?.m5 || 0)
+              },
+              pairCreatedAt: poolCreatedAt
+            });
+          }
         }
       }
 
-      // Enriquece mints descobertos em lotes de até 30 na DexScreener API (apenas mints liberados pelo TTL cache)
+      // 2. Varredura da Incubadora de Maturação: Puxa tokens que atingiram 15 a 60 minutos
+      const incubatorSweep = this.incubator.sweep(nowTs);
+      this.lastIncubatorStats = {
+        waiting: incubatorSweep.waiting.length,
+        mature: incubatorSweep.mature.length,
+        expired: incubatorSweep.expiredCount,
+        technicalDiscards: 0
+      };
+
+      for (const matureToken of incubatorSweep.mature) {
+        if (this.cooldownCache.shouldProcess(matureToken.mint)) {
+          discoveredMints.add(matureToken.mint);
+        }
+      }
+
+      // Enriquece mints descobertos (incluindo maturos da incubadora) em lotes de até 30 na DexScreener API
       const mintsArray = Array.from(discoveredMints).filter(m => this.cooldownCache.shouldProcess(m));
       if (mintsArray.length > 0) {
         const batchSize = 30;
@@ -152,11 +197,12 @@ export class DexScreenerScanner {
       }
 
       // 3. Log de Diagnóstico: Tokens brutos extraídos antes dos filtros
-      console.log(`📡 [Descoberta] ${rawPairs.length} tokens brutos extraídos de ${sourcesCount} fontes (${discoveredMints.size} mints únicos)`);
+      console.log(`📡 [Descoberta] ${rawPairs.length} tokens brutos extraídos de ${sourcesCount} fontes (${discoveredMints.size} mints únicos | Incubadora: ${incubatorSweep.waiting.length} aguardando, ${incubatorSweep.mature.length} maturos)`);
 
       const now = Date.now();
       const candidates: TokenCandidate[] = [];
       const seenMints = new Set<string>();
+      let technicalDiscards = 0;
 
       for (const item of rawPairs) {
         // Filtra estritamente tokens da rede Solana
@@ -171,6 +217,7 @@ export class DexScreenerScanner {
 
         const liquidityUsd = Number(item.liquidity?.usd || 0);
         if (liquidityUsd < minLiquidityUsd) {
+          technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
           continue;
         }
@@ -178,6 +225,7 @@ export class DexScreenerScanner {
         const symbol = item.baseToken?.symbol;
         // Sanitização Estrita de Tokens (Fim do 'undefined'):
         if (!symbol || symbol === 'undefined' || symbol.trim() === '') {
+          technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
           continue;
         }
@@ -188,6 +236,7 @@ export class DexScreenerScanner {
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
         // Filtro de maturidade estrita da piscina: janela aceita entre 15 e 60 minutos
         if (pairCreatedAt > 0 && !this.isMaturityValid(pairCreatedAt, now)) {
+          technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
           continue;
         }
@@ -197,6 +246,7 @@ export class DexScreenerScanner {
         if (priceChangeM5 !== undefined) {
           // VETO TÉCNICO IMEDIATO: Se priceChange.m5 <= 0 ou > 35
           if (priceChangeM5 <= 0 || priceChangeM5 > 35 || priceChangeM5 < 3) {
+            technicalDiscards++;
             continue;
           }
         }
@@ -207,6 +257,7 @@ export class DexScreenerScanner {
         if (buysM5 !== undefined && sellsM5 !== undefined && (buysM5 + sellsM5 > 0)) {
           // Exija no mínimo 20% mais compradores que vendedores (buys >= sells * 1.2)
           if (buysM5 < (sellsM5 * 1.2)) {
+            technicalDiscards++;
             continue;
           }
         }
@@ -216,6 +267,7 @@ export class DexScreenerScanner {
         const volumeSellsM5 = item.volume?.m5?.sells !== undefined ? Number(item.volume.m5.sells) : undefined;
         if (volumeBuysM5 !== undefined && volumeSellsM5 !== undefined && (volumeBuysM5 + volumeSellsM5 > 0)) {
           if (volumeBuysM5 <= volumeSellsM5) {
+            technicalDiscards++;
             continue;
           }
         }
@@ -234,6 +286,7 @@ export class DexScreenerScanner {
 
         // Filtro anti-faca caindo: preço atual deve ser >= 70% da máxima h1
         if (h1HighPriceUsd > 0 && (currentPriceUsd / h1HighPriceUsd) < 0.70) {
+          technicalDiscards++;
           continue;
         }
 
@@ -241,6 +294,7 @@ export class DexScreenerScanner {
         const buys = Number(item.txns?.h1?.buys || item.txns?.m5?.buys || 0);
         const sells = Number(item.txns?.h1?.sells || item.txns?.m5?.sells || 0);
         if (buys + sells >= 20 && !this.isBuyingAggressionValid(buys, sells)) {
+          technicalDiscards++;
           continue;
         }
 
@@ -263,6 +317,7 @@ export class DexScreenerScanner {
         });
       }
 
+      this.lastIncubatorStats.technicalDiscards = technicalDiscards;
       return candidates;
     } catch {
       return [];

@@ -469,9 +469,9 @@ async function executeAutonomousCycle() {
     // Ciclo 2: Scanner On-Chain (DexScreener)
     console.log('🔍 [1/3 Scanner Descoberta] Buscando piscinas consolidadas (15-60m | Liquidez >= $20k)...');
     const candidates = await scanner.scanSolanaTrends(20000);
-    const totalCaptured = candidates.length;
+    const { waiting, mature, technicalDiscards: scannerDiscards } = scanner.lastIncubatorStats;
 
-    let technicalDiscardCount = 0;
+    let technicalDiscardCount = scannerDiscards || 0;
     let quarantineCount = 0;
     const eligibleCandidates: typeof candidates = [];
 
@@ -493,7 +493,7 @@ async function executeAutonomousCycle() {
       eligibleCandidates.push(token);
     }
 
-    const logMsg = `📊 [Capturados: ${totalCaptured} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`;
+    const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (15-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`;
     console.log(logMsg);
 
     // Registra no buffer de scannerLogs para exposição na API e Dashboard

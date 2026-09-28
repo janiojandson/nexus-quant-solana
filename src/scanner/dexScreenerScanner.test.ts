@@ -169,3 +169,39 @@ test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela 
   assert.strictEqual(results[0].sellsM5, 8);
 });
 
+test('DexScreenerScanner: deve incubar tokens recém-nascidos da GeckoTerminal e contabilizar descarte técnico pós-maturação', async () => {
+  const now = Date.now();
+  const mockFetch = async (url: string) => {
+    if (url.includes('geckoterminal.com')) {
+      return {
+        data: {
+          data: [
+            {
+              id: 'pool_recem_nascido',
+              attributes: {
+                address: 'PoolAddress123',
+                name: 'INFANT / SOL',
+                pool_created_at: new Date(now - 2 * 60 * 1000).toISOString(), // 2 min (recém-nascido)
+                reserve_in_usd: '15000',
+                base_token_price_usd: '0.001'
+              },
+              relationships: {
+                base_token: { data: { id: 'solana_MintInfant123' } }
+              }
+            }
+          ]
+        }
+      };
+    }
+    return { data: { pairs: [] } };
+  };
+
+  const scanner = new DexScreenerScanner({ fetchClient: mockFetch as any });
+  await scanner.scanSolanaTrends(20000);
+
+  // Deve ter inserido na incubadora e NÃO no cooldownCache
+  assert.strictEqual(scanner.incubator.getWaitingCount(), 1);
+  assert.strictEqual(scanner.cooldownCache.shouldProcess('MintInfant123'), true, 'Infant token não deve ser blacklisted no cooldown');
+  assert.strictEqual(scanner.lastIncubatorStats.waiting, 1);
+});
+
