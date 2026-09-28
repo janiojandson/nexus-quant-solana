@@ -523,6 +523,8 @@ async function executeAutonomousCycle() {
         priceChangeM5: topCandidate.priceChangeM5,
         buysM5: topCandidate.buysM5,
         sellsM5: topCandidate.sellsM5,
+        volumeBuysM5: topCandidate.volumeBuysM5,
+        volumeSellsM5: topCandidate.volumeSellsM5,
         priceUsd: topCandidate.priceUsd,
         h1HighPriceUsd: topCandidate.h1HighPriceUsd
       });
@@ -534,7 +536,7 @@ async function executeAutonomousCycle() {
         const m5Pct = topCandidate.priceChangeM5 !== undefined ? topCandidate.priceChangeM5.toFixed(1) : '0.0';
         const buys = topCandidate.buysM5 ?? 0;
         const sells = topCandidate.sellsM5 ?? 0;
-        console.log(`🛡️ [Ayla Aprovado]: Contrato Seguro (Score ${audit.score}+) | Momentum: m5 +${m5Pct}% | Buys/Sells: ${buys}/${sells}`);
+        console.log(`🛡️ [Ayla Aprovado]: Contrato Seguro (80+) | Momentum m5: +${m5Pct}% | Buys/Sells: ${buys}/${sells} | Vol Comprador > Vendedor`);
       }
 
       let txSignature: string | null = null;

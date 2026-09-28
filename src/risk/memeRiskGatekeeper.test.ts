@@ -71,7 +71,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     assert.strictEqual(audit.validatedBy, 'LOCAL_HEURISTICS_FALLBACK');
   });
 
-  it('deve rejeitar token com priceChangeM5 <= 0 (Ayla Veto: Preço em sangria)', async () => {
+  it('deve rejeitar token com priceChangeM5 <= 0 (Ayla Veto: Preço em sangria/queda nos últimos 5m)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeQueda5m',
@@ -84,10 +84,10 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Preço em sangria nos últimos 5m/);
+    assert.match(audit.reason || '', /Ayla Veto: Preço em sangria\/queda nos últimos 5m/);
   });
 
-  it('deve rejeitar token com priceChangeM5 > 35 (Ayla Veto: Movimento esticado/FOMO excessivo)', async () => {
+  it('deve rejeitar token com priceChangeM5 > 35 (Ayla Veto: Preço esticado demais, risco de topo)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeEsticado5m',
@@ -100,10 +100,10 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Movimento esticado\/FOMO excessivo/);
+    assert.match(audit.reason || '', /Ayla Veto: Preço esticado demais, risco de topo/);
   });
 
-  it('deve rejeitar token com order flow insuficiente (buys < sells * 1.3)', async () => {
+  it('deve rejeitar token com order flow insuficiente (buys < sells * 1.2)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeVendedores5m',
@@ -112,16 +112,36 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       freezeAuthority: null,
       holdersCount: 200,
       priceChangeM5: 10.0,
-      buysM5: 12,
-      sellsM5: 10 // buys 12 < 10 * 1.3 = 13
+      buysM5: 11,
+      sellsM5: 10 // buys 11 < 10 * 1.2 = 12
     };
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Fluxo vendedor predominante/);
+    assert.match(audit.reason || '', /Ayla Veto: Pressão vendedora dominante/);
   });
 
-  it('deve rejeitar token se preço atual estiver a menos de 75% da máxima h1 (queda pós-topo)', async () => {
+  it('deve rejeitar token se volume de vendas for maior ou igual ao de compras', async () => {
+    const gatekeeper = new MemeRiskGatekeeper();
+    const token: TokenSecurityMetadata = {
+      mint: 'MemeVolVendedor',
+      liquidityUsd: 30_000,
+      mintAuthority: null,
+      freezeAuthority: null,
+      holdersCount: 200,
+      priceChangeM5: 10.0,
+      buysM5: 25,
+      sellsM5: 10,
+      volumeBuysM5: 4000,
+      volumeSellsM5: 5000 // Volume vendedor maior
+    };
+
+    const audit = await gatekeeper.auditToken(token);
+    assert.strictEqual(audit.safe, false);
+    assert.match(audit.reason || '', /Ayla Veto: Pressão vendedora dominante/);
+  });
+
+  it('deve rejeitar token se preço atual estiver a menos de 70% da máxima h1 (queda pós-topo)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeFacaCaindo',
@@ -132,13 +152,13 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       priceChangeM5: 8.0,
       buysM5: 30,
       sellsM5: 10,
-      priceUsd: 0.070,
-      h1HighPriceUsd: 0.100 // 0.070 / 0.100 = 70% < 75%
+      priceUsd: 0.065,
+      h1HighPriceUsd: 0.100 // 0.065 / 0.100 = 65% < 70%
     };
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Ativo em distribuição\/queda pós-topo/);
+    assert.match(audit.reason || '', /Ayla Veto: Ativo em distribuição pós-topo/);
   });
 
   it('deve aprovar e formatar validação quando momentum e order flow estiverem dentro da janela perfeita', () => {
@@ -147,13 +167,16 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       priceChangeM5: 12.5,
       buysM5: 45,
       sellsM5: 20,
+      volumeBuysM5: 15000,
+      volumeSellsM5: 8000,
       priceUsd: 0.095,
       h1HighPriceUsd: 0.100
     });
 
     assert.strictEqual(result.valid, true);
-    assert.match(result.momentumText || '', /m5 \+12\.5%/);
+    assert.match(result.momentumText || '', /Momentum m5: \+12\.5%/);
     assert.match(result.momentumText || '', /Buys\/Sells: 45\/20/);
+    assert.match(result.momentumText || '', /Vol Comprador > Vendedor/);
   });
 });
 

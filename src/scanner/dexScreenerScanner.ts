@@ -8,6 +8,8 @@ export interface TokenCandidate {
   liquidityUsd: number;
   volume24hUsd: number;
   volume5mUsd?: number;
+  volumeBuysM5?: number;
+  volumeSellsM5?: number;
   pairCreatedAt: number;
   dexId: string;
   priceChangeM5?: number;
@@ -216,11 +218,21 @@ export class DexScreenerScanner {
           }
         }
 
-        // 2. Dominância de Compradores (Order Flow: buys >= sells * 1.3)
+        // 2. Dominância de Compradores (Order Flow: txns e volumes nos 5m)
         const buysM5 = item.txns?.m5?.buys !== undefined ? Number(item.txns.m5.buys) : undefined;
         const sellsM5 = item.txns?.m5?.sells !== undefined ? Number(item.txns.m5.sells) : undefined;
         if (buysM5 !== undefined && sellsM5 !== undefined && (buysM5 + sellsM5 > 0)) {
-          if (buysM5 < (sellsM5 * 1.3)) {
+          // Exija no mínimo 20% mais compradores que vendedores (buys >= sells * 1.2)
+          if (buysM5 < (sellsM5 * 1.2)) {
+            continue;
+          }
+        }
+
+        // Volume comprador vs vendedor nos 5m (quando fornecido pela DexScreener)
+        const volumeBuysM5 = item.volume?.m5?.buys !== undefined ? Number(item.volume.m5.buys) : undefined;
+        const volumeSellsM5 = item.volume?.m5?.sells !== undefined ? Number(item.volume.m5.sells) : undefined;
+        if (volumeBuysM5 !== undefined && volumeSellsM5 !== undefined && (volumeBuysM5 + volumeSellsM5 > 0)) {
+          if (volumeBuysM5 <= volumeSellsM5) {
             continue;
           }
         }
@@ -235,6 +247,11 @@ export class DexScreenerScanner {
         }
         if (item.h1HighPriceUsd) {
           h1HighPriceUsd = Number(item.h1HighPriceUsd);
+        }
+
+        // Filtro anti-faca caindo: preço atual deve ser >= 70% da máxima h1
+        if (h1HighPriceUsd > 0 && (currentPriceUsd / h1HighPriceUsd) < 0.70) {
+          continue;
         }
 
         // Validação complementar de agressão de fluxo se dados de txns estiverem presentes
@@ -252,6 +269,8 @@ export class DexScreenerScanner {
           liquidityUsd,
           volume24hUsd: Number(item.volume?.h24 || 0),
           volume5mUsd: Number(item.volume?.m5 || 0),
+          volumeBuysM5,
+          volumeSellsM5,
           pairCreatedAt: pairCreatedAt || now,
           dexId: item.dexId || 'raydium',
           priceChangeM5,

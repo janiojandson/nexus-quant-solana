@@ -12,6 +12,8 @@ export interface TokenSecurityMetadata {
   priceChangeM5?: number;
   buysM5?: number;
   sellsM5?: number;
+  volumeBuysM5?: number;
+  volumeSellsM5?: number;
   priceUsd?: number;
   h1HighPriceUsd?: number;
 }
@@ -205,18 +207,18 @@ export class MemeRiskGatekeeper {
    * Valida Price Action e pressão de compradores para evitar ativos em sangria, topo esticado ou faca caindo.
    */
   public validatePriceMomentum(pair: Partial<TokenSecurityMetadata>): MomentumValidationResult {
-    // 1. Janela de Momentum Positivo (m5)
+    // 1. Janela de Momentum nos 5 Minutos (m5): entre +3% e +35%
     if (pair.priceChangeM5 !== undefined) {
       if (pair.priceChangeM5 <= 0) {
         return {
           valid: false,
-          reason: `Ayla Veto: Preço em sangria nos últimos 5m (${pair.priceChangeM5.toFixed(2)}% <= 0%)`
+          reason: `Ayla Veto: Preço em sangria/queda nos últimos 5m (${pair.priceChangeM5.toFixed(2)}% <= 0%)`
         };
       }
       if (pair.priceChangeM5 > 35) {
         return {
           valid: false,
-          reason: `Ayla Veto: Movimento esticado/FOMO excessivo (${pair.priceChangeM5.toFixed(2)}% > +35%)`
+          reason: `Ayla Veto: Preço esticado demais, risco de topo (${pair.priceChangeM5.toFixed(2)}% > +35%)`
         };
       }
       if (pair.priceChangeM5 < 3) {
@@ -227,34 +229,44 @@ export class MemeRiskGatekeeper {
       }
     }
 
-    // 2. Dominância de Compradores (Order Flow: txns.m5)
+    // 2. Dominância de Compradores (Order Flow nos 5m: transações e volumes recentes)
     if (pair.buysM5 !== undefined && pair.sellsM5 !== undefined) {
-      const minRequiredBuys = pair.sellsM5 * 1.3;
+      const minRequiredBuys = pair.sellsM5 * 1.2;
       if (pair.buysM5 < minRequiredBuys) {
         return {
           valid: false,
-          reason: `Ayla Veto: Fluxo vendedor predominante (Compras: ${pair.buysM5} < ${minRequiredBuys.toFixed(1)} [exigido 1.3x vendas: ${pair.sellsM5}])`
+          reason: `Ayla Veto: Pressão vendedora dominante (Compras: ${pair.buysM5} < ${minRequiredBuys.toFixed(1)} [exigido 1.2x vendas: ${pair.sellsM5}])`
         };
       }
     }
 
-    // 3. Proximidade da Máxima Recente (Evitar Faca Caindo: preço atual >= 75% da máxima h1)
-    if (pair.priceUsd !== undefined && pair.h1HighPriceUsd !== undefined && pair.h1HighPriceUsd > 0) {
-      const ratioFromHigh = pair.priceUsd / pair.h1HighPriceUsd;
-      if (ratioFromHigh < 0.75) {
+    if (pair.volumeBuysM5 !== undefined && pair.volumeSellsM5 !== undefined && (pair.volumeBuysM5 + pair.volumeSellsM5 > 0)) {
+      if (pair.volumeBuysM5 <= pair.volumeSellsM5) {
         return {
           valid: false,
-          reason: `Ayla Veto: Ativo em distribuição/queda pós-topo (Preço $${pair.priceUsd} é ${(ratioFromHigh * 100).toFixed(1)}% da máxima h1 $${pair.h1HighPriceUsd} < 75%)`
+          reason: `Ayla Veto: Pressão vendedora dominante (Vol Compras: $${pair.volumeBuysM5.toFixed(0)} <= Vol Vendas: $${pair.volumeSellsM5.toFixed(0)})`
         };
       }
     }
 
-    const m5Text = pair.priceChangeM5 !== undefined ? `m5 +${pair.priceChangeM5.toFixed(1)}%` : 'm5 neutro';
+    // 3. Filtro Anti-Faca Caindo (Queda Pós-Topo h1: preço atual >= 70% da máxima h1)
+    if (pair.priceUsd !== undefined && pair.h1HighPriceUsd !== undefined && pair.h1HighPriceUsd > 0) {
+      const ratioFromHigh = pair.priceUsd / pair.h1HighPriceUsd;
+      if (ratioFromHigh < 0.70) {
+        return {
+          valid: false,
+          reason: `Ayla Veto: Ativo em distribuição pós-topo (Preço $${pair.priceUsd} é ${(ratioFromHigh * 100).toFixed(1)}% da máxima h1 $${pair.h1HighPriceUsd} < 70%)`
+        };
+      }
+    }
+
+    const m5Text = pair.priceChangeM5 !== undefined ? `Momentum m5: +${pair.priceChangeM5.toFixed(1)}%` : 'Momentum m5: neutro';
     const flowText = (pair.buysM5 !== undefined && pair.sellsM5 !== undefined) ? `Buys/Sells: ${pair.buysM5}/${pair.sellsM5}` : 'Order Flow OK';
+    const volText = 'Vol Comprador > Vendedor';
 
     return {
       valid: true,
-      momentumText: `${m5Text} | ${flowText}`
+      momentumText: `${m5Text} | ${flowText} | ${volText}`
     };
   }
 }
