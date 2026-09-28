@@ -36,6 +36,12 @@ export interface DashboardState {
   activeRpcUrl: string;
   totalRealizedPnlSol: number;
   totalNetworkFeesSolEst: number;
+  incubator?: {
+    waiting: number;
+    mature: number;
+    technicalDiscards: number;
+    aylaEligible: number;
+  };
   positions: Array<{
     mint: string;
     symbol: string;
@@ -48,6 +54,8 @@ export interface DashboardState {
     entryTimestamp: number;
     dexScreenerUrl: string;
     solscanUrl: string;
+    trailingActive?: boolean;
+    stopStatusText?: string;
   }>;
   walletHoldings?: WalletHoldingView[];
   closedTrades: ClosedTradeView[];
@@ -57,7 +65,6 @@ export interface DashboardState {
     isSafe: boolean;
     score: number;
     reason?: string;
-    /** Preenchido quando o token foi aprovado mas o swap falhou (ex: 0x177e) */
     swapFailReason?: string;
     timestamp: number;
   }>;
@@ -67,386 +74,300 @@ export interface DashboardState {
 }
 
 export function renderDashboardHtml(state: DashboardState): string {
-  const pnlColor = (pnl: number) => (pnl >= 0 ? '#10B981' : '#EF4444');
-  const formatUsd = (num: number) => {
-    if (!num || num === 0) return '$0.00';
-    if (num < 0.000001) return `$${num.toExponential(4)}`;
-    if (num < 0.01) return `$${num.toFixed(8)}`;
-    return `$${num.toFixed(4)}`;
-  };
-
-  const positionsRows = state.positions.length === 0
-    ? `<tr><td colspan="7" style="text-align: center; color: #94A3B8; padding: 24px;">Nenhuma posição aberta no momento. O scanner está caçando novas oportunidades elegíveis...</td></tr>`
-    : state.positions.map(p => `
-      <tr style="border-bottom: 1px solid #1E293B;">
-        <td style="padding: 14px 16px; font-weight: 600;">
-          <a href="https://solscan.io/token/${p.mint}" target="_blank" title="Ver token na Solana (Solscan)" style="color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
-            <span>${p.symbol}</span>
-            <span style="font-size: 11px;">↗</span>
-          </a>
-          <div style="font-size: 11px; color: #64748B; font-family: monospace;">
-            <a href="https://solscan.io/token/${p.mint}" target="_blank" style="color: #64748B; text-decoration: none;">${p.mint.substring(0, 6)}...${p.mint.substring(p.mint.length - 4)}</a>
-          </div>
-        </td>
-        <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${Number(p.tokenAmount).toLocaleString()}</td>
-        <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(p.entryPriceUsd)}</td>
-        <td style="padding: 14px 16px; font-family: monospace; color: #CBD5E1;" id="price-${p.mint}">${formatUsd(p.currentPriceUsd)}</td>
-        <td id="pnl-${p.mint}" style="padding: 14px 16px; font-weight: 700; font-family: monospace; color: ${pnlColor(p.pnlPct)};">
-          ${p.pnlPct >= 0 ? '+' : ''}${(p.pnlPct * 100).toFixed(2)}%
-        </td>
-        <td style="padding: 14px 16px; font-size: 12px; font-family: monospace; color: #94A3B8;">
-          SL: ${(p.stopLossPct * 100).toFixed(0)}% | TP: +${(p.takeProfitPct * 100).toFixed(0)}%
-        </td>
-        <td style="padding: 14px 16px; text-align: right;">
-          <button onclick="emergencyExit('${p.mint}', '${p.symbol}')" style="margin-right: 8px; font-size: 11px; font-weight: 700; color: #FFFFFF; background: #EF4444; border: none; padding: 5px 10px; border-radius: 4px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#DC2626'" onmouseout="this.style.background='#EF4444'">🚨 Vender a Mercado</button>
-          <a href="${p.dexScreenerUrl}" target="_blank" style="margin-right: 8px; font-size: 12px; color: #38BDF8; text-decoration: none; padding: 4px 8px; background: rgba(56,189,248,0.1); border-radius: 4px;">DexScreener ↗</a>
-          <a href="https://solscan.io/token/${p.mint}" target="_blank" style="font-size: 12px; color: #A855F7; text-decoration: none; padding: 4px 8px; background: rgba(168,85,247,0.1); border-radius: 4px;">Solana Explorer ↗</a>
-        </td>
-      </tr>
-    `).join('');
-
-  const closedRows = state.closedTrades.length === 0
-    ? `<tr><td colspan="7" style="text-align: center; color: #94A3B8; padding: 24px;">Nenhum trade encerrado ainda. As operações fechadas com lucro (+TP) ou proteção (-SL) aparecerão detalhadas aqui.</td></tr>`
-    : state.closedTrades.map(c => `
-      <tr style="border-bottom: 1px solid #1E293B;">
-        <td style="padding: 12px 16px; font-weight: 600;">
-          <a href="https://solscan.io/token/${c.mint}" target="_blank" title="Ver token na Solana (Solscan)" style="color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
-            <span>${c.symbol}</span>
-            <span style="font-size: 11px;">↗</span>
-          </a>
-          <div style="font-size: 11px; color: #64748B; font-family: monospace;">
-            <a href="https://solscan.io/token/${c.mint}" target="_blank" style="color: #64748B; text-decoration: none;">${c.mint.substring(0, 6)}...${c.mint.substring(c.mint.length - 4)}</a>
-          </div>
-        </td>
-        <td style="padding: 12px 16px;">
-          <span style="padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background: ${
-            c.exitReason === 'TAKE_PROFIT' || c.exitReason === 'PARTIAL_TAKE_PROFIT_50' ? 'rgba(16,185,129,0.15)' :
-            c.exitReason === 'TRAILING_STOP' ? 'rgba(56,189,248,0.15)' :
-            c.exitReason === 'TIME_STOP' ? 'rgba(245,158,11,0.15)' :
-            'rgba(239,68,68,0.15)'
-          }; color: ${
-            c.exitReason === 'TAKE_PROFIT' || c.exitReason === 'PARTIAL_TAKE_PROFIT_50' ? '#10B981' :
-            c.exitReason === 'TRAILING_STOP' ? '#38BDF8' :
-            c.exitReason === 'TIME_STOP' ? '#F59E0B' :
-            '#EF4444'
-          };">
-            ${
-              c.exitReason === 'PARTIAL_TAKE_PROFIT_50' ? '🟢 PARCIAL 50% (+100%)' :
-              c.exitReason === 'TAKE_PROFIT' ? '🟢 TAKE-PROFIT (+100%)' :
-              c.exitReason === 'TRAILING_STOP' ? '🛡️ TRAILING STOP (-15% Topo)' :
-              c.exitReason === 'TIME_STOP' ? '⏱️ TIME-STOP (15m)' :
-              c.exitReason === 'MANUAL' ? '🚨 MANUAL' :
-              '🔴 STOP-LOSS (-20%)'
-            }
-          </span>
-        </td>
-        <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(c.entryPriceUsd)}</td>
-        <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1;">${formatUsd(c.exitPriceUsd)}</td>
-        <td style="padding: 12px 16px; font-weight: 700; font-family: monospace; color: ${pnlColor(c.pnlPct)};">
-          ${c.pnlPct >= 0 ? '+' : ''}${(c.pnlPct * 100).toFixed(2)}%
-          <div style="font-size: 11px; color: ${pnlColor(c.pnlSolEst)}; font-weight: 500;">${c.pnlSolEst >= 0 ? '+' : ''}${c.pnlSolEst.toFixed(4)} SOL</div>
-        </td>
-        <td style="padding: 12px 16px; font-size: 12px; color: #94A3B8;">${new Date(c.exitTimestamp).toLocaleTimeString()}</td>
-        <td style="padding: 12px 16px; text-align: right;">
-          <a href="${c.dexScreenerUrl}" target="_blank" style="margin-right: 6px; font-size: 11px; color: #38BDF8; text-decoration: none; padding: 3px 6px; background: rgba(56,189,248,0.1); border-radius: 4px;">Gráfico</a>
-          <a href="https://solscan.io/token/${c.mint}" target="_blank" style="margin-right: 6px; font-size: 11px; color: #A855F7; text-decoration: none; padding: 3px 6px; background: rgba(168,85,247,0.1); border-radius: 4px;">Solana</a>
-          ${c.txSignature ? `<a href="https://solscan.io/tx/${c.txSignature}" target="_blank" style="font-size: 11px; color: #10B981; text-decoration: none; padding: 3px 6px; background: rgba(16,185,129,0.1); border-radius: 4px;">Tx</a>` : ''}
-        </td>
-      </tr>
-    `).join('');
-
-  const auditsRows = state.recentAudits.slice(0, 8).map(a => `
-    <tr style="border-bottom: 1px solid #1E293B; font-size: 13px;">
-      <td style="padding: 10px 16px; font-weight: 500;">
-        <a href="https://solscan.io/token/${a.mint}" target="_blank" style="color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
-          <span>${a.symbol}</span>
-          <span style="font-size: 10px;">↗</span>
-        </a>
-      </td>
-      <td style="padding: 10px 16px;">
-        ${a.isSafe && a.swapFailReason
-          ? `<span style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(234,179,8,0.15); color: #EAB308;">APROVADO (Falha no Swap)</span>`
-          : `<span style="padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: ${a.isSafe ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)'}; color: ${a.isSafe ? '#10B981' : '#EF4444'};">${a.isSafe ? 'APROVADO' : 'VETADO'}</span>`
-        }
-      </td>
-      <td style="padding: 10px 16px; font-family: monospace; color: #CBD5E1;">${a.score}/100</td>
-      <td style="padding: 10px 16px; color: #94A3B8; font-size: 12px;">${
-        a.swapFailReason ? `⚠️ Swap falhou: ${a.swapFailReason}` : (a.reason || 'Verificação concluída')
-      }</td>
-      <td style="padding: 10px 16px; text-align: right; color: #64748B; font-size: 11px;">
-        <a href="https://dexscreener.com/solana/${a.mint}" target="_blank" style="color: #38BDF8; text-decoration: none; margin-right: 8px;">DexScreener</a>
-        <a href="https://solscan.io/token/${a.mint}" target="_blank" style="color: #A855F7; text-decoration: none;">Solana</a>
-      </td>
-    </tr>
-  `).join('');
+  const waitingCount = state.incubator?.waiting ?? 0;
+  const matureCount = state.incubator?.mature ?? 0;
+  const discardsCount = state.incubator?.technicalDiscards ?? 0;
+  const aylaCount = state.incubator?.aylaEligible ?? 0;
 
   return `<!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-BR" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nexus Quant Solana - Terminal Institucional</title>
-  <!-- SEM meta refresh: atualização via JS polling assíncrono a cada 4s -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', -apple-system, sans-serif; }
-    body { background-color: #0B0F17; color: #F8FAFC; min-height: 100vh; padding: 24px; }
-    .container { max-width: 1300px; margin: 0 auto; }
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid #1E293B; }
-    .title-box { display: flex; align-items: center; gap: 12px; }
-    .status-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 4px 10px; border-radius: 9999px; background: rgba(16, 185, 129, 0.1); color: #10B981; font-weight: 600; }
-    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: #10B981; box-shadow: 0 0 10px #10B981; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
-    .card { background: #131B2B; border: 1px solid #1E293B; border-radius: 10px; padding: 18px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); }
-    .card-label { font-size: 11px; font-weight: 600; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
-    .card-value { font-size: 22px; font-weight: 700; color: #F8FAFC; font-family: 'JetBrains Mono', monospace; }
-    .card-sub { font-size: 11px; color: #64748B; margin-top: 5px; }
-    .table-container { background: #131B2B; border: 1px solid #1E293B; border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
-    .table-header { padding: 16px 20px; border-bottom: 1px solid #1E293B; display: flex; justify-content: space-between; align-items: center; }
-    .table-header h2 { font-size: 15px; font-weight: 600; }
-    table { width: 100%; border-collapse: collapse; text-align: left; }
-    th { padding: 12px 16px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #64748B; background: #0E1626; border-bottom: 1px solid #1E293B; }
-    .wallet-pill { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #38BDF8; background: rgba(56,189,248,0.1); padding: 4px 10px; border-radius: 6px; display: inline-block; word-break: break-all; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <div class="header">
-      <div class="title-box">
-        <h1 style="font-size: 22px; font-weight: 700; letter-spacing: -0.02em;">🚀 Nexus Quant Solana</h1>
-        <div class="status-badge"><div class="pulse-dot"></div> 24/7 ONLINE</div>
-      </div>
-      <div style="display: flex; align-items: center; gap: 16px;">
-        <button onclick="liquidateAll()" style="font-size: 13px; font-weight: 700; color: #FFFFFF; background: #DC2626; border: 1px solid #EF4444; padding: 8px 16px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; box-shadow: 0 0 15px rgba(220,38,38,0.4);" onmouseover="this.style.background='#B91C1C'" onmouseout="this.style.background='#DC2626'">
-          <span>🛑</span> Liquidar Tudo (Panic Button)
-        </button>
-        <span style="font-size: 12px; color: #64748B;">Auto-refresh: 5s | Última leitura: ${new Date(state.lastUpdated).toLocaleTimeString()}</span>
-      </div>
-    </div>
-
-    <!-- Cards de Métricas e Governança Financeira -->
-    <div class="grid">
-      <div class="card">
-        <div class="card-label">Saldo On-Chain (Phantom)</div>
-        <div class="card-value" style="color: #38BDF8;">${state.balanceSol.toFixed(4)} <span style="font-size: 14px;">SOL</span></div>
-        <div class="card-sub">Vitalidade: <strong style="color: #10B981;">${state.vitalityState}</strong></div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">PnL Realizado Fechado</div>
-        <div class="card-value" style="color: ${pnlColor(state.totalRealizedPnlSol)};">
-          ${state.totalRealizedPnlSol >= 0 ? '+' : ''}${state.totalRealizedPnlSol.toFixed(4)} <span style="font-size: 14px;">SOL</span>
-        </div>
-        <div class="card-sub">Trades Encerrados: <strong>${state.closedTrades.length}</strong></div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Taxas de Rede & ATA Estimadas</div>
-        <div class="card-value" style="color: #F59E0B;">~${state.totalNetworkFeesSolEst.toFixed(4)} <span style="font-size: 14px;">SOL</span></div>
-        <div class="card-sub">Criação de Contas ATA + Prioridade</div>
-      </div>
-
-      <div class="card">
-        <div class="card-label">Posições Abertas / Sentinel</div>
-        <div class="card-value" style="color: ${state.positions.length > 0 ? '#38BDF8' : '#94A3B8'};">
-          ${state.positions.length} <span style="font-size: 14px;">Em Custódia</span>
-        </div>
-        <div class="card-sub">Sentinel: <strong style="color: ${state.circuitBreakerActive ? '#EF4444' : '#10B981'};">${state.circuitBreakerActive ? '🛑 DISJUNTOR ATIVO' : '🛡️ SEGURO'}</strong></div>
-      </div>
-    </div>
-
-    <!-- Tabela de Posições Abertas -->
-    <div class="table-container">
-      <div class="table-header">
-        <h2>📊 Posições Ativas Monitoradas (1.5s Ultra-Fast Jupiter Exit)</h2>
-        <span style="font-size: 12px; color: #94A3B8;">Take-Profit: +50% | Stop-Loss: -20% | Time-Stop: 15 min | Trailing Breakeven: Ativo</span>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Ativo</th>
-            <th>Quantidade</th>
-            <th>Preço Entrada</th>
-            <th>Preço Atual</th>
-            <th>PnL % Flutuante</th>
-            <th>Alvos de Risco</th>
-            <th style="text-align: right;">Ações On-Chain</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${positionsRows}
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Tabela de Ativos Custodiados na Carteira On-Chain (Detectados via RPC) -->
-    <div class="table-container">
-      <div class="table-header">
-        <h2>🪙 Todos os Tokens Custodiados na Phantom (Varredura On-Chain em Tempo Real)</h2>
-        <span style="font-size: 12px; color: #38BDF8;">Detecta qualquer SPL com saldo > 0 e permite liquidação imediata para SOL</span>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Token / Mint</th>
-            <th>Saldo em Tokens</th>
-            <th>Conta Token (ATA)</th>
-            <th style="text-align: right;">Ação Imediata</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${(!state.walletHoldings || state.walletHoldings.length === 0)
-            ? '<tr><td colspan="4" style="text-align: center; color: #10B981; padding: 20px; font-weight: 500;">✅ Nenhum resíduo ou token avulso pendente. Carteira 100% consolidada em SOL livre!</td></tr>'
-            : state.walletHoldings.map(h => `
-              <tr style="border-bottom: 1px solid #1E293B;">
-                <td style="padding: 12px 16px; font-weight: 600;">
-                  <a href="${h.solscanUrl}" target="_blank" style="color: #38BDF8; text-decoration: none;">${h.symbol}</a>
-                  <div style="font-size: 11px; color: #64748B; font-family: monospace;">${h.mint}</div>
-                </td>
-                <td style="padding: 12px 16px; font-family: monospace; color: #CBD5E1; font-weight: 600;">
-                  ${h.tokenAmount.toLocaleString()}
-                </td>
-                <td style="padding: 12px 16px; font-family: monospace; font-size: 11px; color: #64748B;">
-                  ${h.ataAddress.substring(0, 6)}...${h.ataAddress.substring(h.ataAddress.length - 4)}
-                </td>
-                <td style="padding: 12px 16px; text-align: right;">
-                  <button onclick="liquidateHolding('${h.mint}', '${h.symbol}', ${h.tokenAmount}, ${h.decimals})" style="font-size: 11px; font-weight: 700; color: #FFFFFF; background: #DC2626; border: 1px solid #EF4444; padding: 6px 12px; border-radius: 4px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='#B91C1C'" onmouseout="this.style.background='#DC2626'">
-                    ⚡ Liquidar para SOL & Fechar Conta
-                  </button>
-                  <a href="${h.dexScreenerUrl}" target="_blank" style="margin-left: 8px; font-size: 11px; color: #38BDF8; text-decoration: none; padding: 4px 8px; background: rgba(56,189,248,0.1); border-radius: 4px;">Gráfico</a>
-                </td>
-              </tr>
-            `).join('')
-          }
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Tabela de Histórico de Trades Fechados -->
-    <div class="table-container">
-      <div class="table-header">
-        <h2>🏁 Histórico de Trades Fechados (Realized PnL & Saídas On-Chain)</h2>
-        <span style="font-size: 12px; color: #94A3B8;">Histórico das últimas 50 posições encerradas</span>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Ativo</th>
-            <th>Gatilho de Saída</th>
-            <th>Preço Entrada</th>
-            <th>Preço Saída</th>
-            <th>PnL Líquido</th>
-            <th>Horário Fechamento</th>
-            <th style="text-align: right;">Auditoria</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${closedRows}
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Tabela de Auditorias Recentes -->
-    <div class="table-container">
-      <div class="table-header">
-        <h2>🛡️ Histórico Recente de Análises (DexScreener + RugCheck + Ayla)</h2>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Token</th>
-            <th>Veredito</th>
-            <th>Score Segurança</th>
-            <th>Motivo / Status</th>
-            <th style="text-align: right;">Horário</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${auditsRows.length === 0 ? '<tr><td colspan="5" style="text-align: center; color: #64748B; padding: 16px;">Aguardando varredura...</td></tr>' : auditsRows}
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Rodapé de Configuração -->
-    <div style="display: flex; justify-content: space-between; align-items: center; padding: 16px; background: #0E1626; border-radius: 8px; border: 1px solid #1E293B; font-size: 12px; color: #94A3B8;">
-      <div>
-        Carteira Oficial Phantom: <span class="wallet-pill">${state.wallet}</span>
-      </div>
-      <div>
-        RPC Ativa: <span style="color: #CBD5E1; font-family: monospace;">${state.activeRpcUrl}</span>
-      </div>
-    </div>
-  </div>
-
+  <title>NEXUS QUANT SOLANA | SISTEMA 24/7</title>
+  <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    async function emergencyExit(mint, symbol) {
-      if (!confirm('Deseja vender imediatamente a mercado o token ' + symbol + ' via Jupiter, resgatar a caução da ATA e colocá-lo em quarentena de 24h?')) {
-        return;
-      }
-      try {
-        const res = await fetch('/api/positions/' + encodeURIComponent(mint) + '/exit', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-        const data = await res.json();
-        if (data.success) {
-          alert('✅ Venda de ' + symbol + ' executada! Tx: ' + (data.txSignature || 'OK') + ' — posição removida em até 4s.');
-          // Sem reload: polling assíncrono irá remover a linha em até 4s
-        } else {
-          alert('❌ Falha na venda de ' + symbol + ': ' + (data.error || 'Erro desconhecido'));
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#F0F9FF',
+              500: '#0284C7',
+              600: '#0369A1',
+              900: '#0C4A6E'
+            }
+          }
         }
-      } catch (err) {
-        alert('❌ Erro de conexão ao solicitar venda: ' + err.message);
-      }
-    }
-
-    async function liquidateAll() {
-      if (!confirm('⚠️ ALERTA MÁXIMO: Deseja liquidar TODAS as posições em custódia imediatamente a mercado, resgatar as contas ATA e pausar as entradas?')) {
-        return;
-      }
-      try {
-        const res = await fetch('/api/positions/liquidate-all', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-        const data = await res.json();
-        alert('🛑 Ordem de liquidação global disparada! ' + (data.message || ''));
-        // Sem reload — o polling assíncrono irá atualizar os dados automaticamente em até 4s
-      } catch (err) {
-        alert('❌ Erro de conexão na liquidação: ' + err.message);
-      }
-    }
-
-    async function liquidateHolding(mint, symbol, amount, decimals) {
-      if (!confirm('⚡ Deseja liquidar IMEDIATAMENTE a mercado ' + Number(amount).toLocaleString() + ' ' + symbol + ' para SOL via Jupiter e resgatar a caução da conta ATA?')) {
-        return;
-      }
-      try {
-        const res = await fetch('/api/wallet/liquidate-holding', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mint, symbol, amount, decimals })
-        });
-        const data = await res.json();
-        if (data.success) {
-          alert('✅ Liquidação de ' + symbol + ' concluída! Tx: ' + (data.txSignature || 'OK') + ' — dados atualizarão em até 4s.');
-          // Sem reload: polling assíncrono atualiza automaticamente
-        } else {
-          alert('❌ Falha na liquidação: ' + (data.error || 'Erro desconhecido'));
-        }
-      } catch (err) {
-        alert('❌ Erro de conexão ao solicitar liquidação: ' + err.message);
       }
     }
   </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 md:p-6 lg:p-8 antialiased">
+  <div class="max-w-7xl mx-auto space-y-6">
 
+    <!-- CABEÇALHO SUPERIOR INSTITUCIONAL -->
+    <header class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 md:p-6 shadow-2xl backdrop-blur-md flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+      <div class="space-y-1">
+        <div class="flex items-center gap-3">
+          <div class="h-3 w-3 rounded-full bg-emerald-500 animate-ping"></div>
+          <h1 class="text-xl md:text-2xl font-black tracking-tight text-white flex items-center gap-2">
+            NEXUS QUANT SOLANA <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">SISTEMA 24/7</span>
+          </h1>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+          <span>Carteira Phantom:</span>
+          <a href="https://solscan.io/account/${state.wallet}" target="_blank" class="font-mono text-cyan-400 hover:underline flex items-center gap-1">
+            ${state.wallet.slice(0, 6)}...${state.wallet.slice(-6)}
+            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+          </a>
+          <span class="text-slate-600">|</span>
+          <span>Modo: <strong class="${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">${state.dryRun ? 'DRY-RUN (Simulação)' : 'EXECUÇÃO REAL ON-CHAIN'}</strong></span>
+          <span class="text-slate-600">|</span>
+          <span>Atualizado: <span id="last-updated" class="font-mono text-slate-300">${new Date(state.lastUpdated || Date.now()).toLocaleTimeString()}</span></span>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
+        <!-- Saldo Carteira Badge -->
+        <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-4 py-2 flex items-center gap-3 shadow-inner">
+          <div class="text-xs text-slate-400 uppercase tracking-wider font-semibold">Saldo</div>
+          <div id="wallet-balance" class="text-lg md:text-xl font-bold font-mono text-emerald-400">
+            ${Number(state.balanceSol || 0).toFixed(4)} SOL
+          </div>
+        </div>
+
+        <!-- Sentinel Status Badge -->
+        <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-2 flex items-center gap-2">
+          <span id="sentinel-dot" class="h-2.5 w-2.5 rounded-full ${state.circuitBreakerActive ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500 animate-pulse'}"></span>
+          <div class="text-xs">
+            <span class="text-slate-400 font-medium">Sentinel:</span>
+            <strong id="sentinel-text" class="${state.circuitBreakerActive ? 'text-rose-400' : 'text-emerald-400'} ml-1 font-mono">
+              ${state.circuitBreakerActive ? 'DISJUNTOR ATIVO' : (state.macroRegime || 'SEGURO')}
+            </strong>
+          </div>
+        </div>
+
+        <!-- Botão de Ação Rápida: PÂNICO GERAL -->
+        <button onclick="panicAll()" class="bg-gradient-to-r from-rose-600 to-red-700 hover:from-rose-500 hover:to-red-600 text-white font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl shadow-lg shadow-rose-950/60 border border-rose-500/50 flex items-center gap-2 transition-all active:scale-95 cursor-pointer">
+          <span class="text-base">🚨</span>
+          <span>PÂNICO GERAL / ZERAR TUDO</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- GRID DE MÉTRICAS DO FUNIL DE MATURAÇÃO -->
+    <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <!-- Card 1: Incubadora -->
+      <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
+        <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+          <span>🕒 Incubadora (Aguardando)</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">&lt; 15 min</span>
+        </div>
+        <div id="metric-incubator-waiting" class="text-2xl md:text-3xl font-black font-mono text-cyan-400 mt-2">
+          ${waitingCount}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Tokens marinando pós-dump inicial</div>
+      </div>
+
+      <!-- Card 2: Maturos -->
+      <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
+        <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+          <span>🎯 Maturos (Prontos)</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">15-60 min</span>
+        </div>
+        <div id="metric-incubator-mature" class="text-2xl md:text-3xl font-black font-mono text-amber-400 mt-2">
+          ${matureCount}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Avaliados em lote via DexScreener</div>
+      </div>
+
+      <!-- Card 3: Descartes Técnicos -->
+      <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
+        <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+          <span>🛡️ Descartes Técnicos</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/10 text-slate-400">Filtro $20k</span>
+        </div>
+        <div id="metric-technical-discards" class="text-2xl md:text-3xl font-black font-mono text-rose-400 mt-2">
+          ${discardsCount}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Barrados por liquidez ou momentum</div>
+      </div>
+
+      <!-- Card 4: Elegíveis Ayla -->
+      <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
+        <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
+          <span>🧠 Elegíveis para Ayla</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">Gatilho +EV</span>
+        </div>
+        <div id="metric-ayla-eligible" class="text-2xl md:text-3xl font-black font-mono text-emerald-400 mt-2">
+          ${aylaCount}
+        </div>
+        <div class="text-[11px] text-slate-500 mt-1">Candidatos aprovados para entrada</div>
+      </div>
+    </section>
+
+    <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
+    <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+      <div class="p-4 md:px-6 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/90">
+        <div>
+          <h2 class="text-base md:text-lg font-bold text-white flex items-center gap-2">
+            <span>⚡ Posições Ativas sob Gestão</span>
+            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
+              ${state.positions.length} / 2
+            </span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">Ultra-Fast 1.5s quote loop · Stop Loss: -8% · Trailing Stop: -10% Topo · Slippage: 5%</p>
+        </div>
+        <button onclick="sweepRentManual()" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 flex items-center gap-1.5 transition">
+          <span>🧹</span>
+          <span>Varrer Aluguel ATAs</span>
+        </button>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-sm">
+          <thead class="bg-slate-950/60 text-slate-400 text-xs uppercase tracking-wider font-semibold border-b border-slate-800">
+            <tr>
+              <th class="py-3 px-4 md:px-6">Token / Mint</th>
+              <th class="py-3 px-4">Preço Entrada</th>
+              <th class="py-3 px-4">Cotação Atual</th>
+              <th class="py-3 px-4">PnL Flutuante</th>
+              <th class="py-3 px-4">Stop Loss</th>
+              <th class="py-3 px-4">Trailing Stop</th>
+              <th class="py-3 px-4 md:px-6 text-right">Ação</th>
+            </tr>
+          </thead>
+          <tbody id="positions-tbody" class="divide-y divide-slate-800/60 font-mono">
+            ${state.positions.length === 0 ? `
+              <tr>
+                <td colspan="7" class="py-8 text-center text-slate-500 font-sans">
+                  Varredura ativa. Aguardando breakout validado pela Ayla...
+                </td>
+              </tr>
+            ` : state.positions.map(p => {
+              const pnlVal = Number(p.pnlPct || 0);
+              const isProfit = pnlVal >= 0;
+              return `
+              <tr id="pos-row-${p.mint}" class="hover:bg-slate-800/30 transition">
+                <td class="py-4 px-4 md:px-6 font-sans">
+                  <div class="font-bold text-white flex items-center gap-2">
+                    <span>${p.symbol}</span>
+                    <a href="https://solscan.io/token/${p.mint}" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>
+                  </div>
+                  <div class="text-[11px] text-slate-400 font-mono">${p.mint.slice(0, 6)}...${p.mint.slice(-4)}</div>
+                </td>
+                <td class="py-4 px-4 text-slate-300">$${Number(p.entryPriceUsd).toFixed(6)}</td>
+                <td id="price-${p.mint}" class="py-4 px-4 text-slate-200">$${Number(p.currentPriceUsd).toFixed(6)}</td>
+                <td id="pnl-${p.mint}" class="py-4 px-4 font-bold ${isProfit ? 'text-emerald-400' : 'text-rose-400'}">
+                  ${isProfit ? '+' : ''}${(pnlVal * 100).toFixed(2)}%
+                </td>
+                <td class="py-4 px-4 text-xs text-slate-400">${(Number(p.stopLossPct) * 100).toFixed(1)}%</td>
+                <td class="py-4 px-4 text-xs">
+                  <span class="${p.trailingActive ? 'text-emerald-400 font-semibold' : 'text-slate-500'}">
+                    ${p.trailingActive ? 'ATIVO (-10% Topo)' : 'INATIVO (Aguardando +35%)'}
+                  </span>
+                </td>
+                <td class="py-4 px-4 md:px-6 text-right font-sans">
+                  <button onclick="panicToken('${p.mint}', '${p.symbol}')" class="bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg border border-rose-500/40 shadow-sm transition active:scale-95 cursor-pointer">
+                    VENDER AGORA (PÂNICO)
+                  </button>
+                </td>
+              </tr>
+            `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- PAINEL DE TELEMETRIA E LOGS EM TEMPO REAL -->
+    <section class="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 md:p-6 shadow-xl space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-sm md:text-base font-bold text-white flex items-center gap-2">
+          <span>📡 Telemetria & Logs em Tempo Real</span>
+          <span class="h-2 w-2 rounded-full bg-cyan-400 animate-ping"></span>
+        </h2>
+        <span class="text-xs text-slate-500 font-mono">Auto-scroll ativo</span>
+      </div>
+      <div id="logs-container" class="bg-black/90 border border-slate-800/80 rounded-xl p-4 font-mono text-xs text-slate-300 h-64 overflow-y-auto space-y-1.5">
+        ${(state.scannerLogs || []).map(l => {
+          const text = typeof l === 'string' ? l : `[${l.timestamp}] ${l.message}`;
+          const colorClass = text.includes('Elegíveis para Ayla: 1') || text.includes('APROVADO')
+            ? 'text-emerald-400'
+            : text.includes('⚠️') || text.includes('VETADO')
+            ? 'text-amber-400'
+            : text.includes('🚨') || text.includes('Erro')
+            ? 'text-rose-400'
+            : 'text-slate-300';
+          return `<div class="${colorClass}">${text}</div>`;
+        }).join('')}
+      </div>
+    </section>
+
+  </div>
+
+  <!-- SCRIPT DE AÇÕES & POLLING NATIVO A CADA 2.5s -->
   <script>
-    // ── Polling Assíncrono sem Reload de Página (a cada 4s) ──────────────────
-    // Atualiza os cards de saldo/vitalidade e PnL das posições abertas
-    // sem causar piscar de tela ou resetar o scroll do usuário
-    const POLL_INTERVAL_MS = 4000;
+    async function panicToken(mint, symbol) {
+      if (!confirm('⚡ CONFIRMAR VENDA DE EMERGÊNCIA:\nDeseja liquidar 100% de ' + symbol + ' a mercado via Jupiter V6 e resgatar o aluguel da conta ATA (~0.00204 SOL)?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/panic/' + encodeURIComponent(mint), { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          alert('✅ ' + (data.message || 'Moeda liquidada com sucesso!'));
+          pollDashboard();
+        } else {
+          alert('❌ Falha na liquidação de pânico: ' + (data.error || 'Erro desconhecido'));
+        }
+      } catch (err) {
+        alert('❌ Erro de conexão ao enviar ordem de pânico: ' + err.message);
+      }
+    }
+
+    async function panicAll() {
+      if (!confirm('🚨 ATENÇÃO: PÂNICO GERAL / ZERAR TUDO!\n\nEsta ação irá:\n1. Desarmar o disjuntor do Sentinel e vetar novas compras;\n2. Interromper todos os monitores ativos;\n3. Liquidar 100% de todos os tokens da carteira a mercado para SOL;\n4. Fechar todas as contas de token (ATAs) e resgatar os aluguéis.\n\nDeseja prosseguir?')) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/panic/all', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          alert('🚨 PÂNICO GERAL EXECUTADO COM SUCESSO!\n' + (data.message || ''));
+          pollDashboard();
+        } else {
+          alert('❌ Falha no pânico geral: ' + (data.error || 'Erro desconhecido'));
+        }
+      } catch (err) {
+        alert('❌ Erro de conexão ao enviar pânico geral: ' + err.message);
+      }
+    }
+
+    async function sweepRentManual() {
+      try {
+        const res = await fetch('/api/wallet/sweep-rent', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          alert('🧹 Varredura de aluguel concluída! Contas fechadas: ' + data.closedCount + ' | SOL recuperado: ~' + data.reclaimedSolEst);
+          pollDashboard();
+        } else {
+          alert('⚠️ Erro na varredura: ' + (data.error || 'Falha'));
+        }
+      } catch (err) {
+        alert('Erro ao chamar varredura de aluguel: ' + err.message);
+      }
+    }
+
+    // Polling nativo a cada 2.5 segundos (sem piscar a tela)
+    const POLL_INTERVAL_MS = 2500;
 
     async function pollDashboard() {
       try {
@@ -454,45 +375,107 @@ export function renderDashboardHtml(state: DashboardState): string {
         if (!res.ok) return;
         const data = await res.json();
 
-        // Atualiza timestamp de atualização
+        // 1. Atualiza timestamp e saldo
         const tsEl = document.getElementById('last-updated');
-        if (tsEl) tsEl.textContent = new Date(data.lastUpdated || Date.now()).toLocaleTimeString();
+        if (tsEl) tsEl.textContent = new Date().toLocaleTimeString();
 
-        // Atualiza saldo SOL
-        const balEl = document.getElementById('balance-sol');
-        if (balEl && data.balanceSol !== undefined) {
-          balEl.textContent = Number(data.balanceSol).toFixed(4) + ' SOL';
+        const bal = data.wallet?.balanceSol ?? data.balanceSol;
+        const balEl = document.getElementById('wallet-balance');
+        if (balEl && bal !== undefined) {
+          balEl.textContent = Number(bal).toFixed(4) + ' SOL';
         }
 
-        // Atualiza linhas de posição aberta (PnL e preço atual)
-        if (data.positions && Array.isArray(data.positions)) {
-          data.positions.forEach(pos => {
-            const pnlEl = document.getElementById('pnl-' + pos.mint);
-            const priceEl = document.getElementById('price-' + pos.mint);
-            if (pnlEl) {
-              const pct = (pos.pnlPct * 100).toFixed(2);
-              pnlEl.textContent = (pos.pnlPct >= 0 ? '+' : '') + pct + '%';
-              pnlEl.style.color = pos.pnlPct >= 0 ? '#10B981' : '#EF4444';
-            }
-            if (priceEl && pos.currentPriceUsd !== undefined) {
-              const p = Number(pos.currentPriceUsd);
-              if (p < 0.000001 && p > 0) {
-                priceEl.textContent = '$' + p.toExponential(4);
-              } else if (p < 0.01 && p > 0) {
-                priceEl.textContent = '$' + p.toFixed(8);
-              } else {
-                priceEl.textContent = '$' + p.toFixed(4);
-              }
-            }
-          });
+        // 2. Atualiza Sentinel
+        const sentinelStatus = data.sentinel?.status ?? data.macroRegime ?? 'NORMAL';
+        const isBreaker = data.sentinel?.circuitBreaker === 'ENGAGED' || Boolean(data.circuitBreakerActive);
+        const sentinelTextEl = document.getElementById('sentinel-text');
+        const sentinelDotEl = document.getElementById('sentinel-dot');
+        if (sentinelTextEl) {
+          sentinelTextEl.textContent = isBreaker ? 'DISJUNTOR ATIVO' : sentinelStatus;
+          sentinelTextEl.className = (isBreaker ? 'text-rose-400' : 'text-emerald-400') + ' ml-1 font-mono';
         }
-      } catch (_) {
-        // Silencioso: RPC pode ter latência pontual
+        if (sentinelDotEl) {
+          sentinelDotEl.className = 'h-2.5 w-2.5 rounded-full ' + (isBreaker ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500 animate-pulse');
+        }
+
+        // 3. Atualiza Cards do Funil
+        const incubator = data.incubator || {};
+        const elWaiting = document.getElementById('metric-incubator-waiting');
+        const elMature = document.getElementById('metric-incubator-mature');
+        const elDiscards = document.getElementById('metric-technical-discards');
+        const elAyla = document.getElementById('metric-ayla-eligible');
+
+        if (elWaiting && incubator.waiting !== undefined) elWaiting.textContent = incubator.waiting;
+        if (elMature && incubator.mature !== undefined) elMature.textContent = incubator.mature;
+        if (elDiscards && incubator.technicalDiscards !== undefined) elDiscards.textContent = incubator.technicalDiscards;
+        if (elAyla && incubator.aylaEligible !== undefined) elAyla.textContent = incubator.aylaEligible;
+
+        // 4. Atualiza Tabela de Posições
+        const positions = data.positions || [];
+        const posTbody = document.getElementById('positions-tbody');
+        const posBadge = document.getElementById('active-positions-badge');
+        if (posBadge) posBadge.textContent = positions.length + ' / 2';
+
+        if (posTbody) {
+          if (positions.length === 0) {
+            posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando breakout validado pela Ayla...</td></tr>';
+          } else {
+            posTbody.innerHTML = positions.map(p => {
+              const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
+              const isProfit = pnlPct >= 0;
+              const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct ? p.stopLossPct * 100 : -8);
+              return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +
+                '<td class="py-4 px-4 md:px-6 font-sans">' +
+                  '<div class="font-bold text-white flex items-center gap-2">' +
+                    '<span>' + p.symbol + '</span>' +
+                    '<a href="https://solscan.io/token/' + p.mint + '" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>' +
+                  '</div>' +
+                  '<div class="text-[11px] text-slate-400 font-mono">' + p.mint.slice(0, 6) + '...' + p.mint.slice(-4) + '</div>' +
+                '</td>' +
+                '<td class="py-4 px-4 text-slate-300">$' + Number(p.entryPriceUsd || 0).toFixed(6) + '</td>' +
+                '<td id="price-' + p.mint + '" class="py-4 px-4 text-slate-200">$' + Number(p.currentPriceUsd || 0).toFixed(6) + '</td>' +
+                '<td id="pnl-' + p.mint + '" class="py-4 px-4 font-bold ' + (isProfit ? 'text-emerald-400' : 'text-rose-400') + '">' +
+                  (isProfit ? '+' : '') + Number(pnlPct).toFixed(2) + '%' +
+                '</td>' +
+                '<td class="py-4 px-4 text-xs text-slate-400">' + Number(stopLoss).toFixed(1) + '%</td>' +
+                '<td class="py-4 px-4 text-xs">' +
+                  '<span class="' + (p.trailingStopActive || p.trailingActive ? 'text-emerald-400 font-semibold' : 'text-slate-500') + '">' +
+                    (p.trailingStopActive || p.trailingActive ? 'ATIVO (-10% Topo)' : 'INATIVO (Aguardando +35%)') +
+                  '</span>' +
+                '</td>' +
+                '<td class="py-4 px-4 md:px-6 text-right font-sans">' +
+                  '<button onclick="panicToken(\\'' + p.mint + '\\', \\'' + p.symbol + '\\')" class="bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg border border-rose-500/40 shadow-sm transition active:scale-95 cursor-pointer">' +
+                    'VENDER AGORA (PÂNICO)' +
+                  '</button>' +
+                '</td>' +
+              '</tr>';
+            }).join('');
+          }
+        }
+
+        // 5. Atualiza Logs
+        const logs = data.recentLogs || (data.scannerLogs ? data.scannerLogs.map(l => typeof l === 'string' ? l : '[' + l.timestamp + '] ' + l.message) : []);
+        const logsContainer = document.getElementById('logs-container');
+        if (logsContainer && logs.length > 0) {
+          logsContainer.innerHTML = logs.map(text => {
+            const colorClass = text.includes('Elegíveis para Ayla: 1') || text.includes('APROVADO')
+              ? 'text-emerald-400'
+              : text.includes('⚠️') || text.includes('VETADO')
+              ? 'text-amber-400'
+              : text.includes('🚨') || text.includes('Erro')
+              ? 'text-rose-400'
+              : 'text-slate-300';
+            return '<div class="' + colorClass + '">' + text + '</div>';
+          }).join('');
+          logsContainer.scrollTop = logsContainer.scrollHeight;
+        }
+
+      } catch (err) {
+        // Silencioso em caso de latência momentânea
       }
     }
 
-    // Inicia o polling imediatamente e repete a cada POLL_INTERVAL_MS
-    pollDashboard();
+    // Inicia polling
     setInterval(pollDashboard, POLL_INTERVAL_MS);
   </script>
 </body>

@@ -13,6 +13,7 @@ import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine } from './execution/positionExitEngine.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
+import { RentRecoveryService } from './services/rentRecoveryService.js';
 
 dotenv.config();
 
@@ -21,8 +22,11 @@ const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
 const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
-const MAX_CONCURRENT_POSITIONS = 1; // Modo Sniper: 1 posição por vez para foco total de CPU e liquidez
-const PORT = process.env.PORT || 3009;
+const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
+const TRADE_AMOUNT_SOL = 0.05;      // Exatamente 0.05 SOL por trade
+const GAS_RESERVE_SOL = 0.05;       // Reserva mínima intocável em 0.05 SOL (gás de saída)
+const MAX_TOTAL_ALLOCATION_SOL = 0.10; // Alocação máxima total de capital em 0.10 SOL (> 0.19 SOL livres)
+const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const LAYA_URL = process.env.LAYA_INTERNAL_URL || process.env.LAYA_PUBLIC_FALLBACK_URL || 'https://nexus-decisor-laya-production.up.railway.app';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
@@ -37,6 +41,8 @@ const wallet = new SolanaWalletService({
   secretKeyRaw: SECRET_KEY_RAW,
   rpcUrl: ACTIVE_SOLANA_RPC_URL
 });
+
+const rentRecovery = new RentRecoveryService(wallet.getConnection(), wallet.getKeypair());
 
 const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
@@ -72,6 +78,7 @@ const latestState: DashboardState = {
   closedTrades: [],
   recentAudits: [],
   quarantineCount: 0,
+  incubator: { waiting: 0, mature: 0, technicalDiscards: 0, aylaEligible: 0 },
   lastUpdated: new Date().toISOString()
 };
 
@@ -263,7 +270,85 @@ const server = http.createServer(async (req, res) => {
       return { success: true, txSignature: exitSwap.txSignature };
     },
     getAllOpenPositions: () => positionEngine.getAllPositions(),
-    sweepRent: () => wallet.sweepEmptyTokenAccounts()
+    sweepRent: () => rentRecovery.sweepOrphanAccounts(),
+    panicToken: async (mint: string) => {
+      console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter V6...`);
+      positionEngine.removePosition(mint);
+
+      const splAccounts = await wallet.getSplTokenAccounts();
+      const holding = splAccounts.find(t => t.mint === mint);
+      const amount = holding ? holding.tokenAmount : 0;
+      const decimals = holding ? holding.decimals : 9;
+      const rawLamports = Math.floor(amount * Math.pow(10, decimals));
+
+      let txSignature: string | null = null;
+      if (rawLamports > 0) {
+        const swapRes = await jupiterEngine.executeSwap({
+          inputMint: mint,
+          outputMint: 'So11111111111111111111111111111111111111112',
+          amountLamports: rawLamports,
+          userPublicKey: OFFICIAL_PHANTOM_WALLET,
+          keypair: wallet.getKeypair(),
+          slippageBps: 500,
+          priorityLevel: 'high'
+        });
+        txSignature = swapRes.txSignature;
+      }
+
+      await rentRecovery.closeTokenAccount(mint);
+      antiSpamMemory.recordVeto(mint, 'Pânico Manual Individual On-Chain', 24 * 60 * 60 * 1000);
+      updateDashboardViews();
+
+      return {
+        success: true,
+        txid: txSignature || 'PANIC_SUCCESS',
+        message: 'Moeda liquidada e aluguel de ~0.00204 SOL recuperado.'
+      };
+    },
+    panicAll: async () => {
+      console.log('🚨 [API PANIC ALL] Desarmando Sentinel, liquidando todos os tokens e fechando ATAs...');
+      latestState.circuitBreakerActive = true;
+      axios.post(`${MACRO_SENTINEL_URL}/v1/sentinel/breaker/trip`, {}).catch(() => {});
+
+      positionEngine.clearPositions();
+
+      const splAccounts = await wallet.getSplTokenAccounts();
+      const BASE_MINTS = new Set([
+        'So11111111111111111111111111111111111111112',
+        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+      ]);
+
+      let liquidationsCount = 0;
+      for (const spl of splAccounts) {
+        if (BASE_MINTS.has(spl.mint) || spl.tokenAmount <= 0) continue;
+        try {
+          const rawLamports = Math.floor(spl.tokenAmount * Math.pow(10, spl.decimals));
+          await jupiterEngine.executeSwap({
+            inputMint: spl.mint,
+            outputMint: 'So11111111111111111111111111111111111111112',
+            amountLamports: rawLamports,
+            userPublicKey: OFFICIAL_PHANTOM_WALLET,
+            keypair: wallet.getKeypair(),
+            slippageBps: 500,
+            priorityLevel: 'high'
+          });
+          await rentRecovery.closeTokenAccount(spl.mint);
+          liquidationsCount++;
+        } catch (err: any) {
+          console.warn(`⚠️ [PANIC ALL] Falha ao liquidar ${spl.mint}:`, err?.message || err);
+        }
+      }
+
+      await rentRecovery.sweepOrphanAccounts();
+      updateDashboardViews();
+
+      return {
+        success: true,
+        liquidationsCount,
+        message: 'Pânico geral executado com sucesso.'
+      };
+    }
   });
 
   if (!handled) {
@@ -272,8 +357,8 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`🌐 [Railway Healthcheck & Dashboard] Servidor ativo na porta ${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`🌐 Servidor ativo em http://0.0.0.0:${PORT}`);
 });
 
 /**
@@ -341,6 +426,8 @@ async function runUltraFastExitMonitor() {
           }
         );
 
+        positionEngine.recordQuoteSuccess(pos.mint);
+
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
           const detail = exitSignal.reasonDetail ? ` [${exitSignal.reasonDetail}]` : '';
           console.log(`🎯 [EXIT ENGINE ACIONADO${detail}] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
@@ -350,7 +437,43 @@ async function runUltraFastExitMonitor() {
           });
         }
       } catch (quoteErr: any) {
-        // Silencioso em flutuações rápidas para manter o loop de 1.5s ágil
+        const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);
+        if (shouldWarn) {
+          console.warn(`⚠️ [WATCHDOG] Instabilidade de sinal para ${pos.mint}. Tentando endpoint RPC secundário...`);
+        } else if (shouldEmergencyExit) {
+          console.error(`🚨 [WATCHDOG CONTINGÊNCIA] 8 falhas consecutivas de cotação (12s sem cotação). Disparando liquidação defensiva de emergência para ${pos.symbol} (${pos.mint})!`);
+          try {
+            const rawLamports = Math.floor(pos.tokenAmount);
+            const emergencySwap = await jupiterEngine.executeSwap({
+              inputMint: pos.mint,
+              outputMint: 'So11111111111111111111111111111111111111112',
+              amountLamports: rawLamports,
+              userPublicKey: OFFICIAL_PHANTOM_WALLET,
+              keypair: wallet.getKeypair(),
+              slippageBps: 600, // 6.0% slippage defensivo
+              priorityLevel: 'high'
+            });
+            await rentRecovery.closeTokenAccount(pos.mint);
+            antiSpamMemory.recordVeto(pos.mint, 'Watchdog de Perda de Sinal (12s sem cotação)', 24 * 60 * 60 * 1000);
+            positionEngine.removePosition(pos.mint);
+            positionEngine.recordClosedTrade({
+              mint: pos.mint,
+              symbol: pos.symbol,
+              tokenAmount: pos.tokenAmount,
+              entryPriceUsd: pos.entryPriceUsd,
+              exitPriceUsd: 0,
+              entryTimestamp: pos.entryTimestamp,
+              exitTimestamp: Date.now(),
+              pnlPct: -0.20,
+              pnlUsdEst: 0,
+              exitReason: 'MANUAL',
+              txSignature: emergencySwap.txSignature
+            });
+            updateDashboardViews();
+          } catch (emergencyErr: any) {
+            console.error(`❌ [WATCHDOG ERRO] Falha ao executar liquidação defensiva de ${pos.symbol}:`, emergencyErr?.message || emergencyErr);
+          }
+        }
       }
     }
   } catch (err: any) {
@@ -438,10 +561,16 @@ async function executeAutonomousCycle() {
 
     updateDashboardViews();
 
-    // 🎯 MODO SNIPER (Teto de Concorrência: MAX_CONCURRENT_POSITIONS = 1)
+    // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (MAX_CONCURRENT_POSITIONS = 2, máx 0.10 SOL)
     const activePositions = positionEngine.getAllPositions();
     if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
-      console.log(`🎯 [MODO SNIPER ATIVO] Posição aberta em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em PAUSA absoluta para dedicação total à saída.`);
+      console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
+      return;
+    }
+
+    const totalAllocatedSol = activePositions.reduce((acc, p) => acc + (p.entrySol || TRADE_AMOUNT_SOL), 0);
+    if (totalAllocatedSol >= MAX_TOTAL_ALLOCATION_SOL) {
+      console.log(`💰 [ALOCAÇÃO MÁXIMA ATINGIDA] Capital alocado (${totalAllocatedSol.toFixed(2)} SOL) atingiu teto de ${MAX_TOTAL_ALLOCATION_SOL} SOL. Aguardando saídas.`);
       return;
     }
 
@@ -495,6 +624,13 @@ async function executeAutonomousCycle() {
 
     const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (15-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`;
     console.log(logMsg);
+
+    latestState.incubator = {
+      waiting,
+      mature,
+      technicalDiscards: technicalDiscardCount,
+      aylaEligible: eligibleCandidates.length
+    };
 
     // Registra no buffer de scannerLogs para exposição na API e Dashboard
     if (!latestState.scannerLogs) latestState.scannerLogs = [];
@@ -557,10 +693,14 @@ async function executeAutonomousCycle() {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
-        // Dimensionamento Sniper: 0.05 SOL por trade respeitando reserva intocável de 0.05 SOL de taxas
+        // Parâmetros de Banca: exatamente 0.05 SOL por trade respeitando reserva intocável de 0.05 SOL
         const currentBalance = latestState.balanceSol || (await wallet.getBalanceSol());
-        const safeBalance = Math.max(0, currentBalance - 0.05);
-        const dynamicAllocSol = Math.min(0.05, Math.max(0.02, Number((safeBalance >= 0.05 ? 0.05 : safeBalance).toFixed(4))));
+        const safeBalance = currentBalance - GAS_RESERVE_SOL;
+        if (safeBalance < TRADE_AMOUNT_SOL) {
+          console.log(`🛡️ [Reserva Intocável] Saldo livre (${safeBalance.toFixed(4)} SOL) insuficiente para alocar ${TRADE_AMOUNT_SOL} SOL mantendo ${GAS_RESERVE_SOL} SOL de reserva para taxas de saída.`);
+          return;
+        }
+        const dynamicAllocSol = TRADE_AMOUNT_SOL; // Exatamente 0.05 SOL por trade
         const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
 
         console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra com pré-voo ativo (${dynamicAllocSol} SOL | autoSlippage blindado)...`);
@@ -793,7 +933,7 @@ async function main() {
 
   // 2.1 Varredura e Resgate Automático de Rent Exemption de Contas Órfãs Vazias
   try {
-    const sweep = await wallet.sweepEmptyTokenAccounts();
+    const sweep = await rentRecovery.sweepOrphanAccounts();
     if (sweep.closedCount > 0) {
       console.log(`🧹 [BOOT: Higiene On-Chain] ${sweep.closedCount} conta(s) vazia(s) fechada(s). ~${sweep.reclaimedSolEst} SOL devolvidos à carteira!`);
     }
@@ -803,7 +943,7 @@ async function main() {
 
   // 2.2 Agendamento de Varredura Periódica de Rent a cada 2 horas
   setInterval(() => {
-    wallet.sweepEmptyTokenAccounts().catch(() => {});
+    rentRecovery.sweepOrphanAccounts().catch(() => {});
   }, 2 * 60 * 60 * 1000);
 
   // 3. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)

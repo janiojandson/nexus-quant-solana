@@ -211,3 +211,43 @@ test('PositionExitEngine: deve exibir explicitamente SL Fixo e Trailing INATIVO 
   assert.ok(statusPost.includes('Stop Ativo: Trailing Dinâmico (-10% do Topo:'));
 });
 
+test('PositionExitEngine (Watchdog): deve emitir aviso em 5 falhas e disparar contingência em 8 falhas', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'WatchdogTestMint';
+
+  engine.addPosition({
+    mint,
+    symbol: 'WATCHDOG',
+    tokenAmount: 1000,
+    entryPriceUsd: 0.001,
+    entryTimestamp: Date.now()
+  });
+
+  // 1 a 4 falhas: sem aviso nem emergência
+  for (let i = 1; i <= 4; i++) {
+    const res = engine.recordQuoteFailure(mint);
+    assert.strictEqual(res.failures, i);
+    assert.strictEqual(res.shouldWarn, false);
+    assert.strictEqual(res.shouldEmergencyExit, false);
+  }
+
+  // 5 falhas: emite aviso
+  const res5 = engine.recordQuoteFailure(mint);
+  assert.strictEqual(res5.failures, 5);
+  assert.strictEqual(res5.shouldWarn, true);
+  assert.strictEqual(res5.shouldEmergencyExit, false);
+
+  // 6 e 7 falhas: continua aviso
+  engine.recordQuoteFailure(mint); // 6
+  engine.recordQuoteFailure(mint); // 7
+
+  // 8 falhas: dispara saída de emergência
+  const res8 = engine.recordQuoteFailure(mint);
+  assert.strictEqual(res8.failures, 8);
+  assert.strictEqual(res8.shouldEmergencyExit, true);
+
+  // Se cotação suceder, zera o contador
+  engine.recordQuoteSuccess(mint);
+  assert.strictEqual(engine.getQuoteFailures(mint), 0);
+});
+

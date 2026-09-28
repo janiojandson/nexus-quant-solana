@@ -126,6 +126,40 @@ export class PositionExitEngine {
   public removePosition(mint: string): void {
     this.activePositions.delete(mint);
     this.peakSolValues.delete(mint);
+    this.quoteFailures.delete(mint);
+  }
+
+  public clearPositions(): void {
+    this.activePositions.clear();
+    this.peakSolValues.clear();
+    this.quoteFailures.clear();
+  }
+
+  /** Contador de falhas consecutivas de cotação para o Watchdog de Telemetria */
+  private quoteFailures = new Map<string, number>();
+  public static readonly WATCHDOG_WARN_FAILURES = 5;      // 5 falhas (~7.5s) emite aviso
+  public static readonly WATCHDOG_EMERGENCY_FAILURES = 8; // 8 falhas (~12s) dispara liquidação defensiva
+
+  public recordQuoteSuccess(mint: string): void {
+    this.quoteFailures.delete(mint);
+  }
+
+  public recordQuoteFailure(mint: string): { failures: number; shouldWarn: boolean; shouldEmergencyExit: boolean } {
+    const current = (this.quoteFailures.get(mint) || 0) + 1;
+    this.quoteFailures.set(mint, current);
+    return {
+      failures: current,
+      shouldWarn: current >= PositionExitEngine.WATCHDOG_WARN_FAILURES && current < PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES,
+      shouldEmergencyExit: current >= PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
+    };
+  }
+
+  public getQuoteFailures(mint: string): number {
+    return this.quoteFailures.get(mint) || 0;
+  }
+
+  public clearQuoteFailures(mint: string): void {
+    this.quoteFailures.delete(mint);
   }
 
   /**

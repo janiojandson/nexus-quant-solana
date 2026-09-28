@@ -222,4 +222,62 @@ test('handleApiRoutes: deve acionar rota POST /api/wallet/sweep-rent com sucesso
   assert.strictEqual(resObj.reclaimedSolEst, 0.00408);
 });
 
+test('handleApiRoutes: deve executar POST /api/panic/:mint com sucesso', async () => {
+  const mockReq = { url: '/api/panic/PanicMint777', method: 'POST', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    setHeader: () => {},
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  let panicCalledWith = '';
+  const mockContext = {
+    latestState: { positions: [] },
+    panicToken: async (mint: string) => {
+      panicCalledWith = mint;
+      return { success: true, txid: 'PanicTx_777', message: 'Moeda liquidada e aluguel de ~0.00204 SOL recuperado.' };
+    }
+  } as any;
+
+  const handled = await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 200);
+  assert.strictEqual(panicCalledWith, 'PanicMint777');
+  const resObj = JSON.parse(responseData);
+  assert.strictEqual(resObj.success, true);
+  assert.strictEqual(resObj.txid, 'PanicTx_777');
+  assert.ok(resObj.message.includes('0.00204 SOL'));
+});
+
+test('handleApiRoutes: deve executar POST /api/panic/all desarmando e liquidando tudo', async () => {
+  const mockReq = { url: '/api/panic/all', method: 'POST', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    setHeader: () => {},
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  let panicAllCalled = false;
+  const mockContext = {
+    latestState: { circuitBreakerActive: false },
+    panicAll: async () => {
+      panicAllCalled = true;
+      return { success: true, liquidationsCount: 3, message: 'Pânico geral executado com sucesso.' };
+    }
+  } as any;
+
+  const handled = await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 200);
+  assert.strictEqual(panicAllCalled, true);
+  const resObj = JSON.parse(responseData);
+  assert.strictEqual(resObj.success, true);
+  assert.strictEqual(resObj.liquidationsCount, 3);
+  assert.strictEqual(resObj.message, 'Pânico geral executado com sucesso.');
+});
+
 

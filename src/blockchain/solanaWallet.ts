@@ -55,6 +55,10 @@ export class SolanaWalletService {
     return this.keypair;
   }
 
+  public getConnection(): Connection {
+    return this.connection;
+  }
+
   public async getBalanceSol(): Promise<number> {
     try {
       const lamports = await this.connection.getBalance(this.keypair.publicKey);
