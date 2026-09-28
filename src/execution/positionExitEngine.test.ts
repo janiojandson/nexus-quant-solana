@@ -166,3 +166,30 @@ test('PositionExitEngine (Ayla Sentinela): deve disparar TIME_STOP Dinamico apos
   assert.strictEqual(evalDynamic.shouldCloseAta, true);
   assert.ok(evalDynamic.reasonDetail?.includes('AYLA_DYNAMIC_TIME_STOP'));
 });
+
+test('PositionExitEngine: deve exibir explicitamente SL Fixo e Trailing INATIVO antes da parcial', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TestStopStatusText';
+  engine.addPosition({
+    mint,
+    symbol: 'PEPE',
+    tokenAmount: 1000,
+    entryPriceUsd: 0.0005,
+    entryTimestamp: Date.now(),
+    stopLossPct: -0.20,
+    takeProfitPct: 1.0,
+    entrySol: 0.015
+  });
+
+  // Antes da parcial
+  const statusPre = engine.getStopStatusText(mint);
+  assert.strictEqual(statusPre, 'Stop Ativo: SL Fixo (-20.00%) | Trailing: INATIVO (Aguardando Parcial)');
+
+  // Aciona parcial em +100%
+  engine.evaluateExitBySol(mint, 0.030);
+
+  // Pós-parcial
+  const statusPost = engine.getStopStatusText(mint);
+  assert.ok(statusPost.includes('Stop Ativo: Trailing Dinâmico (-15% do Topo:'));
+});
+

@@ -24,6 +24,8 @@ export class DexScreenerScanner {
   private static readonly RAYDIUM_POOLS_URL = 'https://api.dexscreener.com/latest/dex/search?q=raydium%20solana';
   private static readonly GECKOTERMINAL_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 
+  private static lastGeckoFetchTime = 0;
+
   constructor(options?: ScannerOptions) {
     this.fetchClient = options?.fetchClient || (async (url: string) => {
       const startTime = Date.now();
@@ -44,7 +46,12 @@ export class DexScreenerScanner {
         const elapsed = Date.now() - startTime;
         const status = err.response?.status || 'ERR';
         const msg = err.response?.statusText || err.message;
-        console.warn(`⚠️ [Scanner HTTP ${status}] ${url.split('?')[0]} falhou após ${elapsed}ms: ${msg}`);
+        // Se for 429 (Rate Limit) do GeckoTerminal ou DexScreener, silencia para não poluir o terminal
+        if (status === 429) {
+          // Log silencioso / sem poluição
+        } else {
+          console.warn(`⚠️ [Scanner HTTP ${status}] ${url.split('?')[0]} falhou após ${elapsed}ms: ${msg}`);
+        }
         throw err;
       }
     });
@@ -56,13 +63,20 @@ export class DexScreenerScanner {
       const discoveredMints = new Set<string>();
       let rawPairs: any[] = [];
 
-      // 1. Ampliação dos Endpoints de Descoberta On-Chain (DexScreener + GeckoTerminal)
+      // Controla taxa do GeckoTerminal (máximo 1 chamada a cada 60s para respeitar rate limits públicos)
+      const nowTs = Date.now();
+      const canFetchGecko = (nowTs - DexScreenerScanner.lastGeckoFetchTime) >= 60000;
+      if (canFetchGecko) {
+        DexScreenerScanner.lastGeckoFetchTime = nowTs;
+      }
+
+      // 1. Ampliação dos Endpoints de Descoberta On-Chain (DexScreener + GeckoTerminal espaçado)
       const [profilesRes, boostsLatestRes, boostsTopRes, poolsRes, geckoRes] = await Promise.allSettled([
         this.fetchClient(DexScreenerScanner.TOKEN_PROFILES_URL),
         this.fetchClient(DexScreenerScanner.TOKEN_BOOSTS_LATEST_URL),
         this.fetchClient(DexScreenerScanner.TOKEN_BOOSTS_TOP_URL),
         this.fetchClient(DexScreenerScanner.RAYDIUM_POOLS_URL),
-        this.fetchClient(DexScreenerScanner.GECKOTERMINAL_POOLS_URL)
+        canFetchGecko ? this.fetchClient(DexScreenerScanner.GECKOTERMINAL_POOLS_URL) : Promise.reject('GECKO_THROTTLED')
       ]);
 
       // Extrai de token-profiles

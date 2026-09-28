@@ -44,6 +44,10 @@ export interface ExitSignal {
   peakSolValue?: number;
   /** Stop dinâmico atual do trailing: peakSolValue * (1 - TRAILING_DISTANCE) */
   trailingStopSolValue?: number;
+  /** Se o trailing stop está ativo (apenas pós-parcial ou pico >= +10%) */
+  trailingActive?: boolean;
+  /** Texto formatado do stop ativo e trailing para logs limpos e dashboard */
+  stopStatusText?: string;
   /** Motivo detalhado do gatilho analítico (ex: Ayla Liquidity Drain, Ayla Dynamic Time-Stop) */
   reasonDetail?: string;
 }
@@ -56,6 +60,23 @@ export class PositionExitEngine {
   public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos
   /** Trailing pós-parcial: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
   public static readonly TRAILING_DISTANCE = 0.15; // -15% do pico máximo pós-parcial
+
+  /**
+   * Retorna descrição visual padronizada do estado dos stops da posição.
+   * Evita exibir 'Stop Dinâmico (15%): -15.00%' enquanto a posição não atingir a parcial ou pico de ativação.
+   */
+  public getStopStatusText(mint: string): string {
+    const pos = this.activePositions.get(mint);
+    if (!pos) return 'Sem posição';
+    if (pos.partialTaken) {
+      const peak = this.peakSolValues.get(mint) || pos.entrySol || 0.015;
+      const trailSol = peak * (1 - PositionExitEngine.TRAILING_DISTANCE);
+      const entrySol = pos.entrySol || 0.015;
+      const trailPct = ((trailSol - entrySol) / entrySol) * 100;
+      return `Stop Ativo: Trailing Dinâmico (-15% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%)`;
+    }
+    return `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
+  }
 
   public addPosition(position: PositionTracking): void {
     if (!position.maxHoldDurationMs) {

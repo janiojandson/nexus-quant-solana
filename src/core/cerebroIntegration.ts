@@ -90,7 +90,12 @@ export class CerebroIntegrationService {
    * Dispara mensagem de emergência via WhatsApp conectando diretamente ao Comunicacao Hub (Railway ou Nuvem)
    */
   public async sendEmergencyWhatsApp(texto: string): Promise<boolean> {
-    const hubUrl = process.env.COMUNICACAO_API_URL || 'https://comunicacao-hub-production.up.railway.app/api';
+    const hubUrl = process.env.COMUNICACAO_API_URL;
+    // Se a URL do Hub não estiver configurada explicitamente, silencia e não gera ruído
+    if (!hubUrl) {
+      return false;
+    }
+
     const hubKey = process.env.COMUNICACAO_API_KEY || 'nexus_secret_hub_2026_x89a';
     const targetGroup = process.env.WHATSAPP_EMERGENCY_GROUP || 'familia';
 
@@ -112,7 +117,10 @@ export class CerebroIntegrationService {
       );
       return true;
     } catch (err: any) {
-      console.warn(`⚠️ [WhatsApp Emergency Hub] Erro ao despachar mensagem:`, err?.message || err);
+      // Se retornar 404 ou erro de conexão, silencia para não poluir os logs de produção
+      if (err.response?.status === 404 || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
+        return false;
+      }
       return false;
     }
   }

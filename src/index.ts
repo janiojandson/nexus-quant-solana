@@ -303,15 +303,21 @@ async function runUltraFastExitMonitor() {
         const dashPos = latestState.positions.find(p => p.mint === pos.mint);
         if (dashPos) {
           dashPos.pnlPct = pnlPct;
-          dashPos.currentPriceUsd = (currentSolValue / pos.tokenAmount) * 130;
+          // Preço atual alinhado exatamente à proporção de valorização/desvalorização do preço de compra:
+          dashPos.currentPriceUsd = pos.entryPriceUsd > 0 ? pos.entryPriceUsd * (1 + pnlPct) : (currentSolValue / pos.tokenAmount) * 130;
         }
 
         // 📊 Log Sintético de Monitor de Posição (a cada ciclo de 1.5s)
         const pnlSign = pnlPct >= 0 ? '+' : '';
         const peakSign = peakPnlPct >= 0 ? '+' : '';
-        const trailSign = trailPnlPct >= 0 ? '+' : '';
         const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
-        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | Stop Dinâmico (15%): ${trailSign}${(trailPnlPct * 100).toFixed(2)}% | Tempo: ${elapsedMin}min`);
+
+        // Exibição clara e não ambígua do status de proteção:
+        const stopStatusText = pos.partialTaken
+          ? `Stop Ativo: Trailing Dinâmico (-15% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
+          : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
+
+        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
 
         // 🧠 Ayla Sentinela de Saída Adaptativa:
         // Passa contexto atual da posição se disponível
