@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { PositionExitEngine } from './positionExitEngine.js';
 
-test('PositionExitEngine: deve disparar PARTIAL_TAKE_PROFIT_50 a +100% (+1.0R / 2x) e mover SL para Breakeven', () => {
+test('PositionExitEngine: deve disparar PARTIAL_TAKE_PROFIT_50 a +35% e mover SL para Breakeven', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestMint1111111111111111111111111111111111';
   engine.addPosition({
@@ -11,12 +11,10 @@ test('PositionExitEngine: deve disparar PARTIAL_TAKE_PROFIT_50 a +100% (+1.0R / 
     tokenAmount: 1000,
     entryPriceUsd: 1.0,
     entryTimestamp: Date.now(),
-    stopLossPct: -0.20,
-    takeProfitPct: 1.0,
     entrySol: 0.015
   });
 
-  const eval1 = engine.evaluateExitBySol(mint, 0.030);
+  const eval1 = engine.evaluateExitBySol(mint, 0.02025); // +35%
   assert.strictEqual(eval1.shouldExit, true);
   assert.strictEqual(eval1.type, 'PARTIAL_TAKE_PROFIT_50');
   assert.strictEqual(eval1.exitTokenAmount, 500);
@@ -25,32 +23,55 @@ test('PositionExitEngine: deve disparar PARTIAL_TAKE_PROFIT_50 a +100% (+1.0R / 
   const pos = engine.getPosition(mint);
   assert.strictEqual(pos?.partialTaken, true);
   assert.strictEqual(pos?.tokenAmount, 500);
-  assert.strictEqual(pos?.stopLossPct, 0.0);
+  assert.strictEqual(pos?.stopLossPct, 0.01); // Breakeven (+1%)
 });
 
-test('PositionExitEngine: pos-parcial, deve encerrar TRAILING_STOP se recuar 15% do topo maximo', () => {
+test('PositionExitEngine: deve mover SL para Breakeven (+1%) ao atingir +12% de pico pré-parcial', () => {
   const engine = new PositionExitEngine();
-  const mint = 'TestMintTrailing15';
+  const mint = 'TestBreakevenTrigger';
   engine.addPosition({
     mint,
     symbol: 'TEST',
     tokenAmount: 1000,
     entryPriceUsd: 1.0,
     entryTimestamp: Date.now(),
-    stopLossPct: -0.20,
-    takeProfitPct: 1.0,
     entrySol: 0.015
   });
 
-  engine.evaluateExitBySol(mint, 0.030);
-  engine.evaluateExitBySol(mint, 0.040);
-  const evalTrailing = engine.evaluateExitBySol(mint, 0.0335);
+  // Sobe para +12%
+  engine.evaluateExitBySol(mint, 0.0168);
+  const pos = engine.getPosition(mint);
+  assert.strictEqual(pos?.stopLossPct, 0.01, 'Stop deve subir para +1% ao atingir +12%');
+
+  // Recua para +0.5% (abaixo de +1%), deve acionar stop loss de breakeven
+  const evalRecuo = engine.evaluateExitBySol(mint, 0.01507);
+  assert.strictEqual(evalRecuo.shouldExit, true);
+  assert.strictEqual(evalRecuo.type, 'STOP_LOSS');
+  assert.strictEqual(evalRecuo.shouldCloseAta, true);
+});
+
+test('PositionExitEngine: pos-parcial, deve encerrar TRAILING_STOP se recuar 10% do topo maximo', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TestMintTrailing10';
+  engine.addPosition({
+    mint,
+    symbol: 'TEST',
+    tokenAmount: 1000,
+    entryPriceUsd: 1.0,
+    entryTimestamp: Date.now(),
+    entrySol: 0.015
+  });
+
+  engine.evaluateExitBySol(mint, 0.02025); // Aciona parcial de +35%
+  engine.evaluateExitBySol(mint, 0.030);   // Pico sobe para 0.030 SOL
+  // Stop trailing a -10% de 0.030 = 0.027
+  const evalTrailing = engine.evaluateExitBySol(mint, 0.0269);
   assert.strictEqual(evalTrailing.shouldExit, true);
   assert.strictEqual(evalTrailing.type, 'TRAILING_STOP');
   assert.strictEqual(evalTrailing.shouldCloseAta, true);
 });
 
-test('PositionExitEngine: deve disparar STOP_LOSS inicial a -20% antes da parcial e fechar ATA', () => {
+test('PositionExitEngine: deve disparar STOP_LOSS inicial a -8% antes da parcial e fechar ATA', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestStopLoss';
   engine.addPosition({
@@ -59,12 +80,11 @@ test('PositionExitEngine: deve disparar STOP_LOSS inicial a -20% antes da parcia
     tokenAmount: 1000,
     entryPriceUsd: 1.0,
     entryTimestamp: Date.now(),
-    stopLossPct: -0.20,
-    takeProfitPct: 1.0,
     entrySol: 0.015
   });
 
-  const evalStop = engine.evaluateExitBySol(mint, 0.0119);
+  // -8% de 0.015 = 0.0138 SOL. 0.0137 dispara Stop Loss
+  const evalStop = engine.evaluateExitBySol(mint, 0.0137);
   assert.strictEqual(evalStop.shouldExit, true);
   assert.strictEqual(evalStop.type, 'STOP_LOSS');
   assert.strictEqual(evalStop.shouldCloseAta, true);
@@ -80,8 +100,6 @@ test('PositionExitEngine: deve disparar TIME_STOP apos 15 minutos de estagnacao 
     tokenAmount: 1000,
     entryPriceUsd: 1.0,
     entryTimestamp: now - (16 * 60 * 1000),
-    stopLossPct: -0.20,
-    takeProfitPct: 1.0,
     entrySol: 0.015
   });
 
@@ -190,6 +208,6 @@ test('PositionExitEngine: deve exibir explicitamente SL Fixo e Trailing INATIVO 
 
   // Pós-parcial
   const statusPost = engine.getStopStatusText(mint);
-  assert.ok(statusPost.includes('Stop Ativo: Trailing Dinâmico (-15% do Topo:'));
+  assert.ok(statusPost.includes('Stop Ativo: Trailing Dinâmico (-10% do Topo:'));
 });
 

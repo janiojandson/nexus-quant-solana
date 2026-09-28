@@ -58,12 +58,15 @@ export class PositionExitEngine {
   /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
   private peakSolValues = new Map<string, number>();
   public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos
+  public static readonly DEFAULT_STOP_LOSS_PCT = -0.08;         // -8% Stop Loss Inicial
+  public static readonly BREAKEVEN_TRIGGER_PCT = 0.12;          // +12% ativa Breakeven (+1%)
+  public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
   /** Trailing pós-parcial: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
-  public static readonly TRAILING_DISTANCE = 0.15; // -15% do pico máximo pós-parcial
+  public static readonly TRAILING_DISTANCE = 0.10;              // -10% do pico máximo
 
   /**
    * Retorna descrição visual padronizada do estado dos stops da posição.
-   * Evita exibir 'Stop Dinâmico (15%): -15.00%' enquanto a posição não atingir a parcial ou pico de ativação.
+   * Evita exibir 'Stop Dinâmico (10%): -10.00%' enquanto a posição não atingir a parcial ou pico de ativação.
    */
   public getStopStatusText(mint: string): string {
     const pos = this.activePositions.get(mint);
@@ -73,12 +76,21 @@ export class PositionExitEngine {
       const trailSol = peak * (1 - PositionExitEngine.TRAILING_DISTANCE);
       const entrySol = pos.entrySol || 0.015;
       const trailPct = ((trailSol - entrySol) / entrySol) * 100;
-      return `Stop Ativo: Trailing Dinâmico (-15% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%)`;
+      return `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%)`;
+    }
+    if (pos.stopLossPct >= 0.01) {
+      return `Stop Ativo: Breakeven (+${(pos.stopLossPct * 100).toFixed(1)}%) | Trailing: INATIVO (Aguardando Parcial)`;
     }
     return `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
   }
 
   public addPosition(position: PositionTracking): void {
+    if (position.stopLossPct === undefined) {
+      position.stopLossPct = PositionExitEngine.DEFAULT_STOP_LOSS_PCT;
+    }
+    if (position.takeProfitPct === undefined) {
+      position.takeProfitPct = PositionExitEngine.DEFAULT_TAKE_PROFIT_PCT;
+    }
     if (!position.maxHoldDurationMs) {
       position.maxHoldDurationMs = PositionExitEngine.DEFAULT_TIME_STOP_MS;
     }
@@ -119,19 +131,20 @@ export class PositionExitEngine {
   /**
    * Avalia a saída de uma posição via cotação em SOL utilizando o modelo Dual-Stage Trailing Stop:
    *
-   * Fase 1 — Colheita Parcial (Wave Harvest em +100% / 2x):
-   * - Gatilho: Quando a posição atinge >= +100% de valor em relação à entrada (2x).
+   * Fase 1 — Colheita Parcial (Wave Harvest em +35%):
+   * - Gatilho: Quando a posição atinge >= +35% de valor em relação à entrada.
    * - Ação: Vende 50% do lote total a mercado.
-   * - Breakeven: Puxa o Stop Loss dos 50% restantes para 0.0% (preço de entrada).
+   * - Breakeven: Puxa o Stop Loss dos 50% restantes para +1% (cobre taxas).
    * - Higiene ATA: NÃO fecha a conta ATA (mantém os 50% restantes em custódia).
    *
-   * Fase 2 — Super Runner & Trailing Stop de 15% do Topo:
+   * Fase 2 — Super Runner & Trailing Stop de 10% do Topo:
    * - Rastreia o pico máximo de SOL atingido após a parcial.
-   * - Trailing Stop = Pico * (1 - 0.15) = Pico * 0.85.
+   * - Trailing Stop = Pico * (1 - 0.10) = Pico * 0.90.
    * - Se o valor cair abaixo de trailingStopSolValue: encerra os 50% restantes e FECHA a ATA (Rent Exemption).
    *
    * Proteções Iniciais (Pré-Parcial):
-   * - Stop-Loss Inicial Fixo em -20% (<= 0.80 * entrySol) -> Encerra 100% e FECHA ATA.
+   * - Stop-Loss Inicial Fixo em -8% (<= 0.92 * entrySol) -> Encerra 100% e FECHA ATA.
+   * - Breakeven em +12%: Se o pico atingir >= +12%, stop sobe para +1% (trade sem risco de perda).
    * - Time-Stop de 15 minutos se estagnada sem atingir parcial nem SL -> Encerra 100% e FECHA ATA.
    */
   public evaluateExitBySol(
@@ -151,20 +164,25 @@ export class PositionExitEngine {
     const newPeak = Math.max(previousPeak, currentSolValue);
     this.peakSolValues.set(mint, newPeak);
 
-    const pnlPct = (currentSolValue - entrySol) / entrySol;
-    const peakPnlPct = (newPeak - entrySol) / entrySol;
+    const pnlPct = Math.round(((currentSolValue - entrySol) / entrySol) * 100000) / 100000;
+    const peakPnlPct = Math.round(((newPeak - entrySol) / entrySol) * 100000) / 100000;
 
-    // Trailing Stop dinâmico pós-parcial = pico * (1 - 0.15)
+    // Breakeven Dinâmico Pré-Parcial: ao atingir +12%, stop loss sobe para +1%
+    if (!position.partialTaken && peakPnlPct >= (PositionExitEngine.BREAKEVEN_TRIGGER_PCT - 0.0001) && position.stopLossPct < 0.01) {
+      position.stopLossPct = 0.01;
+    }
+
+    // Trailing Stop dinâmico pós-parcial = pico * (1 - 0.10)
     const trailingStopSolValue = newPeak * (1 - PositionExitEngine.TRAILING_DISTANCE);
 
     // ==========================================
-    // FASE 1: Colheita Parcial em +100% (2x)
+    // FASE 1: Colheita Parcial em +35% (ou takeProfitPct configurado)
     // ==========================================
     if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
       const tokensToSell = Math.floor(position.tokenAmount / 2);
       position.partialTaken = true;
       position.tokenAmount = position.tokenAmount - tokensToSell;
-      position.stopLossPct = 0.0; // Puxa para Breakeven (0% de perda)
+      position.stopLossPct = 0.01; // Puxa para Breakeven (+1%)
       // Reinicia pico com o valor atual para trailing preciso
       this.peakSolValues.set(mint, currentSolValue);
 
