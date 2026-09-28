@@ -16,7 +16,7 @@ dotenv.config();
 
 const OFFICIAL_PHANTOM_WALLET = process.env.AGENT_SOLANA_PUBLIC_KEY || 'FBx2SKLDLsdeLM8owxU8MNVPKAfJpLpmpHHRgiZDqBoi';
 const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
-const IS_DRY_RUN = process.env.DRY_RUN_MODE !== 'false';
+const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
 const MAX_CONCURRENT_POSITIONS = 1; // Modo Sniper: 1 posição por vez para foco total de CPU e liquidez
@@ -80,53 +80,62 @@ const latestState: DashboardState = {
  */
 async function executeExitOrder(
   mint: string,
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'MANUAL',
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL',
   pnlPct: number,
-  exitSolValue: number
+  exitSolValue: number,
+  options?: { exitTokenAmount?: number; shouldCloseAta?: boolean }
 ): Promise<{ success: boolean; txSignature?: string; error?: string }> {
   const pos = positionEngine.getPosition(mint);
   if (!pos) {
     return { success: false, error: 'Posição não encontrada no Gestor' };
   }
 
-  console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | PnL: ${(pnlPct * 100).toFixed(2)}%`);
-  console.log(`⚡ [Jupiter V6] Saída com slippage 5% e priority HIGH para furar fila em dump...`);
+  const tokenAmountToSell = options?.exitTokenAmount || pos.tokenAmount;
+  const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50';
+  const shouldCloseAta = options?.shouldCloseAta ?? !isPartial;
+
+  console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${tokenAmountToSell.toLocaleString()} | PnL: ${(pnlPct * 100).toFixed(2)}%`);
+  console.log(`⚡ [Jupiter V6] Saída com slippage 500bps (5.0%) e priority HIGH...`);
 
   // 1. Swap na Jupiter V6 — Blindagem de saída: 500bps slippage + priority HIGH
   const exitSwap = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
-    amountLamports: Math.floor(pos.tokenAmount),
+    amountLamports: Math.floor(tokenAmountToSell),
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
     keypair: wallet.getKeypair(),
-    slippageBps: 500,       // 5.0% — evita erro 0x177e em dumps rápidos
+    slippageBps: 500,       // 5.0% — Saídas/Stops
     priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
   });
 
-  // 2. Recuperação de Rent Exemption (Fechar Conta ATA e recolher os ~0.00204 SOL)
-  try {
-    await wallet.closeTokenAccount(pos.mint);
-  } catch (err: any) {
-    console.warn(`⚠️ [Aviso Fechamento ATA] Não foi possível fechar ATA de ${pos.symbol}:`, err?.message || err);
+  // 2. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido)
+  if (shouldCloseAta) {
+    try {
+      await wallet.closeTokenAccount(pos.mint);
+      console.log(`🧹 [Higiene On-Chain] Conta ATA de ${pos.symbol} encerrada. ~0.00204 SOL de caução recuperados!`);
+    } catch (err: any) {
+      console.warn(`⚠️ [Aviso Fechamento ATA] Não foi possível fechar ATA de ${pos.symbol}:`, err?.message || err);
+    }
+  } else {
+    console.log(`🛡️ [Custódia Parcial] Conta ATA de ${pos.symbol} mantida aberta para os 50% restantes (Super Runner Mode).`);
   }
 
   // 3. Quarentena Inteligente por Motivo de Saída
-  //    STOP_LOSS : 3h  — pode ter novo catalisador após resfriamento
-  //    TIME_STOP : 30min — apenas esfriou, não morreu
-  //    MANUAL    : 24h  — decisão consciente, respeitar
-  //    TAKE_PROFIT: sem quarentena — sucesso; pode ter nova oportunidade
-  const QUARANTINE_MS: Record<string, number> = {
-    STOP_LOSS:  3 * 60 * 60 * 1000,  // 3 horas
-    TIME_STOP:  30 * 60 * 1000,       // 30 minutos
-    MANUAL:     24 * 60 * 60 * 1000,  // 24 horas
-    TAKE_PROFIT: 0
-  };
-  const quarantineMs = QUARANTINE_MS[exitReason] ?? 0;
-  if (quarantineMs > 0) {
-    const labels: Record<string, string> = { STOP_LOSS: '3h', TIME_STOP: '30min', MANUAL: '24h' };
-    const label = labels[exitReason] || '?h';
-    antiSpamMemory.recordVeto(pos.mint, `Quarentena Pós-${exitReason}: cooldown de ${label}`, quarantineMs);
-    console.log(`🛑 [Quarentena ${label}] ${pos.symbol} bloqueado para recompra (${exitReason}).`);
+  if (!isPartial) {
+    const QUARANTINE_MS: Record<string, number> = {
+      STOP_LOSS:     3 * 60 * 60 * 1000,  // 3 horas
+      TIME_STOP:     30 * 60 * 1000,       // 30 minutos
+      MANUAL:        24 * 60 * 60 * 1000,  // 24 horas
+      TRAILING_STOP: 0,
+      TAKE_PROFIT:   0
+    };
+    const quarantineMs = QUARANTINE_MS[exitReason] ?? 0;
+    if (quarantineMs > 0) {
+      const labels: Record<string, string> = { STOP_LOSS: '3h', TIME_STOP: '30min', MANUAL: '24h' };
+      const label = labels[exitReason] || '?h';
+      antiSpamMemory.recordVeto(pos.mint, `Quarentena Pós-${exitReason}: cooldown de ${label}`, quarantineMs);
+      console.log(`🛑 [Quarentena ${label}] ${pos.symbol} bloqueado para recompra (${exitReason}).`);
+    }
   }
 
   // 4. Registra Trade Fechado
@@ -134,9 +143,9 @@ async function executeExitOrder(
   positionEngine.recordClosedTrade({
     mint: pos.mint,
     symbol: pos.symbol,
-    tokenAmount: pos.tokenAmount,
+    tokenAmount: tokenAmountToSell,
     entryPriceUsd: pos.entryPriceUsd,
-    exitPriceUsd: exitSolValue > 0 ? (exitSolValue / pos.tokenAmount) : pos.entryPriceUsd,
+    exitPriceUsd: exitSolValue > 0 ? (exitSolValue / tokenAmountToSell) : pos.entryPriceUsd,
     entryTimestamp: pos.entryTimestamp,
     exitTimestamp: Date.now(),
     pnlPct,
@@ -146,17 +155,13 @@ async function executeExitOrder(
     txSignature: exitSwap.txSignature
   });
 
-  positionEngine.removePosition(pos.mint);
-  console.log(`✅ Posição em ${pos.symbol} finalizada com sucesso.`);
+  // Se for liquidação total, remove do Gestor de Posições
+  if (shouldCloseAta) {
+    positionEngine.removePosition(pos.mint);
+  }
 
-  // Atualiza estado do Dashboard
   updateDashboardViews();
-
-  return {
-    success: exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS',
-    txSignature: exitSwap.txSignature,
-    error: exitSwap.error
-  };
+  return { success: exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS', txSignature: exitSwap.txSignature, error: exitSwap.error };
 }
 
 function updateDashboardViews() {
@@ -349,7 +354,7 @@ async function runUltraFastExitMonitor() {
 
         // Atualiza PnL flutuante e pico no estado do Dashboard
         const peakSolValue = positionEngine.getPeakSolValue(pos.mint);
-        const trailingStopSolValue = peakSolValue * (1 - 0.10);
+        const trailingStopSolValue = peakSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE);
         const peakPnlPct = (peakSolValue - (pos.entrySol || 0.015)) / (pos.entrySol || 0.015);
         const trailPnlPct = (trailingStopSolValue - (pos.entrySol || 0.015)) / (pos.entrySol || 0.015);
         const elapsedMin = Math.floor((Date.now() - pos.entryTimestamp) / 60000);
@@ -363,12 +368,16 @@ async function runUltraFastExitMonitor() {
         const pnlSign = pnlPct >= 0 ? '+' : '';
         const peakSign = peakPnlPct >= 0 ? '+' : '';
         const trailSign = trailPnlPct >= 0 ? '+' : '';
-        console.log(`🟡 [SNIPER ATIVO] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | Stop Dinâmico: ${trailSign}${(trailPnlPct * 100).toFixed(2)}% | Tempo: ${elapsedMin}min`);
+        const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
+        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | Stop Dinâmico (15%): ${trailSign}${(trailPnlPct * 100).toFixed(2)}% | Tempo: ${elapsedMin}min`);
 
         const exitSignal = positionEngine.evaluateExitBySol(pos.mint, currentSolValue);
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
           console.log(`🎯 [EXIT ENGINE ACIONADO] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
-          await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue);
+          await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue, {
+            exitTokenAmount: exitSignal.exitTokenAmount,
+            shouldCloseAta: exitSignal.shouldCloseAta
+          });
         }
       } catch (quoteErr: any) {
         // Silencioso em flutuações rápidas para manter o loop de 1.5s ágil

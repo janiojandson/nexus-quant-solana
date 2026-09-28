@@ -4,10 +4,12 @@ export interface PositionTracking {
   tokenAmount: number;
   entryPriceUsd: number;
   entryTimestamp: number;
-  stopLossPct: number;    // Ex: -20% (-0.20)
-  takeProfitPct: number;  // Ex: +50% (+0.50)
+  stopLossPct: number;    // Ex: -20% (-0.20) inicial
+  takeProfitPct: number;  // Ex: +100% (+1.00 / 2x) para colheita parcial
   entrySol?: number;      // Ex: 0.015 SOL investidos na entrada
   maxHoldDurationMs?: number; // Padrão: 15 minutos (15 * 60 * 1000)
+  partialTaken?: boolean; // True quando a parcial de 50% em +100% foi executada
+  initialTokenAmount?: number; // Lote original total
 }
 
 export interface ClosedTrade {
@@ -20,16 +22,20 @@ export interface ClosedTrade {
   exitTimestamp: number;
   pnlPct: number;
   pnlUsdEst: number;
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
   txSignature?: string;
   pnlSolEst?: number;
 }
 
 export interface ExitSignal {
   shouldExit: boolean;
-  type: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'HOLD';
+  type: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'HOLD';
   pnlPct: number;
   currentPriceUsd: number;
+  /** Quantidade de tokens a liquidar (seja parcial 50% ou restante 100%) */
+  exitTokenAmount?: number;
+  /** Se deve fechar a conta ATA (false em parciais, true em liquidações totais) */
+  shouldCloseAta?: boolean;
   /** Pico máximo de valor em SOL atingido durante a custódia */
   peakSolValue?: number;
   /** Stop dinâmico atual do trailing: peakSolValue * (1 - TRAILING_DISTANCE) */
@@ -42,12 +48,15 @@ export class PositionExitEngine {
   /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
   private peakSolValues = new Map<string, number>();
   public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos
-  /** Trailing agressivo: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
-  public static readonly TRAILING_DISTANCE = 0.10; // -10% do pico
+  /** Trailing pós-parcial: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
+  public static readonly TRAILING_DISTANCE = 0.15; // -15% do pico máximo pós-parcial
 
   public addPosition(position: PositionTracking): void {
     if (!position.maxHoldDurationMs) {
       position.maxHoldDurationMs = PositionExitEngine.DEFAULT_TIME_STOP_MS;
+    }
+    if (!position.initialTokenAmount) {
+      position.initialTokenAmount = position.tokenAmount;
     }
     this.activePositions.set(position.mint, position);
     // Inicializa pico com o valor de entrada
@@ -81,16 +90,22 @@ export class PositionExitEngine {
   }
 
   /**
-   * Avalia a saída de uma posição em SOL com Trailing Stop Agressivo (-10% do pico).
+   * Avalia a saída de uma posição via cotação em SOL utilizando o modelo Dual-Stage Trailing Stop:
    *
-   * Prioridade de disparo:
-   * 1. Take-Profit fixo (>= +takeProfitPct): realiza lucro imediato no alvo
-   * 2. Trailing Stop (-10% do pico): protege lucro acumulado em movimentos fortes
-   *    — Ativa apenas quando o pico superou +10% (evita falsos positivos na entrada)
-   *    — Exemplo: sobe +80% → pico em 0.027 SOL → trailing_stop = 0.0243 SOL (+62%)
-   *       Se recuar de 0.027 para 0.0243 → realiza lucro de +62%
-   * 3. Stop-Loss fixo inicial (<= stopLossPct, ou 0% após Breakeven em +40%)
-   * 4. Time-Stop biológico (>= maxHoldDurationMs sem atingir TP)
+   * Fase 1 — Colheita Parcial (Wave Harvest em +100% / 2x):
+   * - Gatilho: Quando a posição atinge >= +100% de valor em relação à entrada (2x).
+   * - Ação: Vende 50% do lote total a mercado.
+   * - Breakeven: Puxa o Stop Loss dos 50% restantes para 0.0% (preço de entrada).
+   * - Higiene ATA: NÃO fecha a conta ATA (mantém os 50% restantes em custódia).
+   *
+   * Fase 2 — Super Runner & Trailing Stop de 15% do Topo:
+   * - Rastreia o pico máximo de SOL atingido após a parcial.
+   * - Trailing Stop = Pico * (1 - 0.15) = Pico * 0.85.
+   * - Se o valor cair abaixo de trailingStopSolValue: encerra os 50% restantes e FECHA a ATA (Rent Exemption).
+   *
+   * Proteções Iniciais (Pré-Parcial):
+   * - Stop-Loss Inicial Fixo em -20% (<= 0.80 * entrySol) -> Encerra 100% e FECHA ATA.
+   * - Time-Stop de 15 minutos se estagnada sem atingir parcial nem SL -> Encerra 100% e FECHA ATA.
    */
   public evaluateExitBySol(mint: string, currentSolValue: number, currentTimestamp: number = Date.now()): ExitSignal {
     const position = this.activePositions.get(mint);
@@ -107,63 +122,98 @@ export class PositionExitEngine {
     const pnlPct = (currentSolValue - entrySol) / entrySol;
     const peakPnlPct = (newPeak - entrySol) / entrySol;
 
-    // Trailing Stop: SL dinâmico = pico * (1 - TRAILING_DISTANCE)
+    // Trailing Stop dinâmico pós-parcial = pico * (1 - 0.15)
     const trailingStopSolValue = newPeak * (1 - PositionExitEngine.TRAILING_DISTANCE);
 
-    // 🛡️ Breakeven (+0R) automático ao atingir +40%: jamais volta a perder o investimento
-    if (pnlPct >= 0.40 && position.stopLossPct < 0) {
-      position.stopLossPct = 0.0;
-    }
+    // ==========================================
+    // FASE 1: Colheita Parcial em +100% (2x)
+    // ==========================================
+    if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
+      const tokensToSell = Math.floor(position.tokenAmount / 2);
+      position.partialTaken = true;
+      position.tokenAmount = position.tokenAmount - tokensToSell;
+      position.stopLossPct = 0.0; // Puxa para Breakeven (0% de perda)
+      // Reinicia pico com o valor atual para trailing preciso
+      this.peakSolValues.set(mint, currentSolValue);
 
-    // 1. Gatilho de Take-Profit fixo (>= +takeProfitPct)
-    if (pnlPct >= position.takeProfitPct) {
       return {
         shouldExit: true,
-        type: 'TAKE_PROFIT',
+        type: 'PARTIAL_TAKE_PROFIT_50',
         pnlPct,
         currentPriceUsd: currentSolValue,
-        peakSolValue: newPeak,
-        trailingStopSolValue
+        exitTokenAmount: tokensToSell,
+        shouldCloseAta: false, // NÃO fecha ATA: 50% continuam em custódia
+        peakSolValue: currentSolValue,
+        trailingStopSolValue: currentSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE)
       };
     }
 
-    // 2. Trailing Stop Agressivo (-10% do pico)
-    //    Ativa somente quando o pico superou +10% para não disparar em oscilação de entrada
-    if (peakPnlPct >= 0.10 && currentSolValue <= trailingStopSolValue) {
-      return {
-        shouldExit: true,
-        type: 'STOP_LOSS',
-        pnlPct,
-        currentPriceUsd: currentSolValue,
-        peakSolValue: newPeak,
-        trailingStopSolValue
-      };
+    // ==========================================
+    // FASE 2: Super Runner com Trailing Stop 15%
+    // ==========================================
+    if (position.partialTaken) {
+      // Disparo de Trailing Stop se recuar 15% em relação ao topo máximo
+      if (currentSolValue <= trailingStopSolValue) {
+        return {
+          shouldExit: true,
+          type: 'TRAILING_STOP',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true, // FECHA ATA: 100% liquidado
+          peakSolValue: newPeak,
+          trailingStopSolValue
+        };
+      }
+
+      // Proteção de Breakeven nos 50% restantes: jamais sair no prejuízo
+      if (pnlPct <= position.stopLossPct) {
+        return {
+          shouldExit: true,
+          type: 'STOP_LOSS',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue
+        };
+      }
     }
 
-    // 3. Stop-Loss fixo inicial (<= stopLossPct)
-    if (pnlPct <= position.stopLossPct) {
-      return {
-        shouldExit: true,
-        type: 'STOP_LOSS',
-        pnlPct,
-        currentPriceUsd: currentSolValue,
-        peakSolValue: newPeak,
-        trailingStopSolValue
-      };
-    }
+    // ==========================================
+    // PROTEÇÕES PRÉ-PARCIAL (Risco Fixo Inicial)
+    // ==========================================
+    if (!position.partialTaken) {
+      // 1. Stop-Loss Inicial Fixo (-20%)
+      if (pnlPct <= position.stopLossPct) {
+        return {
+          shouldExit: true,
+          type: 'STOP_LOSS',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue
+        };
+      }
 
-    // 4. ⏱️ Time-Stop Biológico: posição estagnada por mais de maxHoldDurationMs
-    const maxDuration = position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS;
-    const elapsedMs = currentTimestamp - position.entryTimestamp;
-    if (elapsedMs >= maxDuration) {
-      return {
-        shouldExit: true,
-        type: 'TIME_STOP',
-        pnlPct,
-        currentPriceUsd: currentSolValue,
-        peakSolValue: newPeak,
-        trailingStopSolValue
-      };
+      // 2. Time-Stop de Estagnação (15 minutos)
+      const maxDuration = position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS;
+      const elapsedMs = currentTimestamp - position.entryTimestamp;
+      if (elapsedMs >= maxDuration) {
+        return {
+          shouldExit: true,
+          type: 'TIME_STOP',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue
+        };
+      }
     }
 
     return {
@@ -184,17 +234,31 @@ export class PositionExitEngine {
 
     const pnlPct = (currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd;
 
-    // 🛡️ Trava de Capital: Breakeven (+0R) automático ao atingir +40%
-    if (pnlPct >= 0.40 && position.stopLossPct < 0) {
+    // FASE 1: Colheita Parcial em +100%
+    if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
+      const tokensToSell = Math.floor(position.tokenAmount / 2);
+      position.partialTaken = true;
+      position.tokenAmount = position.tokenAmount - tokensToSell;
       position.stopLossPct = 0.0;
-    }
-
-    if (pnlPct >= position.takeProfitPct) {
-      return { shouldExit: true, type: 'TAKE_PROFIT', pnlPct, currentPriceUsd };
+      return {
+        shouldExit: true,
+        type: 'PARTIAL_TAKE_PROFIT_50',
+        pnlPct,
+        currentPriceUsd,
+        exitTokenAmount: tokensToSell,
+        shouldCloseAta: false
+      };
     }
 
     if (pnlPct <= position.stopLossPct) {
-      return { shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd };
+      return {
+        shouldExit: true,
+        type: 'STOP_LOSS',
+        pnlPct,
+        currentPriceUsd,
+        exitTokenAmount: position.tokenAmount,
+        shouldCloseAta: true
+      };
     }
 
     return { shouldExit: false, type: 'HOLD', pnlPct, currentPriceUsd };

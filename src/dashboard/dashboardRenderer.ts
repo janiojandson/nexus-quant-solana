@@ -8,7 +8,7 @@ export interface ClosedTradeView {
   exitTimestamp: number;
   pnlPct: number;
   pnlSolEst: number;
-  exitReason: 'TAKE_PROFIT' | 'STOP_LOSS' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
