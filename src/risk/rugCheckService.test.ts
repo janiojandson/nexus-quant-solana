@@ -49,3 +49,39 @@ test('RugCheckService: deve vetar token com mintAuthority ativo ou score de peri
   assert.strictEqual(report.isSafe, false);
   assert.ok(report.risks.some(r => r.includes('Mint Authority Enabled')));
 });
+
+test('RugCheckService: deve vetar se freezeAuthority for ativa', async () => {
+  const mockFetch = async () => ({
+    data: {
+      score: 100,
+      token: {
+        mintAuthority: null,
+        freezeAuthority: 'FreezeDev1111111111111111111111111111111111'
+      },
+      risks: [],
+      rugged: false
+    }
+  });
+
+  const service = new RugCheckService({ fetchClient: mockFetch as any });
+  const report = await service.auditToken('MintFreeze11111111111111111111111111111111');
+  assert.strictEqual(report.isSafe, false);
+  assert.strictEqual(report.isRugged, true);
+});
+
+test('RugCheckService: deve vetar se top 5 holders possuírem mais de 20% do supply', async () => {
+  const mockFetch = async () => ({
+    data: {
+      score: 100,
+      token: { mintAuthority: null, freezeAuthority: null },
+      markets: [{ lp: { lpLockedPct: 95 } }],
+      topHolders: [{ pct: 8 }, { pct: 6 }, { pct: 5 }, { pct: 3 }] // Top 4 = 22% > 20%
+    }
+  });
+
+  const service = new RugCheckService({ fetchClient: mockFetch as any });
+  const report = await service.auditToken('MintWhales11111111111111111111111111111111');
+  assert.strictEqual(report.isSafe, false);
+  assert.ok(report.risks.some(r => r.includes('Top 5 Holders')));
+});
+

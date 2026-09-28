@@ -41,30 +41,33 @@ export class RugCheckService {
       const isFreezeAuthActive = Boolean(data.token?.freezeAuthority);
       const isRugged = Boolean(data.rugged) || isMintAuthActive || isFreezeAuthActive;
 
-      // Extração de métricas de LP trancada e concentração dos top 10 holders
+      // Extração de métricas de LP trancada/queimada e concentração dos top 5 holders
       let lpLockedPct = 100;
       if (Array.isArray(data.markets)) {
         const raydiumMarket = data.markets.find((m: any) => m.lp);
-        if (raydiumMarket?.lp?.lpLockedPct !== undefined) {
-          lpLockedPct = Number(raydiumMarket.lp.lpLockedPct);
+        if (raydiumMarket?.lp) {
+          const locked = Number(raydiumMarket.lp.lpLockedPct || raydiumMarket.lp.lpLocked || 0);
+          const burned = Number(raydiumMarket.lp.lpBurnedPct || raydiumMarket.lp.lpBurned || 0);
+          lpLockedPct = Math.max(locked, burned);
         }
       }
 
       let topHoldersPct = 0;
       if (Array.isArray(data.topHolders)) {
-        topHoldersPct = data.topHolders.slice(0, 10).reduce((acc: number, h: any) => acc + Number(h.pct || 0), 0);
+        // Avalia a concentração dos Top 5 Holders (risco de Dev Dump)
+        topHoldersPct = data.topHolders.slice(0, 5).reduce((acc: number, h: any) => acc + Number(h.pct || 0), 0);
       }
 
-      // Token seguro apenas se score < 500, não for rugged, LP trancada >= 95% e top 10 <= 15%
-      const isLpLockedOk = lpLockedPct >= 95;
-      const isHoldersConcentrationOk = topHoldersPct <= 15;
+      // Token seguro apenas se score < 500, não for rugged, LP trancada/queimada >= 90% e top 5 holders <= 20%
+      const isLpLockedOk = lpLockedPct >= 90;
+      const isHoldersConcentrationOk = topHoldersPct <= 20;
       const isSafe = !isRugged && score < RugCheckService.DANGER_SCORE_THRESHOLD && isLpLockedOk && isHoldersConcentrationOk;
 
       if (!isLpLockedOk) {
-        riskNames.push(`LP Trancada insuficiente (${lpLockedPct.toFixed(1)}% < 95% exigido)`);
+        riskNames.push(`LP Trancada/Queimada insuficiente (${lpLockedPct.toFixed(1)}% < 90% exigido)`);
       }
       if (!isHoldersConcentrationOk) {
-        riskNames.push(`Concentração excessiva de Top 10 Holders (${topHoldersPct.toFixed(1)}% > 15% limite)`);
+        riskNames.push(`Concentração excessiva de Top 5 Holders (${topHoldersPct.toFixed(1)}% > 20% limite)`);
       }
 
       return {
