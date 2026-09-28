@@ -12,7 +12,7 @@ test('DexScreenerScanner: deve filtrar e retornar tokens com liquidez acima do m
         priceUsd: '0.015',
         liquidity: { usd: 25000 },
         volume: { h24: 150000, m5: 3500 },
-        pairCreatedAt: Date.now() - 3600000
+        pairCreatedAt: Date.now() - (30 * 60 * 1000)
       },
       {
         chainId: 'solana',
@@ -36,7 +36,7 @@ test('DexScreenerScanner: deve filtrar e retornar tokens com liquidez acima do m
   assert.strictEqual(results[0].mint, 'MintTokenBom11111111111111111111111111111111');
 });
 
-test('DexScreenerScanner: deve rejeitar armadilhas de 1 minuto e aceitar apenas maturidade >= 20 min', async () => {
+test('DexScreenerScanner: deve rejeitar armadilhas de 1 minuto e aceitar apenas maturidade na janela de 15 a 60 min', async () => {
   const mockFetch = async () => ({
     data: [
       {
@@ -104,12 +104,14 @@ test('DexScreenerScanner: deve sanitizar e descartar tokens com mint vazio ou sy
   assert.strictEqual(results[0].mint, 'ValidMintAddress333');
 });
 
-test('DexScreenerScanner: deve descartar tokens mais velhos que 4 horas (fora da janela de momentum)', () => {
+test('DexScreenerScanner: deve descartar tokens mais velhos que 60 minutos e mais novos que 15 minutos', () => {
   const scanner = new DexScreenerScanner();
   const now = Date.now();
-  assert.strictEqual(scanner.isMaturityValid(now - (5 * 60 * 60 * 1000)), false);
-  assert.strictEqual(scanner.isMaturityValid(now - (15 * 60 * 1000)), false);
-  assert.strictEqual(scanner.isMaturityValid(now - (45 * 60 * 1000)), true);
+  assert.strictEqual(scanner.isMaturityValid(now - (90 * 60 * 1000)), false, '90 min deve ser descartado (> 60m)');
+  assert.strictEqual(scanner.isMaturityValid(now - (10 * 60 * 1000)), false, '10 min deve ser descartado (< 15m)');
+  assert.strictEqual(scanner.isMaturityValid(now - (15 * 60 * 1000)), true, '15 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (35 * 60 * 1000)), true, '35 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (60 * 60 * 1000)), true, '60 min deve ser aceito');
 });
 
 test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >= 70%', () => {

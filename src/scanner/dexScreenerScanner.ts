@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { MintCooldownCache } from './mintCooldownCache.js';
 
 export interface TokenCandidate {
   mint: string;
@@ -24,15 +25,15 @@ export interface ScannerOptions {
 
 export class DexScreenerScanner {
   private fetchClient: (url: string) => Promise<{ data: any }>;
-  private static readonly TOKEN_PROFILES_URL = 'https://api.dexscreener.com/token-profiles/latest/v1';
-  private static readonly TOKEN_BOOSTS_LATEST_URL = 'https://api.dexscreener.com/token-boosts/latest/v1';
-  private static readonly TOKEN_BOOSTS_TOP_URL = 'https://api.dexscreener.com/token-boosts/top/v1';
+  public readonly cooldownCache: MintCooldownCache;
+  private static readonly SOLANA_SEARCH_URL = 'https://api.dexscreener.com/latest/dex/search?q=solana';
   private static readonly RAYDIUM_POOLS_URL = 'https://api.dexscreener.com/latest/dex/search?q=raydium%20solana';
   private static readonly GECKOTERMINAL_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 
   private static lastGeckoFetchTime = 0;
 
   constructor(options?: ScannerOptions) {
+    this.cooldownCache = new MintCooldownCache(5);
     this.fetchClient = options?.fetchClient || (async (url: string) => {
       const startTime = Date.now();
       try {
@@ -63,7 +64,7 @@ export class DexScreenerScanner {
     });
   }
 
-  public async scanSolanaTrends(minLiquidityUsd: number = 10000): Promise<TokenCandidate[]> {
+  public async scanSolanaTrends(minLiquidityUsd: number = 20000): Promise<TokenCandidate[]> {
     try {
       let sourcesCount = 0;
       const discoveredMints = new Set<string>();
@@ -76,45 +77,20 @@ export class DexScreenerScanner {
         DexScreenerScanner.lastGeckoFetchTime = nowTs;
       }
 
-      // 1. Ampliação dos Endpoints de Descoberta On-Chain (DexScreener + GeckoTerminal espaçado)
-      const [profilesRes, boostsLatestRes, boostsTopRes, poolsRes, geckoRes] = await Promise.allSettled([
-        this.fetchClient(DexScreenerScanner.TOKEN_PROFILES_URL),
-        this.fetchClient(DexScreenerScanner.TOKEN_BOOSTS_LATEST_URL),
-        this.fetchClient(DexScreenerScanner.TOKEN_BOOSTS_TOP_URL),
+      // 1. Endpoints Qualificados On-Chain (DexScreener Search + GeckoTerminal new_pools)
+      const [solanaSearchRes, poolsRes, geckoRes] = await Promise.allSettled([
+        this.fetchClient(DexScreenerScanner.SOLANA_SEARCH_URL),
         this.fetchClient(DexScreenerScanner.RAYDIUM_POOLS_URL),
         canFetchGecko ? this.fetchClient(DexScreenerScanner.GECKOTERMINAL_POOLS_URL) : Promise.reject('GECKO_THROTTLED')
       ]);
 
-      // Extrai de token-profiles
-      if (profilesRes.status === 'fulfilled') {
+      // Extrai de search Solana geral
+      if (solanaSearchRes.status === 'fulfilled') {
         sourcesCount++;
-        const raw = Array.isArray(profilesRes.value.data) ? profilesRes.value.data : [];
-        for (const p of raw) {
-          if (p.chainId?.toLowerCase() === 'solana' && p.tokenAddress) {
-            discoveredMints.add(p.tokenAddress);
-          }
-        }
-      }
-
-      // Extrai de token-boosts/latest/v1
-      if (boostsLatestRes.status === 'fulfilled') {
-        sourcesCount++;
-        const raw = Array.isArray(boostsLatestRes.value.data) ? boostsLatestRes.value.data : [];
-        for (const b of raw) {
-          if (b.chainId?.toLowerCase() === 'solana' && b.tokenAddress) {
-            discoveredMints.add(b.tokenAddress);
-          }
-        }
-      }
-
-      // Extrai de token-boosts/top/v1
-      if (boostsTopRes.status === 'fulfilled') {
-        sourcesCount++;
-        const raw = Array.isArray(boostsTopRes.value.data) ? boostsTopRes.value.data : [];
-        for (const b of raw) {
-          if (b.chainId?.toLowerCase() === 'solana' && b.tokenAddress) {
-            discoveredMints.add(b.tokenAddress);
-          }
+        const data = solanaSearchRes.value.data;
+        const fetched = Array.isArray(data) ? data : (data?.pairs || []);
+        if (Array.isArray(fetched)) {
+          rawPairs.push(...fetched);
         }
       }
 
@@ -134,8 +110,8 @@ export class DexScreenerScanner {
         const geckoPools = geckoRes.value.data?.data || [];
         for (const gp of geckoPools) {
           const attr = gp.attributes || {};
-          const mint = attr.base_token_price_usd ? gp.relationships?.base_token?.data?.id?.replace('solana_', '') : null;
-          if (mint) {
+          const mint = gp.relationships?.base_token?.data?.id?.replace(/^solana_/, '');
+          if (mint && this.cooldownCache.shouldProcess(mint)) {
             discoveredMints.add(mint);
           }
           rawPairs.push({
@@ -157,8 +133,8 @@ export class DexScreenerScanner {
         }
       }
 
-      // Enriquece mints descobertos em lotes de até 30 na DexScreener API
-      const mintsArray = Array.from(discoveredMints);
+      // Enriquece mints descobertos em lotes de até 30 na DexScreener API (apenas mints liberados pelo TTL cache)
+      const mintsArray = Array.from(discoveredMints).filter(m => this.cooldownCache.shouldProcess(m));
       if (mintsArray.length > 0) {
         const batchSize = 30;
         for (let i = 0; i < Math.min(mintsArray.length, 60); i += batchSize) {
@@ -188,15 +164,21 @@ export class DexScreenerScanner {
           continue;
         }
 
-        const liquidityUsd = Number(item.liquidity?.usd || 0);
-        if (liquidityUsd < minLiquidityUsd) {
+        const mint = item.baseToken?.address || item.tokenAddress;
+        if (!mint || !this.cooldownCache.shouldProcess(mint)) {
           continue;
         }
 
-        const mint = item.baseToken?.address || item.tokenAddress;
+        const liquidityUsd = Number(item.liquidity?.usd || 0);
+        if (liquidityUsd < minLiquidityUsd) {
+          this.cooldownCache.recordRejection(mint);
+          continue;
+        }
+
         const symbol = item.baseToken?.symbol;
         // Sanitização Estrita de Tokens (Fim do 'undefined'):
-        if (!mint || !symbol || symbol === 'undefined' || symbol.trim() === '') {
+        if (!symbol || symbol === 'undefined' || symbol.trim() === '') {
+          this.cooldownCache.recordRejection(mint);
           continue;
         }
 
@@ -204,8 +186,9 @@ export class DexScreenerScanner {
         seenMints.add(mint);
 
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
-        // Filtro de maturidade estrita da piscina: janela aceita entre 20 min e 4 horas
+        // Filtro de maturidade estrita da piscina: janela aceita entre 15 e 60 minutos
         if (pairCreatedAt > 0 && !this.isMaturityValid(pairCreatedAt, now)) {
+          this.cooldownCache.recordRejection(mint);
           continue;
         }
 
@@ -287,13 +270,13 @@ export class DexScreenerScanner {
   }
 
   /**
-   * Valida se a idade da pool está entre 20 minutos e 4 horas.
+   * Valida se a idade da pool está entre 15 e 60 minutos (pós-dump inicial).
    */
   public isMaturityValid(pairCreatedAt: number, now: number = Date.now()): boolean {
     if (!pairCreatedAt || pairCreatedAt <= 0) return false;
     const ageMs = now - pairCreatedAt;
-    const minMaturityMs = 20 * 60 * 1000;      // Mínimo 20 minutos
-    const maxMaturityMs = 4 * 60 * 60 * 1000;   // Máximo 4 horas
+    const minMaturityMs = 15 * 60 * 1000;      // Mínimo 15 minutos
+    const maxMaturityMs = 60 * 60 * 1000;      // Máximo 60 minutos (1 hora)
     return ageMs >= minMaturityMs && ageMs <= maxMaturityMs;
   }
 
