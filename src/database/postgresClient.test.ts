@@ -17,6 +17,15 @@ test('SolanaPostgresRepository: opera gracioso sem DATABASE_URL configurado', as
       validatedBy: 'TEST_VALIDATOR',
       dryRun: true
     });
+    await repo.saveQuarantine({
+      mint: 'TestMint1111111111111111111111111111111111111',
+      symbol: 'TEST',
+      reason: 'Quarentena Teste',
+      expiresAt: new Date(Date.now() + 3600000)
+    });
+    const quars = await repo.getActiveQuarantine();
+    assert.deepStrictEqual(quars, []);
     await repo.close();
   });
 });
+

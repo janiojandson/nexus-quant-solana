@@ -110,6 +110,22 @@ export class AntiSpamMemory {
     this.vettedTokens.set(mint, { timestamp: now, reason: `Descarte Técnico Temporário (TTL 5m): ${reason}`, expiresAt });
   }
 
+  /**
+   * Reidrata o cache em memória com registros vindos da tabela persistente do PostgreSQL
+   */
+  public loadQuarantinedTokens(tokens: Array<{ mint: string; reason: string; expiresAt: number }>): void {
+    const now = Date.now();
+    for (const t of tokens) {
+      if (t.expiresAt > now) {
+        this.vettedTokens.set(t.mint, {
+          timestamp: now,
+          reason: t.reason,
+          expiresAt: t.expiresAt
+        });
+      }
+    }
+  }
+
   public recordApproval(mint: string, score: number): void {
     this.approvedTokens.set(mint, { timestamp: Date.now(), score });
   }

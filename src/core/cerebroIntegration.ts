@@ -90,37 +90,32 @@ export class CerebroIntegrationService {
    * Dispara mensagem de emergência via WhatsApp conectando diretamente ao Comunicacao Hub (Railway ou Nuvem)
    */
   public async sendEmergencyWhatsApp(texto: string): Promise<boolean> {
-    const hubUrl = process.env.COMUNICACAO_API_URL;
-    // Se a URL do Hub não estiver configurada explicitamente, silencia e não gera ruído
-    if (!hubUrl) {
-      return false;
-    }
-
+    const hubUrl = (process.env.COMUNICACAO_API_URL || 'https://comunicacao-hub-production.up.railway.app').replace(/\/api\/?$/, '').replace(/\/$/, '');
     const hubKey = process.env.COMUNICACAO_API_KEY || 'nexus_secret_hub_2026_x89a';
-    const targetGroup = process.env.WHATSAPP_EMERGENCY_GROUP || 'familia';
+    const instance = process.env.COMUNICACAO_INSTANCE || 'financas';
+    const targetRecipient = process.env.WHATSAPP_ADMIN_NUMBER || process.env.WHATSAPP_EMERGENCY_GROUP || '5521977440606';
 
     try {
       await axios.post(
-        `${hubUrl}/mensagens/enviar`,
+        `${hubUrl}/api/v1/${instance}/send-text`,
         {
-          canal: 'whatsapp',
-          destinatario: targetGroup,
-          mensagem: texto
+          to: targetRecipient,
+          message: texto,
+          simulateTyping: false,
+          priority: 'high'
         },
         {
           headers: {
             'x-api-key': hubKey,
-            'Authorization': `Bearer ${hubKey}`
+            'Authorization': `Bearer ${hubKey}`,
+            'Content-Type': 'application/json'
           },
-          timeout: 4000
+          timeout: 8000
         }
       );
       return true;
     } catch (err: any) {
-      // Se retornar 404 ou erro de conexão, silencia para não poluir os logs de produção
-      if (err.response?.status === 404 || err.code === 'ECONNREFUSED' || err.code === 'ENOTFOUND') {
-        return false;
-      }
+      console.warn('⚠️ [WhatsApp Alerta] Falha ao enviar via Comunicacao Hub:', err?.response?.data || err?.message || err);
       return false;
     }
   }

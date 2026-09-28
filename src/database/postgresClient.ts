@@ -14,9 +14,18 @@ export interface SolanaAuditRecord {
   txSignature?: string | null;
 }
 
+export interface QuarantineRecord {
+  mint: string;
+  symbol: string;
+  reason: string;
+  quarantinedAt: Date;
+  expiresAt: Date;
+}
+
 export class SolanaPostgresRepository {
   private pool: Pool | null = null;
   private isTableInitialized = false;
+  private isQuarantineTableInitialized = false;
 
   constructor(connectionString?: string) {
     const conn = connectionString || process.env.DATABASE_URL;
@@ -62,6 +71,93 @@ export class SolanaPostgresRepository {
     }
   }
 
+  /**
+   * Garante a existência da tabela token_quarantine para persistência durável
+   */
+  public async initQuarantineTable(): Promise<void> {
+    if (!this.pool || this.isQuarantineTableInitialized) return;
+
+    const query = `
+      CREATE TABLE IF NOT EXISTS token_quarantine (
+        mint VARCHAR(64) PRIMARY KEY,
+        symbol VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
+        reason VARCHAR(255) NOT NULL,
+        quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_quarantine_expires ON token_quarantine(expires_at DESC);
+    `;
+
+    try {
+      await this.pool.query(query);
+      this.isQuarantineTableInitialized = true;
+    } catch (err: any) {
+      console.warn('⚠️ Falha não-bloqueante ao verificar tabela Postgres token_quarantine:', err.message);
+    }
+  }
+
+  /**
+   * Salva ou atualiza uma quarentena no Postgres
+   */
+  public async saveQuarantine(record: {
+    mint: string;
+    symbol?: string;
+    reason: string;
+    expiresAt: Date;
+    quarantinedAt?: Date;
+  }): Promise<void> {
+    if (!this.pool) return;
+
+    try {
+      await this.initQuarantineTable();
+      const query = `
+        INSERT INTO token_quarantine (mint, symbol, reason, quarantined_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (mint) DO UPDATE
+        SET symbol = EXCLUDED.symbol,
+            reason = EXCLUDED.reason,
+            quarantined_at = EXCLUDED.quarantined_at,
+            expires_at = EXCLUDED.expires_at;
+      `;
+      await this.pool.query(query, [
+        record.mint,
+        record.symbol || 'UNKNOWN',
+        record.reason,
+        record.quarantinedAt || new Date(),
+        record.expiresAt
+      ]);
+    } catch (err: any) {
+      console.warn(`⚠️ Não foi possível salvar quarentena no Postgres para ${record.mint}:`, err.message);
+    }
+  }
+
+  /**
+   * Retorna todas as quarentenas ainda ativas (expires_at > NOW())
+   */
+  public async getActiveQuarantine(): Promise<QuarantineRecord[]> {
+    if (!this.pool) return [];
+
+    try {
+      await this.initQuarantineTable();
+      const query = `
+        SELECT mint, symbol, reason, quarantined_at, expires_at
+        FROM token_quarantine
+        WHERE expires_at > NOW();
+      `;
+      const res = await this.pool.query(query);
+      return res.rows.map(row => ({
+        mint: row.mint,
+        symbol: row.symbol,
+        reason: row.reason,
+        quarantinedAt: new Date(row.quarantined_at),
+        expiresAt: new Date(row.expires_at)
+      }));
+    } catch (err: any) {
+      console.warn('⚠️ Erro ao consultar quarentena ativa no Postgres:', err.message);
+      return [];
+    }
+  }
+
   public async saveAudit(record: SolanaAuditRecord): Promise<void> {
     if (!this.pool) {
       return; // Sem conexão configurada, opera silencioso
@@ -99,3 +195,4 @@ export class SolanaPostgresRepository {
     }
   }
 }
+

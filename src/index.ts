@@ -137,8 +137,17 @@ async function executeExitOrder(
     if (quarantineMs > 0) {
       const labels: Record<string, string> = { STOP_LOSS: '3h', TIME_STOP: '30min', MANUAL: '24h' };
       const label = labels[exitReason] || '?h';
-      antiSpamMemory.recordVeto(pos.mint, `Quarentena Pós-${exitReason}: cooldown de ${label}`, quarantineMs);
+      const reasonText = `Quarentena Pós-${exitReason}: cooldown de ${label}`;
+      antiSpamMemory.recordVeto(pos.mint, reasonText, quarantineMs);
       console.log(`🛑 [Quarentena ${label}] ${pos.symbol} bloqueado para recompra (${exitReason}).`);
+
+      // Persistência ativa no PostgreSQL (Fim da amnésia pós-deploy)
+      postgresRepo.saveQuarantine({
+        mint: pos.mint,
+        symbol: pos.symbol,
+        reason: reasonText,
+        expiresAt: new Date(Date.now() + quarantineMs)
+      }).catch(() => {});
     }
   }
 
@@ -520,7 +529,15 @@ async function executeAutonomousCycle() {
 
       if (!audit.safe) {
         console.log(`   Motivo do Veto: ${audit.reason}`);
-        antiSpamMemory.recordVeto(topCandidate.mint, audit.reason || 'Veto preventivo');
+        const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Ayla)';
+        antiSpamMemory.recordVeto(topCandidate.mint, vetoReasonText, 24 * 60 * 60 * 1000);
+        // Persistência ativa no banco por 24 horas
+        postgresRepo.saveQuarantine({
+          mint: topCandidate.mint,
+          symbol: topCandidate.symbol,
+          reason: vetoReasonText,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+        }).catch(() => {});
       } else {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
@@ -577,7 +594,15 @@ async function executeAutonomousCycle() {
           }).catch(() => {});
         } else {
           const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';
-          antiSpamMemory.recordVeto(topCandidate.mint, `Swap Jupiter falhou: ${failReason}`);
+          const swapVetoText = `Swap Jupiter falhou: ${failReason}`;
+          antiSpamMemory.recordVeto(topCandidate.mint, swapVetoText, 60 * 60 * 1000);
+          // Persistência ativa no banco por 1 hora
+          postgresRepo.saveQuarantine({
+            mint: topCandidate.mint,
+            symbol: topCandidate.symbol,
+            reason: swapVetoText,
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+          }).catch(() => {});
           // Registra falha no dashboard como auditoria com swapFailReason visivel
           latestState.recentAudits[0] = { ...latestState.recentAudits[0], swapFailReason: failReason } as any;
         }
@@ -682,6 +707,47 @@ async function rehydratePositionsFromWalletOnBoot() {
   }
 }
 
+/**
+ * 🛡️ REIDRATAÇÃO DA QUARENTENA NO BOOT (Fim da Amnésia pós-Deploy)
+ * Carrega todos os tokens com quarentena ativa do PostgreSQL
+ * e força o bloqueio preventivo do token 'all/inCat' por 6 horas.
+ */
+async function rehydrateQuarantineFromDbOnBoot() {
+  console.log('🔄 [BOOT: Quarentena On-Chain] Sincronizando tabela de quarentena do Postgres...');
+  try {
+    // 1. Expurgar o 'all/inCat' imediatamente (6 horas de quarentena forçada)
+    const ALL_IN_CAT_MINT = '4vvmFPzhuW2cdfSxtHUfJQCSFFb7zPBXH4neBooipump';
+    const sixHoursMs = 6 * 60 * 60 * 1000;
+    const catExpiresAt = new Date(Date.now() + sixHoursMs);
+    antiSpamMemory.recordVeto(ALL_IN_CAT_MINT, 'Veto Forçado Pós-StopLoss (Expurgado preventivo)', sixHoursMs);
+
+    await postgresRepo.saveQuarantine({
+      mint: ALL_IN_CAT_MINT,
+      symbol: 'all/inCat',
+      reason: 'Veto Forçado Pós-StopLoss (Expurgado preventivo por 6h)',
+      expiresAt: catExpiresAt
+    });
+
+    // 2. Consulta quarentenas ativas no Postgres
+    const activeDbQuarantines = await postgresRepo.getActiveQuarantine();
+    if (activeDbQuarantines.length > 0) {
+      antiSpamMemory.loadQuarantinedTokens(
+        activeDbQuarantines.map(q => ({
+          mint: q.mint,
+          reason: q.reason,
+          expiresAt: q.expiresAt.getTime()
+        }))
+      );
+    }
+
+    const totalQuarantined = antiSpamMemory.getStats().vettedCount;
+    latestState.quarantineCount = totalQuarantined;
+    console.log(`🛡️ [BOOT: Quarentena Reidratada] ${totalQuarantined} tokens bloqueados carregados do banco.`);
+  } catch (err: any) {
+    console.warn('⚠️ [BOOT: Aviso Quarentena] Erro ao carregar quarentenas do Postgres:', err?.message || err);
+  }
+}
+
 async function main() {
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');
@@ -698,10 +764,13 @@ async function main() {
     console.warn(`⚠️ [ALERTA DE CHAVE] Chave pública derivada (${wallet.getPublicKey()}) diverge da carteira oficial configurada (${OFFICIAL_PHANTOM_WALLET})!`);
   }
 
-  // 1. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
+  // 1. Reidratação da Quarentena do Banco (Fim da Amnésia pós-Deploy)
+  await rehydrateQuarantineFromDbOnBoot();
+
+  // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
   await rehydratePositionsFromWalletOnBoot();
 
-  // 2. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)
+  // 3. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)
   setInterval(runUltraFastExitMonitor, FAST_EXIT_INTERVAL_MS);
 
   // 3. Executa o primeiro ciclo de scanner imediatamente
