@@ -4,16 +4,21 @@ export interface PositionTracking {
   tokenAmount: number;
   entryPriceUsd: number;
   entryTimestamp: number;
-  stopLossPct: number;    // Ex: -20% (-0.20) inicial
-  takeProfitPct: number;  // Ex: +100% (+1.00 / 2x) para colheita parcial
+  stopLossPct: number;    // Ex: -8% (-0.08) inicial
+  takeProfitPct: number;  // Ex: +35% (+0.35) para colheita parcial
   entrySol?: number;      // Ex: 0.015 SOL investidos na entrada
   maxHoldDurationMs?: number; // Padrão: 15 minutos (15 * 60 * 1000)
-  partialTaken?: boolean; // True quando a parcial de 50% em +100% foi executada
+  partialTaken?: boolean; // True quando a parcial de 50% em +35% foi executada
   initialTokenAmount?: number; // Lote original total
   // Snapshot de Entrada (Contexto Inicial da Operação):
   entrySolValue?: number;
   entryLiquidityUsd?: number;
   entryVolume5m?: number;
+}
+
+export interface PositionInput extends Omit<PositionTracking, 'stopLossPct' | 'takeProfitPct'> {
+  stopLossPct?: number;
+  takeProfitPct?: number;
 }
 
 export interface ClosedTrade {
@@ -84,22 +89,17 @@ export class PositionExitEngine {
     return `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
   }
 
-  public addPosition(position: PositionTracking): void {
-    if (position.stopLossPct === undefined) {
-      position.stopLossPct = PositionExitEngine.DEFAULT_STOP_LOSS_PCT;
-    }
-    if (position.takeProfitPct === undefined) {
-      position.takeProfitPct = PositionExitEngine.DEFAULT_TAKE_PROFIT_PCT;
-    }
-    if (!position.maxHoldDurationMs) {
-      position.maxHoldDurationMs = PositionExitEngine.DEFAULT_TIME_STOP_MS;
-    }
-    if (!position.initialTokenAmount) {
-      position.initialTokenAmount = position.tokenAmount;
-    }
-    this.activePositions.set(position.mint, position);
+  public addPosition(position: PositionInput): void {
+    const fullPosition: PositionTracking = {
+      ...position,
+      stopLossPct: position.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
+      takeProfitPct: position.takeProfitPct ?? PositionExitEngine.DEFAULT_TAKE_PROFIT_PCT,
+      maxHoldDurationMs: position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS,
+      initialTokenAmount: position.initialTokenAmount || position.tokenAmount
+    };
+    this.activePositions.set(fullPosition.mint, fullPosition);
     // Inicializa pico com o valor de entrada
-    this.peakSolValues.set(position.mint, position.entrySol || 0.015);
+    this.peakSolValues.set(fullPosition.mint, fullPosition.entrySol || 0.015);
   }
 
   public getPosition(mint: string): PositionTracking | undefined {

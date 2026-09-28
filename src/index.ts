@@ -467,8 +467,8 @@ async function executeAutonomousCycle() {
     }
 
     // Ciclo 2: Scanner On-Chain (DexScreener)
-    console.log('🔍 [1/3 Scanner DexScreener] Buscando tokens recém-perfilados e piscinas Raydium na rede Solana...');
-    const candidates = await scanner.scanSolanaTrends(10000);
+    console.log('🔍 [1/3 Scanner Descoberta] Buscando piscinas consolidadas (15-60m | Liquidez >= $20k)...');
+    const candidates = await scanner.scanSolanaTrends(20000);
     const totalCaptured = candidates.length;
 
     let technicalDiscardCount = 0;
@@ -557,10 +557,10 @@ async function executeAutonomousCycle() {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
-        // Dimensionamento Dinâmico de Lote: 7% do saldo seguro (após reserva de gas) com teto de 0.02 SOL e piso de 0.012 SOL
+        // Dimensionamento Sniper: 0.05 SOL por trade respeitando reserva intocável de 0.05 SOL de taxas
         const currentBalance = latestState.balanceSol || (await wallet.getBalanceSol());
-        const safeBalance = Math.max(0, currentBalance - SolanaWalletService.MIN_GAS_RESERVE_SOL);
-        const dynamicAllocSol = Math.min(0.02, Math.max(0.012, Number((safeBalance * 0.07).toFixed(4))));
+        const safeBalance = Math.max(0, currentBalance - 0.05);
+        const dynamicAllocSol = Math.min(0.05, Math.max(0.02, Number((safeBalance >= 0.05 ? 0.05 : safeBalance).toFixed(4))));
         const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
 
         console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra com pré-voo ativo (${dynamicAllocSol} SOL | autoSlippage blindado)...`);
@@ -593,23 +593,23 @@ async function executeAutonomousCycle() {
             tokenAmount: swapSim.outAmount,
             entryPriceUsd: topCandidate.priceUsd,
             entryTimestamp: nowTs,
-            stopLossPct: -0.20,
-            takeProfitPct: 1.0, // +100% para colheita parcial 50%
+            stopLossPct: -0.08,
+            takeProfitPct: 0.35, // +35% para colheita parcial 50%
             entrySol: dynamicAllocSol,
             entrySolValue: dynamicAllocSol,
             entryLiquidityUsd: topCandidate.liquidityUsd,
             entryVolume5m: topCandidate.volume5mUsd || 0
           });
-          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -20% | TP: +100%)`);
+          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -8% | TP: +35%)`);
           updateDashboardViews();
 
           // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
           cerebroService.notifyTradeEvent({
-            title: 'Nova Entrada Executada (Sniper 0.015 SOL)',
+            title: `Nova Entrada Executada (Sniper ${dynamicAllocSol} SOL)`,
             symbol: topCandidate.symbol,
             mint: topCandidate.mint,
             action: `Compra na Jupiter V6 | Lote: ${swapSim.outAmount.toLocaleString()}`,
-            solValue: 0.015,
+            solValue: dynamicAllocSol,
             txSignature: swapSim.txSignature,
             detail: `Liq: $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m: $${(topCandidate.volume5mUsd || 0).toLocaleString()}`
           }).catch(() => {});
