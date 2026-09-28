@@ -67,7 +67,12 @@ export interface DashboardState {
 
 export function renderDashboardHtml(state: DashboardState): string {
   const pnlColor = (pnl: number) => (pnl >= 0 ? '#10B981' : '#EF4444');
-  const formatUsd = (num: number) => `$${num.toFixed(6)}`;
+  const formatUsd = (num: number) => {
+    if (!num || num === 0) return '$0.00';
+    if (num < 0.000001) return `$${num.toExponential(4)}`;
+    if (num < 0.01) return `$${num.toFixed(8)}`;
+    return `$${num.toFixed(4)}`;
+  };
 
   const positionsRows = state.positions.length === 0
     ? `<tr><td colspan="7" style="text-align: center; color: #94A3B8; padding: 24px;">Nenhuma posição aberta no momento. O scanner está caçando novas oportunidades elegíveis...</td></tr>`
@@ -467,8 +472,15 @@ export function renderDashboardHtml(state: DashboardState): string {
               pnlEl.textContent = (pos.pnlPct >= 0 ? '+' : '') + pct + '%';
               pnlEl.style.color = pos.pnlPct >= 0 ? '#10B981' : '#EF4444';
             }
-            if (priceEl) {
-              priceEl.textContent = '$' + Number(pos.currentPriceUsd).toFixed(6);
+            if (priceEl && pos.currentPriceUsd !== undefined) {
+              const p = Number(pos.currentPriceUsd);
+              if (p < 0.000001 && p > 0) {
+                priceEl.textContent = '$' + p.toExponential(4);
+              } else if (p < 0.01 && p > 0) {
+                priceEl.textContent = '$' + p.toFixed(8);
+              } else {
+                priceEl.textContent = '$' + p.toFixed(4);
+              }
             }
           });
         }

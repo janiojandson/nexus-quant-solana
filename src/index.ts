@@ -168,13 +168,14 @@ async function executeExitOrder(
 function updateDashboardViews() {
   const currentPositions = positionEngine.getAllPositions();
   latestState.positions = currentPositions.map(p => {
+    const existing = latestState.positions.find(prev => prev.mint === p.mint);
     return {
       mint: p.mint,
       symbol: p.symbol,
       tokenAmount: p.tokenAmount,
       entryPriceUsd: p.entryPriceUsd,
-      currentPriceUsd: p.entryPriceUsd,
-      pnlPct: 0,
+      currentPriceUsd: existing && existing.currentPriceUsd > 0 ? existing.currentPriceUsd : p.entryPriceUsd,
+      pnlPct: existing ? existing.pnlPct : 0,
       stopLossPct: p.stopLossPct,
       takeProfitPct: p.takeProfitPct,
       entryTimestamp: p.entryTimestamp,
