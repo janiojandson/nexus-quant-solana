@@ -20,9 +20,32 @@ export class DexScreenerScanner {
   private fetchClient: (url: string) => Promise<{ data: any }>;
   private static readonly TOKEN_PROFILES_URL = 'https://api.dexscreener.com/token-profiles/latest/v1';
   private static readonly RAYDIUM_POOLS_URL = 'https://api.dexscreener.com/latest/dex/search?q=raydium%20solana';
+  private static readonly GECKOTERMINAL_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 
   constructor(options?: ScannerOptions) {
-    this.fetchClient = options?.fetchClient || (async (url: string) => axios.get(url, { timeout: 8000 }));
+    this.fetchClient = options?.fetchClient || (async (url: string) => {
+      const startTime = Date.now();
+      try {
+        const res = await axios.get(url, {
+          timeout: 8000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://dexscreener.com/'
+          }
+        });
+        const elapsed = Date.now() - startTime;
+        console.log(`🌐 [Scanner HTTP ${res.status}] ${url.split('?')[0]} (${elapsed}ms)`);
+        return res;
+      } catch (err: any) {
+        const elapsed = Date.now() - startTime;
+        const status = err.response?.status || 'ERR';
+        const msg = err.response?.statusText || err.message;
+        console.warn(`⚠️ [Scanner HTTP ${status}] ${url.split('?')[0]} falhou após ${elapsed}ms: ${msg}`);
+        throw err;
+      }
+    });
   }
 
   public async scanSolanaTrends(minLiquidityUsd: number = 10000): Promise<TokenCandidate[]> {
@@ -47,6 +70,36 @@ export class DexScreenerScanner {
       if (poolsRes.status === 'fulfilled') {
         const data = poolsRes.value.data;
         rawPairs = Array.isArray(data) ? data : (data?.pairs || []);
+      }
+
+      // Se ambas as chamadas DexScreener falharem ou retornarem vazias (ex: 429/403 do Railway IP), ativa Fallback GeckoTerminal
+      if (rawPairs.length === 0 && tokenMintsFromProfiles.length === 0) {
+        console.log(`🔄 [Scanner Fallback] Acionando GeckoTerminal API para Solana (/networks/solana/new_pools)...`);
+        try {
+          const geckoRes = await this.fetchClient(DexScreenerScanner.GECKOTERMINAL_POOLS_URL);
+          const geckoPools = geckoRes.data?.data || [];
+          for (const gp of geckoPools) {
+            const attr = gp.attributes || {};
+            rawPairs.push({
+              chainId: 'solana',
+              dexId: 'geckoterminal',
+              baseToken: {
+                address: attr.base_token_price_usd ? gp.relationships?.base_token?.data?.id?.replace('solana_', '') : null,
+                symbol: attr.name ? attr.name.split(' / ')[0] : 'UNKNOWN',
+                name: attr.name || 'Unknown'
+              },
+              priceUsd: Number(attr.base_token_price_usd || 0),
+              liquidity: { usd: Number(attr.reserve_in_usd || 0) },
+              volume: {
+                h24: Number(attr.volume_usd?.h24 || 0),
+                m5: Number(attr.volume_usd?.m5 || 0)
+              },
+              pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : Date.now()
+            });
+          }
+        } catch (geckoErr: any) {
+          console.warn(`⚠️ [Scanner Fallback GeckoTerminal] Falhou:`, geckoErr?.message || geckoErr);
+        }
       }
 
       // Enriquece e busca pares dos tokens recém-perfilados na Solana

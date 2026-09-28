@@ -613,6 +613,57 @@ async function executeAutonomousCycle() {
   }
 }
 
+/**
+ * 🔄 REIDRATAÇÃO ON-CHAIN NO BOOT (Fim da Amnésia pós-Restart)
+ * Consulta getParsedTokenAccountsByOwner na carteira Phantom:
+ * Se houver qualquer token SPL com saldo > 0 diferente de SOL/USDC,
+ * reidrata-o automaticamente como posição ativa no PositionExitEngine.
+ */
+async function rehydratePositionsFromWalletOnBoot() {
+  console.log('🔄 [BOOT: Reidratação On-Chain] Verificando contas SPL na carteira Phantom...');
+  try {
+    const splAccounts = await wallet.getSplTokenAccounts();
+    console.log(`📦 [BOOT: Contas SPL Encontradas] ${splAccounts.length} conta(s) com saldo > 0.`);
+
+    // Ignora tokens de infraestrutura base (USDC, USDT, Wrapped SOL)
+    const BASE_MINTS = new Set([
+      'So11111111111111111111111111111111111111112', // SOL / WSOL
+      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+      'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
+    ]);
+
+    for (const spl of splAccounts) {
+      if (BASE_MINTS.has(spl.mint)) continue;
+
+      if (!positionEngine.getPosition(spl.mint)) {
+        const meta = await scanner.fetchTokenMetadata(spl.mint);
+        const price = (meta && meta.priceUsd > 0) ? meta.priceUsd : 0.00001;
+        const symbol = meta?.symbol || (spl.mint.slice(0, 4) + '...' + spl.mint.slice(-4));
+
+        positionEngine.addPosition({
+          mint: spl.mint,
+          symbol,
+          tokenAmount: spl.tokenAmount,
+          entryPriceUsd: price,
+          entryTimestamp: Date.now(),
+          stopLossPct: -0.20,
+          takeProfitPct: 1.0, // +100% para colheita parcial 50%
+          entrySol: 0.015,
+          entrySolValue: 0.015,
+          entryLiquidityUsd: 15000,
+          entryVolume5m: 1000
+        });
+
+        console.log(`🛡️ [BOOT: Posição Reidratada e Protegida] ${symbol} (${spl.mint}) | Quantidade: ${spl.tokenAmount.toLocaleString()} | Preço Base: $${price}`);
+      }
+    }
+
+    updateDashboardViews();
+  } catch (err: any) {
+    console.warn(`⚠️ [BOOT: Aviso Reidratação] Erro ao carregar contas SPL:`, err?.message || err);
+  }
+}
+
 async function main() {
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');
@@ -629,13 +680,16 @@ async function main() {
     console.warn(`⚠️ [ALERTA DE CHAVE] Chave pública derivada (${wallet.getPublicKey()}) diverge da carteira oficial configurada (${OFFICIAL_PHANTOM_WALLET})!`);
   }
 
-  // 1. Executa o primeiro ciclo de scanner imediatamente
-  await executeAutonomousCycle();
+  // 1. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
+  await rehydratePositionsFromWalletOnBoot();
 
-  // 2. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms
+  // 2. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)
   setInterval(runUltraFastExitMonitor, FAST_EXIT_INTERVAL_MS);
 
-  // 3. Loop Independente de Scanner de Novos Tokens a cada 30s
+  // 3. Executa o primeiro ciclo de scanner imediatamente
+  await executeAutonomousCycle();
+
+  // 4. Loop Independente de Scanner de Novos Tokens a cada 30s
   setInterval(executeAutonomousCycle, SCAN_INTERVAL_MS);
 }
 
