@@ -19,6 +19,8 @@ export interface ScannerOptions {
 export class DexScreenerScanner {
   private fetchClient: (url: string) => Promise<{ data: any }>;
   private static readonly TOKEN_PROFILES_URL = 'https://api.dexscreener.com/token-profiles/latest/v1';
+  private static readonly TOKEN_BOOSTS_LATEST_URL = 'https://api.dexscreener.com/token-boosts/latest/v1';
+  private static readonly TOKEN_BOOSTS_TOP_URL = 'https://api.dexscreener.com/token-boosts/top/v1';
   private static readonly RAYDIUM_POOLS_URL = 'https://api.dexscreener.com/latest/dex/search?q=raydium%20solana';
   private static readonly GECKOTERMINAL_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 
@@ -50,71 +52,111 @@ export class DexScreenerScanner {
 
   public async scanSolanaTrends(minLiquidityUsd: number = 10000): Promise<TokenCandidate[]> {
     try {
-      // Consome feeds dinâmicos: perfis recém-atualizados e novas pools
-      const [profilesRes, poolsRes] = await Promise.allSettled([
+      let sourcesCount = 0;
+      const discoveredMints = new Set<string>();
+      let rawPairs: any[] = [];
+
+      // 1. Ampliação dos Endpoints de Descoberta On-Chain (DexScreener + GeckoTerminal)
+      const [profilesRes, boostsLatestRes, boostsTopRes, poolsRes, geckoRes] = await Promise.allSettled([
         this.fetchClient(DexScreenerScanner.TOKEN_PROFILES_URL),
-        this.fetchClient(DexScreenerScanner.RAYDIUM_POOLS_URL)
+        this.fetchClient(DexScreenerScanner.TOKEN_BOOSTS_LATEST_URL),
+        this.fetchClient(DexScreenerScanner.TOKEN_BOOSTS_TOP_URL),
+        this.fetchClient(DexScreenerScanner.RAYDIUM_POOLS_URL),
+        this.fetchClient(DexScreenerScanner.GECKOTERMINAL_POOLS_URL)
       ]);
 
-      const tokenMintsFromProfiles: string[] = [];
+      // Extrai de token-profiles
       if (profilesRes.status === 'fulfilled') {
-        const rawProfiles = Array.isArray(profilesRes.value.data) ? profilesRes.value.data : [];
-        for (const p of rawProfiles) {
+        sourcesCount++;
+        const raw = Array.isArray(profilesRes.value.data) ? profilesRes.value.data : [];
+        for (const p of raw) {
           if (p.chainId?.toLowerCase() === 'solana' && p.tokenAddress) {
-            tokenMintsFromProfiles.push(p.tokenAddress);
+            discoveredMints.add(p.tokenAddress);
           }
         }
       }
 
-      let rawPairs: any[] = [];
+      // Extrai de token-boosts/latest/v1
+      if (boostsLatestRes.status === 'fulfilled') {
+        sourcesCount++;
+        const raw = Array.isArray(boostsLatestRes.value.data) ? boostsLatestRes.value.data : [];
+        for (const b of raw) {
+          if (b.chainId?.toLowerCase() === 'solana' && b.tokenAddress) {
+            discoveredMints.add(b.tokenAddress);
+          }
+        }
+      }
+
+      // Extrai de token-boosts/top/v1
+      if (boostsTopRes.status === 'fulfilled') {
+        sourcesCount++;
+        const raw = Array.isArray(boostsTopRes.value.data) ? boostsTopRes.value.data : [];
+        for (const b of raw) {
+          if (b.chainId?.toLowerCase() === 'solana' && b.tokenAddress) {
+            discoveredMints.add(b.tokenAddress);
+          }
+        }
+      }
+
+      // Extrai de search Raydium Solana
       if (poolsRes.status === 'fulfilled') {
+        sourcesCount++;
         const data = poolsRes.value.data;
-        rawPairs = Array.isArray(data) ? data : (data?.pairs || []);
-      }
-
-      // Se ambas as chamadas DexScreener falharem ou retornarem vazias (ex: 429/403 do Railway IP), ativa Fallback GeckoTerminal
-      if (rawPairs.length === 0 && tokenMintsFromProfiles.length === 0) {
-        console.log(`🔄 [Scanner Fallback] Acionando GeckoTerminal API para Solana (/networks/solana/new_pools)...`);
-        try {
-          const geckoRes = await this.fetchClient(DexScreenerScanner.GECKOTERMINAL_POOLS_URL);
-          const geckoPools = geckoRes.data?.data || [];
-          for (const gp of geckoPools) {
-            const attr = gp.attributes || {};
-            rawPairs.push({
-              chainId: 'solana',
-              dexId: 'geckoterminal',
-              baseToken: {
-                address: attr.base_token_price_usd ? gp.relationships?.base_token?.data?.id?.replace('solana_', '') : null,
-                symbol: attr.name ? attr.name.split(' / ')[0] : 'UNKNOWN',
-                name: attr.name || 'Unknown'
-              },
-              priceUsd: Number(attr.base_token_price_usd || 0),
-              liquidity: { usd: Number(attr.reserve_in_usd || 0) },
-              volume: {
-                h24: Number(attr.volume_usd?.h24 || 0),
-                m5: Number(attr.volume_usd?.m5 || 0)
-              },
-              pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : Date.now()
-            });
-          }
-        } catch (geckoErr: any) {
-          console.warn(`⚠️ [Scanner Fallback GeckoTerminal] Falhou:`, geckoErr?.message || geckoErr);
+        const fetched = Array.isArray(data) ? data : (data?.pairs || []);
+        if (Array.isArray(fetched)) {
+          rawPairs.push(...fetched);
         }
       }
 
-      // Enriquece e busca pares dos tokens recém-perfilados na Solana
-      if (tokenMintsFromProfiles.length > 0) {
-        try {
-          const sampleMints = tokenMintsFromProfiles.slice(0, 15).join(',');
-          const tokensRes = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${sampleMints}`);
-          const fetchedPairs = Array.isArray(tokensRes.data) 
-            ? tokensRes.data 
-            : (tokensRes.data?.pairs || (Array.isArray(tokensRes.data?.pairs) ? tokensRes.data.pairs : []));
-          if (Array.isArray(fetchedPairs)) {
-            rawPairs = [...rawPairs, ...fetchedPairs];
+      // Extrai de GeckoTerminal Solana new_pools
+      if (geckoRes.status === 'fulfilled') {
+        sourcesCount++;
+        const geckoPools = geckoRes.value.data?.data || [];
+        for (const gp of geckoPools) {
+          const attr = gp.attributes || {};
+          const mint = attr.base_token_price_usd ? gp.relationships?.base_token?.data?.id?.replace('solana_', '') : null;
+          if (mint) {
+            discoveredMints.add(mint);
           }
-        } catch {}
+          rawPairs.push({
+            chainId: 'solana',
+            dexId: 'geckoterminal',
+            baseToken: {
+              address: mint,
+              symbol: attr.name ? attr.name.split(' / ')[0] : 'UNKNOWN',
+              name: attr.name || 'Unknown'
+            },
+            priceUsd: Number(attr.base_token_price_usd || 0),
+            liquidity: { usd: Number(attr.reserve_in_usd || 0) },
+            volume: {
+              h24: Number(attr.volume_usd?.h24 || 0),
+              m5: Number(attr.volume_usd?.m5 || 0)
+            },
+            pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : Date.now()
+          });
+        }
       }
+
+      // Enriquece mints descobertos em lotes de até 30 na DexScreener API
+      const mintsArray = Array.from(discoveredMints);
+      if (mintsArray.length > 0) {
+        const batchSize = 30;
+        for (let i = 0; i < Math.min(mintsArray.length, 60); i += batchSize) {
+          const chunk = mintsArray.slice(i, i + batchSize).join(',');
+          try {
+            const tokensRes = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${chunk}`);
+            const fetchedPairs = Array.isArray(tokensRes.data)
+              ? tokensRes.data
+              : (tokensRes.data?.pairs || (Array.isArray(tokensRes.data?.pairs) ? tokensRes.data.pairs : []));
+            if (Array.isArray(fetchedPairs)) {
+              rawPairs.push(...fetchedPairs);
+            }
+          } catch {}
+        }
+      }
+
+      // 3. Log de Diagnóstico: Tokens brutos extraídos antes dos filtros
+      console.log(`📡 [Descoberta] ${rawPairs.length} tokens brutos extraídos de ${sourcesCount} fontes (${discoveredMints.size} mints únicos)`);
 
       const now = Date.now();
       const candidates: TokenCandidate[] = [];

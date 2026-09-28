@@ -463,6 +463,8 @@ async function executeAutonomousCycle() {
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
       if (!classification.isEligibleForMemeScan) {
         technicalDiscardCount++;
+        // TTL inteligente de 5 minutos: permite que tokens com liquidez oscilante ou status transitório sejam reavaliados
+        antiSpamMemory.recordTechnicalDiscard(token.mint, classification.reason || 'Descarte por classificação técnica', 5);
         continue;
       }
 
@@ -475,7 +477,17 @@ async function executeAutonomousCycle() {
       eligibleCandidates.push(token);
     }
 
-    console.log(`📊 [Capturados: ${totalCaptured} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`);
+    const logMsg = `📊 [Capturados: ${totalCaptured} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`;
+    console.log(logMsg);
+
+    // Registra no buffer de scannerLogs para exposição na API e Dashboard
+    if (!latestState.scannerLogs) latestState.scannerLogs = [];
+    latestState.scannerLogs.unshift({
+      timestamp: new Date().toLocaleTimeString(),
+      message: logMsg,
+      type: eligibleCandidates.length > 0 ? 'success' : 'info'
+    });
+    if (latestState.scannerLogs.length > 15) latestState.scannerLogs.pop();
 
     if (eligibleCandidates.length > 0) {
       const topCandidate = eligibleCandidates[0];

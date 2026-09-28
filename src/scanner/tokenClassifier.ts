@@ -100,6 +100,16 @@ export class AntiSpamMemory {
     this.vettedTokens.set(mint, { timestamp: now, reason, expiresAt });
   }
 
+  /**
+   * Registra descarte técnico temporário (ex: idade < 20 min ou liquidez oscilante).
+   * TTL curto de 5 minutos permite que o token seja reavaliado na próxima janela.
+   */
+  public recordTechnicalDiscard(mint: string, reason: string, ttlMinutes: number = 5): void {
+    const now = Date.now();
+    const expiresAt = now + (ttlMinutes * 60 * 1000);
+    this.vettedTokens.set(mint, { timestamp: now, reason: `Descarte Técnico Temporário (TTL 5m): ${reason}`, expiresAt });
+  }
+
   public recordApproval(mint: string, score: number): void {
     this.approvedTokens.set(mint, { timestamp: Date.now(), score });
   }

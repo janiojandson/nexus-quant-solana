@@ -48,3 +48,19 @@ test('AntiSpamMemory: deve evitar reprocessamento repetitivo de tokens vetados',
   assert.strictEqual(check.skip, true);
   assert.match(check.reason || '', /quarentena/);
 });
+
+test('AntiSpamMemory: deve aplicar TTL curto de 5 minutos para descarte técnico permitindo reavaliação', () => {
+  const memory = new AntiSpamMemory(60);
+  const mint = 'YoungPoolMint789';
+
+  // Registra descarte técnico de 5 minutos
+  memory.recordTechnicalDiscard(mint, 'Idade < 20m', 5);
+
+  // Logo em seguida deve pular
+  assert.strictEqual(memory.shouldSkip(mint).skip, true);
+
+  // Simula expiração: se customTtlMs for passado negativo (-1ms)
+  memory.recordTechnicalDiscard(mint, 'Idade atingiu 20m agora', -0.01);
+  assert.strictEqual(memory.shouldSkip(mint).skip, false);
+});
+

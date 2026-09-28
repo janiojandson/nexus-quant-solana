@@ -62,6 +62,7 @@ export interface DashboardState {
     timestamp: number;
   }>;
   quarantineCount: number;
+  scannerLogs?: Array<{ timestamp: string; message: string; type?: 'info' | 'warn' | 'success' | 'fallback' }>;
   lastUpdated: string;
 }
 
