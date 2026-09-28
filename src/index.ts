@@ -22,7 +22,8 @@ const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
 const MAX_CONCURRENT_POSITIONS = 1; // Modo Sniper: 1 posição por vez para foco total de CPU e liquidez
 const PORT = process.env.PORT || 3009;
-const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
+const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
+const LAYA_URL = process.env.LAYA_INTERNAL_URL || process.env.LAYA_PUBLIC_FALLBACK_URL || 'https://nexus-decisor-laya-production.up.railway.app';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
 let isRunningScanner = false;
@@ -38,7 +39,7 @@ const wallet = new SolanaWalletService({
 
 const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
-  layaBaseUrl: process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8080',
+  layaBaseUrl: LAYA_URL,
   macroSentinelUrl: MACRO_SENTINEL_URL,
   timeoutMs: 4000
 });
