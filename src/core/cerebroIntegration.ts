@@ -61,7 +61,14 @@ export class CerebroIntegrationService {
       }
     }
 
-    // 2. Fallback via Hub do Cérebro
+    // 2. Notificação de Emergência via WhatsApp (Comunicacao Hub) caso seja sinalizado como urgente ou Stop crítico
+    if (params.pnlPct !== undefined && params.pnlPct <= -0.15) {
+      this.sendEmergencyWhatsApp(
+        `🚨 *[ALERTA MÁXIMO SOLANA]*\nAtivo: ${params.symbol}\nMotivo: ${params.title}\nPnL: ${(params.pnlPct * 100).toFixed(2)}%\n${params.detail || ''}`
+      ).catch(() => {});
+    }
+
+    // 3. Fallback via Hub do Cérebro
     try {
       await axios.post(
         `${this.cerebroUrl}/v1/comunicacao/notificar`,
@@ -75,6 +82,37 @@ export class CerebroIntegrationService {
       return true;
     } catch {
       // Falha silenciosa para não bloquear o motor de execução rápida
+      return false;
+    }
+  }
+
+  /**
+   * Dispara mensagem de emergência via WhatsApp conectando diretamente ao Comunicacao Hub (Railway ou Nuvem)
+   */
+  public async sendEmergencyWhatsApp(texto: string): Promise<boolean> {
+    const hubUrl = process.env.COMUNICACAO_API_URL || 'https://comunicacao-hub-production.up.railway.app/api';
+    const hubKey = process.env.COMUNICACAO_API_KEY || 'nexus_secret_hub_2026_x89a';
+    const targetGroup = process.env.WHATSAPP_EMERGENCY_GROUP || 'familia';
+
+    try {
+      await axios.post(
+        `${hubUrl}/mensagens/enviar`,
+        {
+          canal: 'whatsapp',
+          destinatario: targetGroup,
+          mensagem: texto
+        },
+        {
+          headers: {
+            'x-api-key': hubKey,
+            'Authorization': `Bearer ${hubKey}`
+          },
+          timeout: 4000
+        }
+      );
+      return true;
+    } catch (err: any) {
+      console.warn(`⚠️ [WhatsApp Emergency Hub] Erro ao despachar mensagem:`, err?.message || err);
       return false;
     }
   }
