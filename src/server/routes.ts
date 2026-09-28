@@ -49,11 +49,15 @@ export async function handleApiRoutes(
 
   // 3. Rota de Holdings (Tokens custodiados na carteira Phantom)
   if (pathname === '/api/holdings' && method === 'GET') {
+    // Sanitização Estrita de Tokens (Fim do 'undefined'):
+    const sanitizedHoldings = (ctx.latestState.walletHoldings || []).filter(h => 
+      h && h.mint && h.symbol && h.symbol !== 'undefined' && h.symbol.trim() !== ''
+    );
     res.writeHead(200, {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*'
     });
-    res.end(JSON.stringify(ctx.latestState.walletHoldings || [], null, 2));
+    res.end(JSON.stringify(sanitizedHoldings, null, 2));
     return true;
   }
 
@@ -61,6 +65,11 @@ export async function handleApiRoutes(
   if (pathname.startsWith('/api/positions/') && pathname.endsWith('/exit') && method === 'POST') {
     const segments = pathname.split('/');
     const mint = decodeURIComponent(segments[3] || '');
+    if (!mint || mint === 'undefined') {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Mint inválido fornecido.' }));
+      return true;
+    }
     if (ctx.executeExitOrder) {
       const result = await ctx.executeExitOrder(mint, 'MANUAL', 0, 0);
       res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -98,9 +107,10 @@ export async function handleApiRoutes(
     req.on('end', async () => {
       try {
         const payload = JSON.parse(body || '{}');
-        if (!payload.mint || Number(payload.amount || 0) <= 0) {
+        // Sanitização Estrita: rejeita mint ausente ou símbolo undefined
+        if (!payload.mint || payload.mint === 'undefined' || !payload.symbol || payload.symbol === 'undefined' || Number(payload.amount || 0) <= 0) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Mint e amount válidos são obrigatórios.' }));
+          res.end(JSON.stringify({ success: false, error: 'Mint e amount válidos são obrigatórios (símbolo não pode ser undefined).' }));
           return;
         }
 

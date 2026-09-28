@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert';
 import { PositionExitEngine } from './positionExitEngine.js';
 
@@ -108,4 +108,61 @@ test('PositionExitEngine: deve manter HOLD dentro da margem de oscilacao normal'
   const evalHold = engine.evaluateExitBySol(mint, 0.016);
   assert.strictEqual(evalHold.shouldExit, false);
   assert.strictEqual(evalHold.type, 'HOLD');
+});
+
+test('PositionExitEngine (Ayla Sentinela): deve disparar saida de emergencia por Alerta de Drenagem de Liquidez (> 30%)', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TestDrainToken';
+  engine.addPosition({
+    mint,
+    symbol: 'DRAIN',
+    tokenAmount: 1000,
+    entryPriceUsd: 1.0,
+    entryTimestamp: Date.now(),
+    stopLossPct: -0.20,
+    takeProfitPct: 1.0,
+    entrySol: 0.015,
+    entryLiquidityUsd: 50000,
+    entryVolume5m: 5000
+  });
+
+  // Liquidez caiu de $50k para $30k (40% de perda > 30%)
+  const evalDrain = engine.evaluateExitBySol(mint, 0.0145, Date.now(), {
+    currentLiquidityUsd: 30000,
+    currentVolume5m: 5000
+  });
+
+  assert.strictEqual(evalDrain.shouldExit, true);
+  assert.strictEqual(evalDrain.type, 'STOP_LOSS');
+  assert.strictEqual(evalDrain.shouldCloseAta, true);
+  assert.ok(evalDrain.reasonDetail?.includes('AYLA_LIQUIDITY_DRAIN'));
+});
+
+test('PositionExitEngine (Ayla Sentinela): deve disparar TIME_STOP Dinamico apos 5min com volume estagnado e PnL entre -5% e -10%', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'TestAylaDynamicTimeStop';
+  const now = Date.now();
+  engine.addPosition({
+    mint,
+    symbol: 'STAGNANT',
+    tokenAmount: 1000,
+    entryPriceUsd: 1.0,
+    entryTimestamp: now - (6 * 60 * 1000),
+    stopLossPct: -0.20,
+    takeProfitPct: 1.0,
+    entrySol: 0.015,
+    entryLiquidityUsd: 40000,
+    entryVolume5m: 2000
+  });
+
+  const currentSol = 0.015 * (1 - 0.07);
+  const evalDynamic = engine.evaluateExitBySol(mint, currentSol, now, {
+    currentLiquidityUsd: 40000,
+    currentVolume5m: 2050
+  });
+
+  assert.strictEqual(evalDynamic.shouldExit, true);
+  assert.strictEqual(evalDynamic.type, 'TIME_STOP');
+  assert.strictEqual(evalDynamic.shouldCloseAta, true);
+  assert.ok(evalDynamic.reasonDetail?.includes('AYLA_DYNAMIC_TIME_STOP'));
 });

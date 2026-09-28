@@ -10,6 +10,10 @@ export interface PositionTracking {
   maxHoldDurationMs?: number; // Padrão: 15 minutos (15 * 60 * 1000)
   partialTaken?: boolean; // True quando a parcial de 50% em +100% foi executada
   initialTokenAmount?: number; // Lote original total
+  // Snapshot de Entrada (Contexto Inicial da Operação):
+  entrySolValue?: number;
+  entryLiquidityUsd?: number;
+  entryVolume5m?: number;
 }
 
 export interface ClosedTrade {
@@ -40,6 +44,8 @@ export interface ExitSignal {
   peakSolValue?: number;
   /** Stop dinâmico atual do trailing: peakSolValue * (1 - TRAILING_DISTANCE) */
   trailingStopSolValue?: number;
+  /** Motivo detalhado do gatilho analítico (ex: Ayla Liquidity Drain, Ayla Dynamic Time-Stop) */
+  reasonDetail?: string;
 }
 
 export class PositionExitEngine {
@@ -107,7 +113,12 @@ export class PositionExitEngine {
    * - Stop-Loss Inicial Fixo em -20% (<= 0.80 * entrySol) -> Encerra 100% e FECHA ATA.
    * - Time-Stop de 15 minutos se estagnada sem atingir parcial nem SL -> Encerra 100% e FECHA ATA.
    */
-  public evaluateExitBySol(mint: string, currentSolValue: number, currentTimestamp: number = Date.now()): ExitSignal {
+  public evaluateExitBySol(
+    mint: string,
+    currentSolValue: number,
+    currentTimestamp: number = Date.now(),
+    context?: { currentLiquidityUsd?: number; currentVolume5m?: number }
+  ): ExitSignal {
     const position = this.activePositions.get(mint);
     const entrySol = position?.entrySol || 0.015;
     if (!position || entrySol <= 0) {
@@ -182,6 +193,65 @@ export class PositionExitEngine {
     }
 
     // ==========================================
+    // 🧠 AYLA SENTINELA DE SAÍDA ADAPTATIVA
+    // ==========================================
+    // a) Alerta de Drenagem: Se cotação em SOL ou liquidez USD retornar perda súbita > 30% em relação ao snapshot inicial
+    if (context?.currentLiquidityUsd !== undefined && position.entryLiquidityUsd && position.entryLiquidityUsd > 0) {
+      const liquidityDropPct = (position.entryLiquidityUsd - context.currentLiquidityUsd) / position.entryLiquidityUsd;
+      if (liquidityDropPct > 0.30) {
+        return {
+          shouldExit: true,
+          type: 'STOP_LOSS',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue,
+          reasonDetail: `AYLA_LIQUIDITY_DRAIN: Liquidez despencou ${(liquidityDropPct * 100).toFixed(1)}% vs entrada`
+        };
+      }
+    }
+
+    // Alerta de Drenagem via cotação súbita em SOL (> 30% de perda imediata)
+    if (pnlPct < -0.30) {
+      return {
+        shouldExit: true,
+        type: 'STOP_LOSS',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: position.tokenAmount,
+        shouldCloseAta: true,
+        peakSolValue: newPeak,
+        trailingStopSolValue,
+        reasonDetail: `AYLA_SOL_DRAIN: Queda súbita de ${(Math.abs(pnlPct) * 100).toFixed(1)}% em SOL`
+      };
+    }
+
+    // b) Time-Stop Dinâmico: Se após 5 minutos o volume estagnar e o PnL flutuar negativo entre -5% e -10%, encerra preventivamente
+    const elapsedMs = currentTimestamp - position.entryTimestamp;
+    const elapsedMinutes = elapsedMs / (60 * 1000);
+    if (!position.partialTaken && elapsedMinutes >= 5 && pnlPct <= -0.05 && pnlPct >= -0.10) {
+      const isVolumeStagnant = context?.currentVolume5m !== undefined && position.entryVolume5m !== undefined
+        ? context.currentVolume5m <= position.entryVolume5m * 1.05
+        : true; // Se sem dados de volume recente mas estagnado no tempo com pnl negativo entre -5% e -10%
+
+      if (isVolumeStagnant) {
+        return {
+          shouldExit: true,
+          type: 'TIME_STOP',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue,
+          reasonDetail: `AYLA_DYNAMIC_TIME_STOP: 5min decorridos com PnL negativo (${(pnlPct * 100).toFixed(1)}%) e volume estagnado`
+        };
+      }
+    }
+
+    // ==========================================
     // PROTEÇÕES PRÉ-PARCIAL (Risco Fixo Inicial)
     // ==========================================
     if (!position.partialTaken) {
@@ -199,9 +269,8 @@ export class PositionExitEngine {
         };
       }
 
-      // 2. Time-Stop de Estagnação (15 minutos)
+      // 2. Time-Stop de Estagnação Máxima (15 minutos)
       const maxDuration = position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS;
-      const elapsedMs = currentTimestamp - position.entryTimestamp;
       if (elapsedMs >= maxDuration) {
         return {
           shouldExit: true,

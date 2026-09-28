@@ -7,6 +7,7 @@ export interface TokenCandidate {
   priceUsd: number;
   liquidityUsd: number;
   volume24hUsd: number;
+  volume5mUsd?: number;
   pairCreatedAt: number;
   dexId: string;
 }
@@ -78,7 +79,13 @@ export class DexScreenerScanner {
         }
 
         const mint = item.baseToken?.address || item.tokenAddress;
-        if (!mint || seenMints.has(mint)) continue;
+        const symbol = item.baseToken?.symbol;
+        // Sanitização Estrita de Tokens (Fim do 'undefined'):
+        if (!mint || !symbol || symbol === 'undefined' || symbol.trim() === '') {
+          continue;
+        }
+
+        if (seenMints.has(mint)) continue;
         seenMints.add(mint);
 
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
@@ -96,11 +103,12 @@ export class DexScreenerScanner {
 
         candidates.push({
           mint,
-          symbol: item.baseToken?.symbol || 'UNKNOWN',
-          name: item.baseToken?.name || 'Unknown Token',
+          symbol,
+          name: item.baseToken?.name || symbol,
           priceUsd: Number(item.priceUsd || 0),
           liquidityUsd,
           volume24hUsd: Number(item.volume?.h24 || 0),
+          volume5mUsd: Number(item.volume?.m5 || 0),
           pairCreatedAt: pairCreatedAt || now,
           dexId: item.dexId || 'raydium'
         });
@@ -150,7 +158,10 @@ export class DexScreenerScanner {
       const sortedPairs = [...pairs].sort((a, b) => Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0));
       const best = sortedPairs[0];
       const bestPrice = Number(best?.priceUsd || 0);
-      const symbol = best?.baseToken?.symbol || mint.slice(0, 4) + '...' + mint.slice(-4);
+      const rawSymbol = best?.baseToken?.symbol;
+      const symbol = (rawSymbol && rawSymbol !== 'undefined' && rawSymbol.trim() !== '') 
+        ? rawSymbol 
+        : (mint.slice(0, 4) + '...' + mint.slice(-4));
       return bestPrice > 0 ? { symbol, priceUsd: bestPrice } : null;
     } catch {
       return null;

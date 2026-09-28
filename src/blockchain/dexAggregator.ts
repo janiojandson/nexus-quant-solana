@@ -5,6 +5,9 @@ export interface SwapQuoteParams {
   outputMint: string;
   amountLamports: number;
   slippageBps?: number;
+  autoSlippage?: boolean;
+  autoSlippageCollisionUsdValue?: number;
+  maxAutoSlippageBps?: number;
 }
 
 export interface SwapQuoteResult {
@@ -29,18 +32,28 @@ export class DexAggregatorService {
   public async getQuote(params: SwapQuoteParams): Promise<SwapQuoteResult> {
     const slippageBps = params.slippageBps ?? 50; // Padrão 0.5%
 
-    if (slippageBps > DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS) {
+    // Se autoSlippage estiver ativo, valida maxAutoSlippageBps (até 600 bps conforme solicitação)
+    if (!params.autoSlippage && slippageBps > DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS) {
       throw new Error(`Slippage maximo excedido (${slippageBps} bps). Teto seguro contra sandwich MEV é ${DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS} bps.`);
     }
 
     try {
+      const queryParams: Record<string, any> = {
+        inputMint: params.inputMint,
+        outputMint: params.outputMint,
+        amount: params.amountLamports
+      };
+
+      if (params.autoSlippage) {
+        queryParams.autoSlippage = true;
+        queryParams.autoSlippageCollisionUsdValue = params.autoSlippageCollisionUsdValue ?? 1000;
+        queryParams.maxAutoSlippageBps = params.maxAutoSlippageBps ?? 600;
+      } else {
+        queryParams.slippageBps = slippageBps;
+      }
+
       const response = await axios.get(`${this.jupiterApiBaseUrl}/quote`, {
-        params: {
-          inputMint: params.inputMint,
-          outputMint: params.outputMint,
-          amount: params.amountLamports,
-          slippageBps: slippageBps
-        },
+        params: queryParams,
         timeout: 5000
       });
 

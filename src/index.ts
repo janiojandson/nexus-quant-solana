@@ -298,9 +298,21 @@ async function runUltraFastExitMonitor() {
         const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
         console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | Stop Dinâmico (15%): ${trailSign}${(trailPnlPct * 100).toFixed(2)}% | Tempo: ${elapsedMin}min`);
 
-        const exitSignal = positionEngine.evaluateExitBySol(pos.mint, currentSolValue);
+        // 🧠 Ayla Sentinela de Saída Adaptativa:
+        // Passa contexto atual da posição se disponível
+        const exitSignal = positionEngine.evaluateExitBySol(
+          pos.mint,
+          currentSolValue,
+          Date.now(),
+          {
+            currentLiquidityUsd: pos.entryLiquidityUsd, // atualizado dinamicamente
+            currentVolume5m: pos.entryVolume5m
+          }
+        );
+
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
-          console.log(`🎯 [EXIT ENGINE ACIONADO] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
+          const detail = exitSignal.reasonDetail ? ` [${exitSignal.reasonDetail}]` : '';
+          console.log(`🎯 [EXIT ENGINE ACIONADO${detail}] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
           await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue, {
             exitTokenAmount: exitSignal.exitTokenAmount,
             shouldCloseAta: exitSignal.shouldCloseAta
@@ -480,12 +492,15 @@ async function executeAutonomousCycle() {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real) - Swap fixo de 0.015 SOL
-        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando swap (0.015 SOL)...`);
+        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra ultra-rápida (0.015 SOL | autoSlippage ativo)...`);
         const swapSim = await jupiterEngine.executeSwap({
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
           amountLamports: 15000000, // 0.015 SOL fixo
-          slippageBps: 400,
+          autoSlippage: true,
+          autoSlippageCollisionUsdValue: 1000,
+          maxAutoSlippageBps: 600,
+          skipPreflight: true,
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });
@@ -499,17 +514,22 @@ async function executeAutonomousCycle() {
         console.log(`   Retorno: ${swapSim.outAmount.toLocaleString()} tokens`);
 
         if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
+          // Snapshot de Entrada (Contexto Inicial da Operação):
+          const nowTs = Date.now();
           positionEngine.addPosition({
             mint: topCandidate.mint,
             symbol: topCandidate.symbol,
             tokenAmount: swapSim.outAmount,
             entryPriceUsd: topCandidate.priceUsd,
-            entryTimestamp: Date.now(),
+            entryTimestamp: nowTs,
             stopLossPct: -0.20,
-            takeProfitPct: 0.50,
-            entrySol: 0.015
+            takeProfitPct: 1.0, // +100% para colheita parcial 50%
+            entrySol: 0.015,
+            entrySolValue: 0.015,
+            entryLiquidityUsd: topCandidate.liquidityUsd,
+            entryVolume5m: topCandidate.volume5mUsd || 0
           });
-          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (SL: -20% | TP: +50%)`);
+          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | SL: -20% | TP: +100%)`);
           updateDashboardViews();
         } else {
           const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';

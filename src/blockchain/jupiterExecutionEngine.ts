@@ -9,11 +9,17 @@ export interface SwapExecutionRequest {
   userPublicKey: string;
   keypair?: Keypair;
   /** Tolerância de slippage em basis points.
-   *  Compra padrão: 400bps (4.0%) — obrigatório para memecoins Solana evitar erro 0x177e.
+   *  Compra padrão: autoSlippage dinâmico com max 600 bps para zerar 0x177e.
    *  Saída de emergência: 500bps (5.0%) via parâmetro explícito. */
   slippageBps?: number;
   /** Nível de prioridade para a taxa de gas: 'medium' (compra), 'high' (saída de emergência) */
   priorityLevel?: 'low' | 'medium' | 'high' | 'veryHigh';
+  /** Se true, ativa o autoSlippage oficial da Jupiter V6 */
+  autoSlippage?: boolean;
+  autoSlippageCollisionUsdValue?: number;
+  maxAutoSlippageBps?: number;
+  /** Se true, pula simulação local prévia da compra para envio ultra-rápido aos validadores */
+  skipPreflight?: boolean;
 }
 
 export interface SwapExecutionResponse {
@@ -56,11 +62,18 @@ export class JupiterExecutionEngine {
   public async executeSwap(req: SwapExecutionRequest): Promise<SwapExecutionResponse> {
     try {
       // 1. Obter Cotação Oficial da Jupiter
+      // Para compras: utiliza autoSlippage caso explicitado ou caso input seja SOL (compra)
+      const isBuy = req.inputMint === 'So11111111111111111111111111111111111111112';
+      const useAutoSlippage = req.autoSlippage !== undefined ? req.autoSlippage : isBuy;
+
       const quote = await this.dexAggregator.getQuote({
         inputMint: req.inputMint,
         outputMint: req.outputMint,
         amountLamports: req.amountLamports,
-        slippageBps: req.slippageBps ?? 400  // Padrão memecoin: 400bps (4.0%). Saída: 500bps via parâmetro
+        slippageBps: req.slippageBps ?? 400,
+        autoSlippage: useAutoSlippage,
+        autoSlippageCollisionUsdValue: req.autoSlippageCollisionUsdValue ?? 1000,
+        maxAutoSlippageBps: req.maxAutoSlippageBps ?? 600
       });
 
       // 2. Se for Modo Simulação (DRY RUN): Retorna sucesso teórico sem gastar SOL
@@ -86,7 +99,7 @@ export class JupiterExecutionEngine {
         priceImpactPct: String(quote.priceImpactPct)
       };
 
-      const priorityLevel = req.priorityLevel || 'medium';
+      const priorityLevel = req.priorityLevel || (isBuy ? 'medium' : 'high');
       const swapRes = await axios.post(this.swapUrl, {
         quoteResponse: payloadQuote,
         userPublicKey: req.userPublicKey,
@@ -106,9 +119,10 @@ export class JupiterExecutionEngine {
       // 4. Assinar com a Chave Phantom do Agente
       transaction.sign([req.keypair]);
 
-      // 5. Transmitir para a Blockchain Solana
+      // 5. Transmitir para a Blockchain Solana: skipPreflight = true para evitar simulação prévia e atraso de validadores
+      const skipPreflight = req.skipPreflight !== undefined ? req.skipPreflight : true;
       const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
-        skipPreflight: false,
+        skipPreflight,
         maxRetries: 3
       });
 
