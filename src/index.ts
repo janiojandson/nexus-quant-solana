@@ -9,6 +9,7 @@ import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
+import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine } from './execution/positionExitEngine.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
@@ -51,6 +52,7 @@ const jupiterEngine = new JupiterExecutionEngine({
 
 const reproduction = new ReproductionEngine();
 const postgresRepo = new SolanaPostgresRepository();
+const cerebroService = new CerebroIntegrationService();
 
 // Estado compartilhado em memória para o Dashboard
 const latestState: DashboardState = {
@@ -161,6 +163,17 @@ async function executeExitOrder(
   if (shouldCloseAta) {
     positionEngine.removePosition(pos.mint);
   }
+
+  // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
+  cerebroService.notifyTradeEvent({
+    title: isPartial ? 'Colheita Parcial (+100%)' : `Saída Executada (${exitReason})`,
+    symbol: pos.symbol,
+    mint: pos.mint,
+    action: isPartial ? 'Venda de 50% / Breakeven ativado' : 'Liquidação Total / ATA encerrada',
+    pnlPct,
+    solValue: exitSolValue,
+    txSignature: exitSwap.txSignature
+  }).catch(() => {});
 
   updateDashboardViews();
   return { success: exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS', txSignature: exitSwap.txSignature, error: exitSwap.error };
@@ -533,6 +546,17 @@ async function executeAutonomousCycle() {
           });
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | SL: -20% | TP: +100%)`);
           updateDashboardViews();
+
+          // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
+          cerebroService.notifyTradeEvent({
+            title: 'Nova Entrada Executada (Sniper 0.015 SOL)',
+            symbol: topCandidate.symbol,
+            mint: topCandidate.mint,
+            action: `Compra na Jupiter V6 | Lote: ${swapSim.outAmount.toLocaleString()}`,
+            solValue: 0.015,
+            txSignature: swapSim.txSignature,
+            detail: `Liq: $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m: $${(topCandidate.volume5mUsd || 0).toLocaleString()}`
+          }).catch(() => {});
         } else {
           const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';
           antiSpamMemory.recordVeto(topCandidate.mint, `Swap Jupiter falhou: ${failReason}`);

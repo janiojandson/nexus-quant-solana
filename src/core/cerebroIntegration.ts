@@ -1,0 +1,100 @@
+import axios from 'axios';
+
+export interface TelegramNotificationParams {
+  title: string;
+  symbol: string;
+  mint: string;
+  action: string;
+  pnlPct?: number;
+  solValue?: number;
+  txSignature?: string;
+  detail?: string;
+}
+
+export class CerebroIntegrationService {
+  private cerebroUrl: string;
+  private botToken?: string;
+  private chatId?: string;
+
+  constructor() {
+    this.cerebroUrl = process.env.NEXUS_CEREBRO_URL || process.env.NEXUS_CEREBRO_INTERNAL_URL || 'http://localhost:3000';
+    this.botToken = process.env.TELEGRAM_BOT_TOKEN;
+    this.chatId = process.env.TELEGRAM_CHAT_ID_OPERACIONAL || process.env.TELEGRAM_CHAT_ID_EXECUTIVO;
+  }
+
+  /**
+   * Envia notificação executiva e operacional diretamente via Telegram (ou via Cérebro como relay)
+   */
+  public async notifyTradeEvent(params: TelegramNotificationParams): Promise<boolean> {
+    const pnlText = params.pnlPct !== undefined 
+      ? `\n📈 <b>PnL:</b> ${params.pnlPct >= 0 ? '+' : ''}${(params.pnlPct * 100).toFixed(2)}%`
+      : '';
+    const solText = params.solValue !== undefined 
+      ? `\n🪙 <b>Valor:</b> ${params.solValue.toFixed(4)} SOL`
+      : '';
+    const detailText = params.detail ? `\n🧠 <b>Sentinela:</b> ${params.detail}` : '';
+    const txLink = params.txSignature 
+      ? `\n🔗 <a href="https://solscan.io/tx/${params.txSignature}">Ver no Solscan</a>`
+      : '';
+
+    const message = `🚀 <b>[NEXUS QUANT SOLANA]</b> — ${params.title}\n` +
+      `🪙 <b>Ativo:</b> ${params.symbol} (<code>${params.mint.slice(0, 6)}...${params.mint.slice(-4)}</code>)\n` +
+      `⚡ <b>Ação:</b> ${params.action}` +
+      pnlText + solText + detailText + txLink;
+
+    // 1. Envio Direto via Telegram Bot API se as credenciais estiverem configuradas
+    if (this.botToken && this.chatId) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${this.botToken}/sendMessage`,
+          {
+            chat_id: this.chatId,
+            text: message,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+          },
+          { timeout: 4000 }
+        );
+        return true;
+      } catch (err: any) {
+        console.warn(`⚠️ [Telegram Direct] Falha ao enviar alerta:`, err?.message || err);
+      }
+    }
+
+    // 2. Fallback via Hub do Cérebro
+    try {
+      await axios.post(
+        `${this.cerebroUrl}/v1/comunicacao/notificar`,
+        {
+          canal: 'telegram',
+          mensagem: message,
+          contexto: 'SOLANA_TRADE_EVENT'
+        },
+        { timeout: 3000 }
+      );
+      return true;
+    } catch {
+      // Falha silenciosa para não bloquear o motor de execução rápida
+      return false;
+    }
+  }
+
+  /**
+   * Consulta o Cérebro / OmniRoute para análise LLM sob demanda
+   */
+  public async askOmniRoute(prompt: string): Promise<string | null> {
+    try {
+      const res = await axios.post(
+        `${this.cerebroUrl}/v1/chat/completions`,
+        {
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.1
+        },
+        { timeout: 5000 }
+      );
+      return res.data?.choices?.[0]?.message?.content || null;
+    } catch {
+      return null;
+    }
+  }
+}
