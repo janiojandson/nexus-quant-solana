@@ -156,4 +156,49 @@ export class SolanaWalletService {
       return { txSignature: null, success: false };
     }
   }
+
+  /**
+   * Varredura Automática de Rent (Higiene On-Chain):
+   * Localiza todas as contas associadas (ATAs) que possuem saldo ZERO (uiAmount === 0)
+   * e executa o fechamento (createCloseAccountInstruction), resgatando a caução (~0.00204 SOL por ATA)
+   * diretamente para a carteira Phantom.
+   */
+  public async sweepEmptyTokenAccounts(): Promise<{ closedCount: number; reclaimedSolEst: number; errors: string[] }> {
+    try {
+      const { PublicKey } = await import('@solana/web3.js');
+      const response = await this.connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
+      );
+
+      let closedCount = 0;
+      const errors: string[] = [];
+
+      for (const a of response.value) {
+        const info = a.account.data.parsed.info;
+        const amount = Number(info.tokenAmount.uiAmount || 0);
+        const mint = info.mint as string;
+
+        if (amount === 0 && mint) {
+          try {
+            const res = await this.closeTokenAccount(mint);
+            if (res.success && res.txSignature) {
+              closedCount++;
+            }
+          } catch (e: any) {
+            errors.push(`${mint}: ${e?.message || e}`);
+          }
+        }
+      }
+
+      const reclaimedSolEst = Number((closedCount * 0.00204).toFixed(6));
+      if (closedCount > 0) {
+        console.log(`🧹 [Varredura de Rent Concluída]: ${closedCount} conta(s) vazia(s) fechada(s). ~${reclaimedSolEst} SOL recuperados para a carteira!`);
+      }
+      return { closedCount, reclaimedSolEst, errors };
+    } catch (err: any) {
+      console.warn(`⚠️ [Aviso Sweep Rent]: Falha na varredura de contas: ${err?.message || err}`);
+      return { closedCount: 0, reclaimedSolEst: 0, errors: [err?.message || String(err)] };
+    }
+  }
 }

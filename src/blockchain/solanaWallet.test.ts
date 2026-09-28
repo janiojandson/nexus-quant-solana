@@ -53,4 +53,17 @@ describe('SolanaWalletService - Blindagem e Custódia Segura', () => {
     assert.strictEqual(checkGas.allowed, false);
     assert.match(checkGas.reason || '', /Reserva de gas insuficiente/);
   });
+
+  it('deve executar sweepEmptyTokenAccounts sem erro mesmo em ambiente sem contas ativas', async () => {
+    const wallet = new SolanaWalletService({
+      secretKeyRaw: dummySecretKeyString,
+      rpcUrl: 'https://api.mainnet-beta.solana.com'
+    });
+
+    const sweepResult = await wallet.sweepEmptyTokenAccounts();
+    assert.ok(typeof sweepResult.closedCount === 'number');
+    assert.ok(typeof sweepResult.reclaimedSolEst === 'number');
+    assert.ok(Array.isArray(sweepResult.errors));
+  });
 });
+

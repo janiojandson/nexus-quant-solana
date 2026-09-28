@@ -262,7 +262,8 @@ const server = http.createServer(async (req, res) => {
 
       return { success: true, txSignature: exitSwap.txSignature };
     },
-    getAllOpenPositions: () => positionEngine.getAllPositions()
+    getAllOpenPositions: () => positionEngine.getAllPositions(),
+    sweepRent: () => wallet.sweepEmptyTokenAccounts()
   });
 
   if (!handled) {
@@ -555,16 +556,22 @@ async function executeAutonomousCycle() {
       } else {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
-        // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real) - Swap fixo de 0.015 SOL
-        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra ultra-rápida (0.015 SOL | autoSlippage ativo)...`);
+        // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
+        // Dimensionamento Dinâmico de Lote: 7% do saldo seguro (após reserva de gas) com teto de 0.02 SOL e piso de 0.012 SOL
+        const currentBalance = latestState.balanceSol || (await wallet.getBalanceSol());
+        const safeBalance = Math.max(0, currentBalance - SolanaWalletService.MIN_GAS_RESERVE_SOL);
+        const dynamicAllocSol = Math.min(0.02, Math.max(0.012, Number((safeBalance * 0.07).toFixed(4))));
+        const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
+
+        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra com pré-voo ativo (${dynamicAllocSol} SOL | autoSlippage blindado)...`);
         const swapSim = await jupiterEngine.executeSwap({
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
-          amountLamports: 15000000, // 0.015 SOL fixo
+          amountLamports: tradeLamports,
           autoSlippage: true,
           autoSlippageCollisionUsdValue: 1000,
-          maxAutoSlippageBps: 600,
-          skipPreflight: true,
+          maxAutoSlippageBps: 500, // Teto máximo seguro contra sandwich (500 bps)
+          skipPreflight: false, // Ativa simulação pré-voo RPC para evitar gasto de taxas em erro 0x1789/6025
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });
@@ -588,12 +595,12 @@ async function executeAutonomousCycle() {
             entryTimestamp: nowTs,
             stopLossPct: -0.20,
             takeProfitPct: 1.0, // +100% para colheita parcial 50%
-            entrySol: 0.015,
-            entrySolValue: 0.015,
+            entrySol: dynamicAllocSol,
+            entrySolValue: dynamicAllocSol,
             entryLiquidityUsd: topCandidate.liquidityUsd,
             entryVolume5m: topCandidate.volume5mUsd || 0
           });
-          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | SL: -20% | TP: +100%)`);
+          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -20% | TP: +100%)`);
           updateDashboardViews();
 
           // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
@@ -784,13 +791,28 @@ async function main() {
   // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
   await rehydratePositionsFromWalletOnBoot();
 
+  // 2.1 Varredura e Resgate Automático de Rent Exemption de Contas Órfãs Vazias
+  try {
+    const sweep = await wallet.sweepEmptyTokenAccounts();
+    if (sweep.closedCount > 0) {
+      console.log(`🧹 [BOOT: Higiene On-Chain] ${sweep.closedCount} conta(s) vazia(s) fechada(s). ~${sweep.reclaimedSolEst} SOL devolvidos à carteira!`);
+    }
+  } catch (err: any) {
+    console.warn(`⚠️ [BOOT: Aviso Rent] Falha ao varrer contas órfãs no boot: ${err?.message || err}`);
+  }
+
+  // 2.2 Agendamento de Varredura Periódica de Rent a cada 2 horas
+  setInterval(() => {
+    wallet.sweepEmptyTokenAccounts().catch(() => {});
+  }, 2 * 60 * 60 * 1000);
+
   // 3. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)
   setInterval(runUltraFastExitMonitor, FAST_EXIT_INTERVAL_MS);
 
-  // 3. Executa o primeiro ciclo de scanner imediatamente
+  // 4. Executa o primeiro ciclo de scanner imediatamente
   await executeAutonomousCycle();
 
-  // 4. Loop Independente de Scanner de Novos Tokens a cada 30s
+  // 5. Loop Independente de Scanner de Novos Tokens a cada 30s
   setInterval(executeAutonomousCycle, SCAN_INTERVAL_MS);
 }
 

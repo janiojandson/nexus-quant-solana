@@ -8,6 +8,7 @@ export interface RouteContext {
   executeExitOrder?: (mint: string, reason: ExitReason | string, pnlPct: number, exitSolValue: number) => Promise<any>;
   liquidateHolding?: (payload: { mint: string; symbol: string; amount: number; decimals: number }) => Promise<any>;
   getAllOpenPositions?: () => any[];
+  sweepRent?: () => Promise<any>;
 }
 
 /**
@@ -130,7 +131,25 @@ export async function handleApiRoutes(
     return true;
   }
 
-  // 7. Dashboard Web Terminal Visual
+  // 7. Rota de Varredura de Rent (Fechamento de ATAs vazias e devolução de SOL)
+  if (pathname === '/api/wallet/sweep-rent' && method === 'POST') {
+    if (ctx.sweepRent) {
+      try {
+        const result = await ctx.sweepRent();
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ success: true, ...result }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err?.message || 'Falha ao executar varredura de rent' }));
+      }
+    } else {
+      res.writeHead(501, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'sweepRent não configurado no contexto' }));
+    }
+    return true;
+  }
+
+  // 8. Dashboard Web Terminal Visual
   if ((pathname === '/' || pathname === '/dashboard') && method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(renderDashboardHtml(ctx.latestState));

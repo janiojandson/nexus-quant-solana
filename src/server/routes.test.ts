@@ -194,3 +194,32 @@ test('handleApiRoutes: deve executar liquidação avulsa de holding via POST /ap
   assert.strictEqual(resObj.txSignature, 'HoldingTxSignature999');
 });
 
+test('handleApiRoutes: deve acionar rota POST /api/wallet/sweep-rent com sucesso', async () => {
+  const mockReq = { url: '/api/wallet/sweep-rent', method: 'POST', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  let sweepCalled = false;
+  const mockContext = {
+    latestState: {},
+    sweepRent: async () => {
+      sweepCalled = true;
+      return { closedCount: 2, reclaimedSolEst: 0.00408, errors: [] };
+    }
+  } as any;
+
+  const handled = await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 200);
+  assert.strictEqual(sweepCalled, true);
+  const resObj = JSON.parse(responseData);
+  assert.strictEqual(resObj.success, true);
+  assert.strictEqual(resObj.closedCount, 2);
+  assert.strictEqual(resObj.reclaimedSolEst, 0.00408);
+});
+
+

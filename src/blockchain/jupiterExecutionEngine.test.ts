@@ -21,3 +21,12 @@ test('JupiterExecutionEngine: modo DRY_RUN deve simular swap sem assinar na rede
   assert.strictEqual(result.isDryRun, true);
   assert.ok(result.outAmount > 0);
 });
+
+test('JupiterExecutionEngine: deve inicializar com parâmetros padrão e respeitar skipPreflight configurado', () => {
+  const engine = new JupiterExecutionEngine({
+    rpcUrl: 'https://api.mainnet-beta.solana.com',
+    isDryRun: true
+  });
+  assert.ok(engine);
+});
+

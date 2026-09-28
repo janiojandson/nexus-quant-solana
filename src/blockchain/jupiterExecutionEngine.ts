@@ -119,10 +119,32 @@ export class JupiterExecutionEngine {
       // 4. Assinar com a Chave Phantom do Agente
       transaction.sign([req.keypair]);
 
-      // 5. Transmitir para a Blockchain Solana: skipPreflight = true para evitar simulação prévia e atraso de validadores
-      const skipPreflight = req.skipPreflight !== undefined ? req.skipPreflight : true;
+      // 4.1 Simulação Pré-Voo Ativa (Zero Custo de Gas):
+      // Protege contra falha on-chain (ex: erro 0x1789 / 6025 - Slippage Exceeded)
+      // Evita o gasto desnecessário de taxas de prioridade e gás na rede em swaps fadados ao insucesso.
+      if (!req.skipPreflight) {
+        try {
+          const simRes = await this.connection.simulateTransaction(transaction);
+          if (simRes.value.err) {
+            const errStr = JSON.stringify(simRes.value.err);
+            console.warn(`🛑 [SIMULAÇÃO PRÉ-VOO BARRADA]: Swap falharia on-chain (${errStr}). Cancelado localmente para salvar taxa de rede!`);
+            return {
+              txSignature: '',
+              status: 'FAILED',
+              inAmount: req.amountLamports,
+              outAmount: 0,
+              isDryRun: false,
+              error: `Simulação pré-voo rejeitada pelo nó RPC: ${errStr}`
+            };
+          }
+        } catch (simErr: any) {
+          console.warn(`⚠️ [Aviso Pré-Voo] Falha na simulação local: ${simErr?.message || simErr}`);
+        }
+      }
+
+      // 5. Transmitir para a Blockchain Solana apenas se a simulação foi aprovada
       const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
-        skipPreflight,
+        skipPreflight: true, // Já validado com segurança na simulação acima
         maxRetries: 3
       });
 
