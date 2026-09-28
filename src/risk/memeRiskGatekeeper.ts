@@ -9,6 +9,9 @@ export interface TokenSecurityMetadata {
   holdersCount: number;
   buyTaxPct?: number;
   sellTaxPct?: number;
+  priceChangeM5?: number;
+  buysM5?: number;
+  sellsM5?: number;
 }
 
 export interface SecurityAuditResult {
@@ -117,6 +120,41 @@ export class MemeRiskGatekeeper {
         validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
         latencyMs: Date.now() - startTime
       };
+    }
+
+    // 1.1 Validação de Momentum de Preço nos 5 Minutos (Price Action)
+    if (token.priceChangeM5 !== undefined) {
+      if (token.priceChangeM5 <= 0) {
+        return {
+          safe: false,
+          reason: `Descarte Técnico: Preço caindo nos últimos 5m (${token.priceChangeM5.toFixed(2)}% <= 0%).`,
+          score: 15,
+          validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
+          latencyMs: Date.now() - startTime
+        };
+      }
+      if (token.priceChangeM5 < 3 || token.priceChangeM5 > 40) {
+        return {
+          safe: false,
+          reason: `Descarte Técnico: Variação m5 fora da janela de entrada (+3% a +40%): ${token.priceChangeM5.toFixed(2)}%.`,
+          score: 20,
+          validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
+          latencyMs: Date.now() - startTime
+        };
+      }
+    }
+
+    // 1.2 Ratio de Transações nos 5 Minutos (txns.m5)
+    if (token.buysM5 !== undefined && token.sellsM5 !== undefined && (token.buysM5 + token.sellsM5 > 0)) {
+      if (token.buysM5 <= token.sellsM5) {
+        return {
+          safe: false,
+          reason: `Descarte Técnico: Compradores insuficientes nos últimos 5m (Compras: ${token.buysM5} <= Vendas: ${token.sellsM5}).`,
+          score: 20,
+          validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
+          latencyMs: Date.now() - startTime
+        };
+      }
     }
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)

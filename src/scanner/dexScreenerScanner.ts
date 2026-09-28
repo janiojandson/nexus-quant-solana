@@ -10,6 +10,9 @@ export interface TokenCandidate {
   volume5mUsd?: number;
   pairCreatedAt: number;
   dexId: string;
+  priceChangeM5?: number;
+  buysM5?: number;
+  sellsM5?: number;
 }
 
 export interface ScannerOptions {
@@ -203,7 +206,30 @@ export class DexScreenerScanner {
           continue;
         }
 
-        // Validação de agressão de fluxo se dados de txns estiverem presentes
+        // 1. Filtro de Variação de Preço nos Últimos 5 Minutos (m5)
+        const priceChangeM5 = item.priceChange?.m5 !== undefined ? Number(item.priceChange.m5) : undefined;
+        if (priceChangeM5 !== undefined) {
+          // VETO TÉCNICO IMEDIATO: Se priceChange.m5 <= 0, descarta
+          if (priceChangeM5 <= 0) {
+            continue;
+          }
+          // JANELA DE ENTRADA: Aceite apenas tokens com priceChange.m5 entre +3% e +40%
+          if (priceChangeM5 < 3 || priceChangeM5 > 40) {
+            continue;
+          }
+        }
+
+        // 2. Ratio de Transações nos 5 Minutos (txns.m5)
+        const buysM5 = item.txns?.m5?.buys !== undefined ? Number(item.txns.m5.buys) : undefined;
+        const sellsM5 = item.txns?.m5?.sells !== undefined ? Number(item.txns.m5.sells) : undefined;
+        if (buysM5 !== undefined && sellsM5 !== undefined && (buysM5 + sellsM5 > 0)) {
+          // VETO OBRIGATÓRIO: Descarte se buys <= sells
+          if (buysM5 <= sellsM5) {
+            continue;
+          }
+        }
+
+        // Validação complementar de agressão de fluxo se dados de txns estiverem presentes
         const buys = Number(item.txns?.h1?.buys || item.txns?.m5?.buys || 0);
         const sells = Number(item.txns?.h1?.sells || item.txns?.m5?.sells || 0);
         if (buys + sells >= 20 && !this.isBuyingAggressionValid(buys, sells)) {
@@ -219,7 +245,10 @@ export class DexScreenerScanner {
           volume24hUsd: Number(item.volume?.h24 || 0),
           volume5mUsd: Number(item.volume?.m5 || 0),
           pairCreatedAt: pairCreatedAt || now,
-          dexId: item.dexId || 'raydium'
+          dexId: item.dexId || 'raydium',
+          priceChangeM5,
+          buysM5,
+          sellsM5
         });
       }
 

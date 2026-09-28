@@ -70,4 +70,39 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     assert.strictEqual(audit.safe, true);
     assert.strictEqual(audit.validatedBy, 'LOCAL_HEURISTICS_FALLBACK');
   });
+
+  it('deve rejeitar token com priceChangeM5 negativo (preço caindo)', async () => {
+    const gatekeeper = new MemeRiskGatekeeper();
+    const token: TokenSecurityMetadata = {
+      mint: 'MemeQueda5m',
+      liquidityUsd: 30_000,
+      mintAuthority: null,
+      freezeAuthority: null,
+      holdersCount: 200,
+      priceChangeM5: -1.8
+    };
+
+    const audit = await gatekeeper.auditToken(token);
+    assert.strictEqual(audit.safe, false);
+    assert.match(audit.reason || '', /Preço caindo nos últimos 5m/);
+  });
+
+  it('deve rejeitar token com compradores insuficientes (buysM5 <= sellsM5)', async () => {
+    const gatekeeper = new MemeRiskGatekeeper();
+    const token: TokenSecurityMetadata = {
+      mint: 'MemeVendedores5m',
+      liquidityUsd: 30_000,
+      mintAuthority: null,
+      freezeAuthority: null,
+      holdersCount: 200,
+      priceChangeM5: 10.0,
+      buysM5: 12,
+      sellsM5: 18 // Mais vendedores que compradores
+    };
+
+    const audit = await gatekeeper.auditToken(token);
+    assert.strictEqual(audit.safe, false);
+    assert.match(audit.reason || '', /Compradores insuficientes/);
+  });
 });
+

@@ -512,18 +512,28 @@ async function executeAutonomousCycle() {
       console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
       console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
 
-      // Ciclo 3: Sentinela de Risco (RugCheck + Laya)
-      console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato e liquidez...');
+      // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
+      console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
       const audit = await gatekeeper.auditToken({
         mint: topCandidate.mint,
         liquidityUsd: topCandidate.liquidityUsd,
         mintAuthority: null,
         freezeAuthority: null,
-        holdersCount: 250
+        holdersCount: 250,
+        priceChangeM5: topCandidate.priceChangeM5,
+        buysM5: topCandidate.buysM5,
+        sellsM5: topCandidate.sellsM5
       });
 
       console.log(`   Veredito de Segurança: ${audit.safe ? 'APROVADO ✅' : 'VETADO ⛔'}`);
       console.log(`   Score: ${audit.score}/100 | Validador: ${audit.validatedBy}`);
+
+      if (audit.safe && topCandidate.priceChangeM5 !== undefined) {
+        const m5Sign = topCandidate.priceChangeM5 >= 0 ? '+' : '';
+        const buys = topCandidate.buysM5 ?? 'N/A';
+        const sells = topCandidate.sellsM5 ?? 'N/A';
+        console.log(`   📈 Momentum Aprovado: m5: ${m5Sign}${topCandidate.priceChangeM5.toFixed(2)}% | Compras: ${buys} vs Vendas: ${sells}`);
+      }
 
       let txSignature: string | null = null;
 

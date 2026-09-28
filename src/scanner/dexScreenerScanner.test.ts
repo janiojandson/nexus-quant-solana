@@ -117,3 +117,53 @@ test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >
   assert.strictEqual(scanner.isBuyingAggressionValid(75, 25), true);
   assert.strictEqual(scanner.isBuyingAggressionValid(60, 40), false);
 });
+
+test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela de +3% a +40%', async () => {
+  const mockFetch = async () => ({
+    data: [
+      {
+        chainId: 'solana',
+        baseToken: { address: 'MintQueda', symbol: 'QUEDA' },
+        liquidity: { usd: 25000 },
+        pairCreatedAt: Date.now() - (30 * 60 * 1000),
+        priceChange: { m5: -2.5 }, // Em queda
+        txns: { m5: { buys: 10, sells: 5 } }
+      },
+      {
+        chainId: 'solana',
+        baseToken: { address: 'MintEsticado', symbol: 'ESTICK' },
+        liquidity: { usd: 25000 },
+        pairCreatedAt: Date.now() - (30 * 60 * 1000),
+        priceChange: { m5: 65.0 }, // Excessivamente esticado (> +40%)
+        txns: { m5: { buys: 20, sells: 5 } }
+      },
+      {
+        chainId: 'solana',
+        baseToken: { address: 'MintVendedoresDominando', symbol: 'SELLDOG' },
+        liquidity: { usd: 25000 },
+        pairCreatedAt: Date.now() - (30 * 60 * 1000),
+        priceChange: { m5: 12.0 },
+        txns: { m5: { buys: 5, sells: 10 } } // Vendas superam compras
+      },
+      {
+        chainId: 'solana',
+        baseToken: { address: 'MintPerfeito', symbol: 'PERFECT' },
+        liquidity: { usd: 25000 },
+        pairCreatedAt: Date.now() - (30 * 60 * 1000),
+        priceChange: { m5: 15.0 }, // +15% (dentro de +3% a +40%)
+        txns: { m5: { buys: 25, sells: 8 } } // Compras superam vendas
+      }
+    ]
+  });
+
+  const scanner = new DexScreenerScanner({ fetchClient: mockFetch as any });
+  const results = await scanner.scanSolanaTrends(15000);
+
+  assert.strictEqual(results.length, 1);
+  assert.strictEqual(results[0].symbol, 'PERFECT');
+  assert.strictEqual(results[0].mint, 'MintPerfeito');
+  assert.strictEqual(results[0].priceChangeM5, 15.0);
+  assert.strictEqual(results[0].buysM5, 25);
+  assert.strictEqual(results[0].sellsM5, 8);
+});
+

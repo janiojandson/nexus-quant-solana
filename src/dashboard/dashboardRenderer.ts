@@ -399,6 +399,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         }
       } catch (err) {
         alert('❌ Erro de conexão ao solicitar venda: ' + err.message);
+      }
     }
 
     async function liquidateAll() {
