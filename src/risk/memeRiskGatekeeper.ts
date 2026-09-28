@@ -12,6 +12,14 @@ export interface TokenSecurityMetadata {
   priceChangeM5?: number;
   buysM5?: number;
   sellsM5?: number;
+  priceUsd?: number;
+  h1HighPriceUsd?: number;
+}
+
+export interface MomentumValidationResult {
+  valid: boolean;
+  reason?: string;
+  momentumText?: string;
 }
 
 export interface SecurityAuditResult {
@@ -122,39 +130,16 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    // 1.1 Validação de Momentum de Preço nos 5 Minutos (Price Action)
-    if (token.priceChangeM5 !== undefined) {
-      if (token.priceChangeM5 <= 0) {
-        return {
-          safe: false,
-          reason: `Descarte Técnico: Preço caindo nos últimos 5m (${token.priceChangeM5.toFixed(2)}% <= 0%).`,
-          score: 15,
-          validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
-          latencyMs: Date.now() - startTime
-        };
-      }
-      if (token.priceChangeM5 < 3 || token.priceChangeM5 > 40) {
-        return {
-          safe: false,
-          reason: `Descarte Técnico: Variação m5 fora da janela de entrada (+3% a +40%): ${token.priceChangeM5.toFixed(2)}%.`,
-          score: 20,
-          validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
-          latencyMs: Date.now() - startTime
-        };
-      }
-    }
-
-    // 1.2 Ratio de Transações nos 5 Minutos (txns.m5)
-    if (token.buysM5 !== undefined && token.sellsM5 !== undefined && (token.buysM5 + token.sellsM5 > 0)) {
-      if (token.buysM5 <= token.sellsM5) {
-        return {
-          safe: false,
-          reason: `Descarte Técnico: Compradores insuficientes nos últimos 5m (Compras: ${token.buysM5} <= Vendas: ${token.sellsM5}).`,
-          score: 20,
-          validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
-          latencyMs: Date.now() - startTime
-        };
-      }
+    // 1.1 Motor de Momentum e Order Flow na Ayla (Price Action)
+    const momentumCheck = this.validatePriceMomentum(token);
+    if (!momentumCheck.valid) {
+      return {
+        safe: false,
+        reason: momentumCheck.reason || 'Ayla Veto: Momentum ou Order Flow reprovado',
+        score: 15,
+        validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
+        latencyMs: Date.now() - startTime
+      };
     }
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
@@ -214,4 +199,63 @@ export class MemeRiskGatekeeper {
       };
     }
   }
+
+  /**
+   * 🧠 Motor de Momentum e Order Flow da Ayla
+   * Valida Price Action e pressão de compradores para evitar ativos em sangria, topo esticado ou faca caindo.
+   */
+  public validatePriceMomentum(pair: Partial<TokenSecurityMetadata>): MomentumValidationResult {
+    // 1. Janela de Momentum Positivo (m5)
+    if (pair.priceChangeM5 !== undefined) {
+      if (pair.priceChangeM5 <= 0) {
+        return {
+          valid: false,
+          reason: `Ayla Veto: Preço em sangria nos últimos 5m (${pair.priceChangeM5.toFixed(2)}% <= 0%)`
+        };
+      }
+      if (pair.priceChangeM5 > 35) {
+        return {
+          valid: false,
+          reason: `Ayla Veto: Movimento esticado/FOMO excessivo (${pair.priceChangeM5.toFixed(2)}% > +35%)`
+        };
+      }
+      if (pair.priceChangeM5 < 3) {
+        return {
+          valid: false,
+          reason: `Ayla Veto: Momentum insuficiente nos últimos 5m (${pair.priceChangeM5.toFixed(2)}% < +3%)`
+        };
+      }
+    }
+
+    // 2. Dominância de Compradores (Order Flow: txns.m5)
+    if (pair.buysM5 !== undefined && pair.sellsM5 !== undefined) {
+      const minRequiredBuys = pair.sellsM5 * 1.3;
+      if (pair.buysM5 < minRequiredBuys) {
+        return {
+          valid: false,
+          reason: `Ayla Veto: Fluxo vendedor predominante (Compras: ${pair.buysM5} < ${minRequiredBuys.toFixed(1)} [exigido 1.3x vendas: ${pair.sellsM5}])`
+        };
+      }
+    }
+
+    // 3. Proximidade da Máxima Recente (Evitar Faca Caindo: preço atual >= 75% da máxima h1)
+    if (pair.priceUsd !== undefined && pair.h1HighPriceUsd !== undefined && pair.h1HighPriceUsd > 0) {
+      const ratioFromHigh = pair.priceUsd / pair.h1HighPriceUsd;
+      if (ratioFromHigh < 0.75) {
+        return {
+          valid: false,
+          reason: `Ayla Veto: Ativo em distribuição/queda pós-topo (Preço $${pair.priceUsd} é ${(ratioFromHigh * 100).toFixed(1)}% da máxima h1 $${pair.h1HighPriceUsd} < 75%)`
+        };
+      }
+    }
+
+    const m5Text = pair.priceChangeM5 !== undefined ? `m5 +${pair.priceChangeM5.toFixed(1)}%` : 'm5 neutro';
+    const flowText = (pair.buysM5 !== undefined && pair.sellsM5 !== undefined) ? `Buys/Sells: ${pair.buysM5}/${pair.sellsM5}` : 'Order Flow OK';
+
+    return {
+      valid: true,
+      momentumText: `${m5Text} | ${flowText}`
+    };
+  }
 }
+

@@ -13,6 +13,7 @@ export interface TokenCandidate {
   priceChangeM5?: number;
   buysM5?: number;
   sellsM5?: number;
+  h1HighPriceUsd?: number;
 }
 
 export interface ScannerOptions {
@@ -206,27 +207,34 @@ export class DexScreenerScanner {
           continue;
         }
 
-        // 1. Filtro de Variação de Preço nos Últimos 5 Minutos (m5)
+        // 1. Filtro de Variação de Preço nos Últimos 5 Minutos (m5): +3% a +35%
         const priceChangeM5 = item.priceChange?.m5 !== undefined ? Number(item.priceChange.m5) : undefined;
         if (priceChangeM5 !== undefined) {
-          // VETO TÉCNICO IMEDIATO: Se priceChange.m5 <= 0, descarta
-          if (priceChangeM5 <= 0) {
-            continue;
-          }
-          // JANELA DE ENTRADA: Aceite apenas tokens com priceChange.m5 entre +3% e +40%
-          if (priceChangeM5 < 3 || priceChangeM5 > 40) {
+          // VETO TÉCNICO IMEDIATO: Se priceChange.m5 <= 0 ou > 35
+          if (priceChangeM5 <= 0 || priceChangeM5 > 35 || priceChangeM5 < 3) {
             continue;
           }
         }
 
-        // 2. Ratio de Transações nos 5 Minutos (txns.m5)
+        // 2. Dominância de Compradores (Order Flow: buys >= sells * 1.3)
         const buysM5 = item.txns?.m5?.buys !== undefined ? Number(item.txns.m5.buys) : undefined;
         const sellsM5 = item.txns?.m5?.sells !== undefined ? Number(item.txns.m5.sells) : undefined;
         if (buysM5 !== undefined && sellsM5 !== undefined && (buysM5 + sellsM5 > 0)) {
-          // VETO OBRIGATÓRIO: Descarte se buys <= sells
-          if (buysM5 <= sellsM5) {
+          if (buysM5 < (sellsM5 * 1.3)) {
             continue;
           }
+        }
+
+        // 3. Proximidade da Máxima Recente (Evitar Faca Caindo: h1HighPriceUsd)
+        const currentPriceUsd = Number(item.priceUsd || 0);
+        const priceChangeH1 = item.priceChange?.h1 !== undefined ? Number(item.priceChange.h1) : 0;
+        // Se houver priceChangeH1 negativo, a máxima recente foi no mínimo o preço atual / (1 + priceChangeH1/100)
+        let h1HighPriceUsd = currentPriceUsd;
+        if (priceChangeH1 < 0) {
+          h1HighPriceUsd = currentPriceUsd / (1 + (priceChangeH1 / 100));
+        }
+        if (item.h1HighPriceUsd) {
+          h1HighPriceUsd = Number(item.h1HighPriceUsd);
         }
 
         // Validação complementar de agressão de fluxo se dados de txns estiverem presentes
@@ -240,7 +248,7 @@ export class DexScreenerScanner {
           mint,
           symbol,
           name: item.baseToken?.name || symbol,
-          priceUsd: Number(item.priceUsd || 0),
+          priceUsd: currentPriceUsd,
           liquidityUsd,
           volume24hUsd: Number(item.volume?.h24 || 0),
           volume5mUsd: Number(item.volume?.m5 || 0),
@@ -248,7 +256,8 @@ export class DexScreenerScanner {
           dexId: item.dexId || 'raydium',
           priceChangeM5,
           buysM5,
-          sellsM5
+          sellsM5,
+          h1HighPriceUsd
         });
       }
 

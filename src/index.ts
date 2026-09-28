@@ -522,17 +522,19 @@ async function executeAutonomousCycle() {
         holdersCount: 250,
         priceChangeM5: topCandidate.priceChangeM5,
         buysM5: topCandidate.buysM5,
-        sellsM5: topCandidate.sellsM5
+        sellsM5: topCandidate.sellsM5,
+        priceUsd: topCandidate.priceUsd,
+        h1HighPriceUsd: topCandidate.h1HighPriceUsd
       });
 
       console.log(`   Veredito de Segurança: ${audit.safe ? 'APROVADO ✅' : 'VETADO ⛔'}`);
       console.log(`   Score: ${audit.score}/100 | Validador: ${audit.validatedBy}`);
 
-      if (audit.safe && topCandidate.priceChangeM5 !== undefined) {
-        const m5Sign = topCandidate.priceChangeM5 >= 0 ? '+' : '';
-        const buys = topCandidate.buysM5 ?? 'N/A';
-        const sells = topCandidate.sellsM5 ?? 'N/A';
-        console.log(`   📈 Momentum Aprovado: m5: ${m5Sign}${topCandidate.priceChangeM5.toFixed(2)}% | Compras: ${buys} vs Vendas: ${sells}`);
+      if (audit.safe) {
+        const m5Pct = topCandidate.priceChangeM5 !== undefined ? topCandidate.priceChangeM5.toFixed(1) : '0.0';
+        const buys = topCandidate.buysM5 ?? 0;
+        const sells = topCandidate.sellsM5 ?? 0;
+        console.log(`🛡️ [Ayla Aprovado]: Contrato Seguro (Score ${audit.score}+) | Momentum: m5 +${m5Pct}% | Buys/Sells: ${buys}/${sells}`);
       }
 
       let txSignature: string | null = null;
