@@ -114,16 +114,20 @@ export function renderDashboardHtml(state: DashboardState): string {
         </td>
         <td style="padding: 12px 16px;">
           <span style="padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; background: ${
-            c.exitReason === 'TAKE_PROFIT' ? 'rgba(16,185,129,0.15)' :
+            c.exitReason === 'TAKE_PROFIT' || c.exitReason === 'PARTIAL_TAKE_PROFIT_50' ? 'rgba(16,185,129,0.15)' :
+            c.exitReason === 'TRAILING_STOP' ? 'rgba(56,189,248,0.15)' :
             c.exitReason === 'TIME_STOP' ? 'rgba(245,158,11,0.15)' :
             'rgba(239,68,68,0.15)'
           }; color: ${
-            c.exitReason === 'TAKE_PROFIT' ? '#10B981' :
+            c.exitReason === 'TAKE_PROFIT' || c.exitReason === 'PARTIAL_TAKE_PROFIT_50' ? '#10B981' :
+            c.exitReason === 'TRAILING_STOP' ? '#38BDF8' :
             c.exitReason === 'TIME_STOP' ? '#F59E0B' :
             '#EF4444'
           };">
             ${
-              c.exitReason === 'TAKE_PROFIT' ? '🟢 TAKE-PROFIT (+50%)' :
+              c.exitReason === 'PARTIAL_TAKE_PROFIT_50' ? '🟢 PARCIAL 50% (+100%)' :
+              c.exitReason === 'TAKE_PROFIT' ? '🟢 TAKE-PROFIT (+100%)' :
+              c.exitReason === 'TRAILING_STOP' ? '🛡️ TRAILING STOP (-15% Topo)' :
               c.exitReason === 'TIME_STOP' ? '⏱️ TIME-STOP (15m)' :
               c.exitReason === 'MANUAL' ? '🚨 MANUAL' :
               '🔴 STOP-LOSS (-20%)'

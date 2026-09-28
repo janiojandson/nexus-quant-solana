@@ -11,6 +11,7 @@ import { SolanaPostgresRepository } from './database/postgresClient.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { PositionExitEngine } from './execution/positionExitEngine.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
+import { handleApiRoutes } from './server/routes.js';
 
 dotenv.config();
 
@@ -203,121 +204,47 @@ function updateDashboardViews() {
   latestState.quarantineCount = antiSpamMemory.getStats().vettedCount;
 }
 
-// Inicia servidor HTTP para Healthcheck do Railway e Dashboard Visual
+// Inicia servidor HTTP modular para Healthcheck, API REST e Dashboard Web
 const server = http.createServer(async (req, res) => {
-  const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  const pathname = parsedUrl.pathname;
-  const method = req.method || 'GET';
+  const handled = await handleApiRoutes(req, res, {
+    latestState,
+    executeExitOrder: (mint, reason, pnlPct, exitSolValue) =>
+      executeExitOrder(mint, reason as any, pnlPct, exitSolValue),
+    liquidateHolding: async (payload: { mint: string; symbol: string; amount: number; decimals: number }) => {
+      const { mint, symbol, amount, decimals } = payload;
+      console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint}) | Qtd: ${amount}`);
+      const rawLamports = Math.floor(amount * Math.pow(10, decimals));
 
-  // Rota Healthcheck padrão do Railway
-  if (pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'ONLINE',
-      agent: latestState.agent,
-      wallet: latestState.wallet,
-      balanceSol: latestState.balanceSol,
-      positionsCount: latestState.positions.length,
-      timestamp: new Date().toISOString()
-    }));
-    return;
+      // 1. Swap na Jupiter V6 com slippage estrito de 500 bps e prioridade HIGH
+      const exitSwap = await jupiterEngine.executeSwap({
+        inputMint: mint,
+        outputMint: 'So11111111111111111111111111111111111111112', // SOL
+        amountLamports: rawLamports,
+        userPublicKey: OFFICIAL_PHANTOM_WALLET,
+        keypair: wallet.getKeypair(),
+        slippageBps: 500,
+        priorityLevel: 'high'
+      });
+
+      // 2. Fechamento da ATA para resgatar ~0.00204 SOL de caução
+      await new Promise(r => setTimeout(r, 2000));
+      await wallet.closeTokenAccount(mint);
+
+      // 3. Aplica quarentena de 24h
+      antiSpamMemory.recordVeto(mint, 'Quarentena Pós-Liquidação Manual On-Chain', 24 * 60 * 60 * 1000);
+
+      // Remove do gerenciador se estivesse lá
+      positionEngine.removePosition(mint);
+
+      return { success: true, txSignature: exitSwap.txSignature };
+    },
+    getAllOpenPositions: () => positionEngine.getAllPositions()
+  });
+
+  if (!handled) {
+    res.writeHead(404);
+    res.end();
   }
-
-  // Rota API JSON para integrações (ex: MarketFlow Pro)
-  if (pathname === '/api/status') {
-    res.writeHead(200, {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*'
-    });
-    res.end(JSON.stringify(latestState, null, 2));
-    return;
-  }
-
-  // Rota de Venda Manual de 1 Token específico
-  if (pathname.startsWith('/api/positions/') && pathname.endsWith('/exit') && method === 'POST') {
-    const segments = pathname.split('/');
-    const mint = decodeURIComponent(segments[3] || '');
-    console.log(`🚨 [Ação Manual Recebida] Requisição de Venda a Mercado para: ${mint}`);
-    const result = await executeExitOrder(mint, 'MANUAL', 0, 0);
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify(result));
-    return;
-  }
-
-  // Rota Panic Button: Liquidar Tudo Imediatamente
-  if (pathname === '/api/positions/liquidate-all' && method === 'POST') {
-    console.log(`🛑 [PANIC BUTTON ATIVADO] Liquidando todas as posições em aberto...`);
-    const allPositions = positionEngine.getAllPositions();
-    const results = [];
-    for (const pos of allPositions) {
-      const resExit = await executeExitOrder(pos.mint, 'MANUAL', 0, 0);
-      results.push({ mint: pos.mint, symbol: pos.symbol, ...resExit });
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-    res.end(JSON.stringify({ message: `${results.length} posições liquidadas a mercado.`, results }));
-    return;
-  }
-
-  // Rota de Liquidação Direta de Qualquer Token On-Chain (mesmo fora da memória do robô)
-  if (pathname === '/api/wallet/liquidate-holding' && method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', async () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-        const mint = payload.mint;
-        const symbol = payload.symbol || 'TOKEN';
-        const amount = Number(payload.amount || 0);
-        const decimals = Number(payload.decimals || 6);
-
-        if (!mint || amount <= 0) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: false, error: 'Mint e amount válidos são obrigatórios.' }));
-          return;
-        }
-
-        console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint}) | Qtd: ${amount}`);
-        const rawLamports = Math.floor(amount * Math.pow(10, decimals));
-
-        // 1. Swap na Jupiter V6
-        const exitSwap = await jupiterEngine.executeSwap({
-          inputMint: mint,
-          outputMint: 'So11111111111111111111111111111111111111112', // SOL
-          amountLamports: rawLamports,
-          userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: wallet.getKeypair()
-        });
-
-        // 2. Fechamento da ATA para resgatar ~0.00204 SOL de caução
-        await new Promise(r => setTimeout(r, 2000));
-        await wallet.closeTokenAccount(mint);
-
-        // 3. Aplica quarentena de 24h
-        antiSpamMemory.recordVeto(mint, 'Quarentena Pós-Liquidação Manual On-Chain', 24 * 60 * 60 * 1000);
-
-        // Remove do gerenciador se estivesse lá
-        positionEngine.removePosition(mint);
-
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ success: true, txSignature: exitSwap.txSignature }));
-      } catch (err: any) {
-        console.error('❌ Erro na liquidação avulsa:', err?.message || err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err?.message || 'Falha na execução on-chain' }));
-      }
-    });
-    return;
-  }
-
-  // Rota Dashboard Web Visual
-  if (pathname === '/' || pathname === '/dashboard') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(renderDashboardHtml(latestState));
-    return;
-  }
-
-  res.writeHead(404);
-  res.end();
 });
 
 server.listen(PORT, () => {
