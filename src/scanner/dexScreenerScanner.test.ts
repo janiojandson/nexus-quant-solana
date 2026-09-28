@@ -64,3 +64,23 @@ test('DexScreenerScanner: deve rejeitar armadilhas de 1 minuto e aceitar apenas 
   assert.strictEqual(results[0].symbol, 'MATURE');
   assert.strictEqual(results[0].mint, 'MintTokenMaduro');
 });
+
+test('DexScreenerScanner: deve descartar tokens mais velhos que 4 horas (fora da janela de momentum)', () => {
+  const scanner = new DexScreenerScanner();
+  const now = Date.now();
+  // 5 horas atrás
+  assert.strictEqual(scanner.isMaturityValid(now - (5 * 60 * 60 * 1000)), false);
+  // 15 minutos atrás
+  assert.strictEqual(scanner.isMaturityValid(now - (15 * 60 * 1000)), false);
+  // 45 minutos atrás
+  assert.strictEqual(scanner.isMaturityValid(now - (45 * 60 * 1000)), true);
+});
+
+test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >= 70%', () => {
+  const scanner = new DexScreenerScanner();
+  // 75 compras, 25 vendas = 75%
+  assert.strictEqual(scanner.isBuyingAggressionValid(75, 25), true);
+  // 60 compras, 40 vendas = 60% < 70%
+  assert.strictEqual(scanner.isBuyingAggressionValid(60, 40), false);
+});
+

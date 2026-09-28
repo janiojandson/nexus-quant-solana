@@ -63,9 +63,6 @@ export class DexScreenerScanner {
       }
 
       const now = Date.now();
-      const twentyMinMs = 20 * 60 * 1000; // Mínimo 20 minutos de vida (sobreviveu ao dump inicial do dev)
-      const maxAgeMs = 24 * 60 * 60 * 1000; // Máximo 24 horas (ainda em fase de momentum)
-
       const candidates: TokenCandidate[] = [];
       const seenMints = new Set<string>();
 
@@ -85,12 +82,15 @@ export class DexScreenerScanner {
         seenMints.add(mint);
 
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
-        // Filtro de maturidade estrita da piscina: rejeita lançamentos com menos de 20 minutos
-        const ageMs = pairCreatedAt > 0 ? (now - pairCreatedAt) : 0;
-        const isIdealWindow = pairCreatedAt > 0 ? (ageMs >= twentyMinMs && ageMs <= maxAgeMs) : false;
+        // Filtro de maturidade estrita da piscina: janela aceita entre 20 min e 4 horas
+        if (pairCreatedAt > 0 && !this.isMaturityValid(pairCreatedAt, now)) {
+          continue;
+        }
 
-        // Se a piscina tiver carimbo de criação e não estiver na janela ideal de maturidade (20m - 24h), descarta
-        if (pairCreatedAt > 0 && !isIdealWindow) {
+        // Validação de agressão de fluxo se dados de txns estiverem presentes
+        const buys = Number(item.txns?.h1?.buys || item.txns?.m5?.buys || 0);
+        const sells = Number(item.txns?.h1?.sells || item.txns?.m5?.sells || 0);
+        if (buys + sells >= 20 && !this.isBuyingAggressionValid(buys, sells)) {
           continue;
         }
 
@@ -110,6 +110,27 @@ export class DexScreenerScanner {
     } catch {
       return [];
     }
+  }
+
+  /**
+   * Valida se a idade da pool está entre 20 minutos e 4 horas.
+   */
+  public isMaturityValid(pairCreatedAt: number, now: number = Date.now()): boolean {
+    if (!pairCreatedAt || pairCreatedAt <= 0) return false;
+    const ageMs = now - pairCreatedAt;
+    const minMaturityMs = 20 * 60 * 1000;      // Mínimo 20 minutos
+    const maxMaturityMs = 4 * 60 * 60 * 1000;   // Máximo 4 horas
+    return ageMs >= minMaturityMs && ageMs <= maxMaturityMs;
+  }
+
+  /**
+   * Valida se o ratio de agressão compradora é de pelo menos 70%.
+   */
+  public isBuyingAggressionValid(buys: number, sells: number): boolean {
+    const total = buys + sells;
+    if (total === 0) return false;
+    const buyRatio = buys / total;
+    return buyRatio >= 0.70;
   }
 
   public async fetchCurrentTokenPriceUsd(mint: string): Promise<number | null> {
