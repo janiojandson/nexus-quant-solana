@@ -114,10 +114,11 @@ test('DexScreenerScanner: deve descartar tokens mais velhos que 60 minutos e mai
   assert.strictEqual(scanner.isMaturityValid(now - (60 * 60 * 1000)), true, '60 min deve ser aceito');
 });
 
-test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >= 70%', () => {
+test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >= 50%', () => {
   const scanner = new DexScreenerScanner();
   assert.strictEqual(scanner.isBuyingAggressionValid(75, 25), true);
-  assert.strictEqual(scanner.isBuyingAggressionValid(60, 40), false);
+  assert.strictEqual(scanner.isBuyingAggressionValid(60, 40), true);
+  assert.strictEqual(scanner.isBuyingAggressionValid(40, 60), false);
 });
 
 test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela de +3% a +40%', async () => {

@@ -76,7 +76,7 @@ export class DexScreenerScanner {
     });
   }
 
-  public async scanSolanaTrends(minLiquidityUsd: number = 20000): Promise<TokenCandidate[]> {
+  public async scanSolanaTrends(minLiquidityUsd: number = 15000): Promise<TokenCandidate[]> {
     try {
       let sourcesCount = 0;
       const discoveredMints = new Set<string>();
@@ -219,6 +219,7 @@ export class DexScreenerScanner {
         if (liquidityUsd < minLiquidityUsd) {
           technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
+          console.log(`🗑️ [Descarte Técnico] ${item.baseToken?.symbol || 'UNKNOWN'} (${mint}) | Motivo: Liq insuficiente | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
 
@@ -227,6 +228,7 @@ export class DexScreenerScanner {
         if (!symbol || symbol === 'undefined' || symbol.trim() === '') {
           technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
+          console.log(`🗑️ [Descarte Técnico] ${symbol || 'UNKNOWN'} (${mint}) | Motivo: Symbol invalido | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
 
@@ -238,6 +240,7 @@ export class DexScreenerScanner {
         if (pairCreatedAt > 0 && !this.isMaturityValid(pairCreatedAt, now)) {
           technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
+          console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Maturidade fora 15-60m | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
 
@@ -247,6 +250,7 @@ export class DexScreenerScanner {
           // VETO TÉCNICO IMEDIATO: Se priceChange.m5 <= 0 ou > 35
           if (priceChangeM5 <= 0 || priceChangeM5 > 35 || priceChangeM5 < 3) {
             technicalDiscards++;
+            console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: m5 fora janela [${priceChangeM5}%] | Liq: $${Math.round(liquidityUsd)} | m5: ${priceChangeM5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
             continue;
           }
         }
@@ -255,9 +259,10 @@ export class DexScreenerScanner {
         const buysM5 = item.txns?.m5?.buys !== undefined ? Number(item.txns.m5.buys) : undefined;
         const sellsM5 = item.txns?.m5?.sells !== undefined ? Number(item.txns.m5.sells) : undefined;
         if (buysM5 !== undefined && sellsM5 !== undefined && (buysM5 + sellsM5 > 0)) {
-          // Exija no mínimo 20% mais compradores que vendedores (buys >= sells * 1.2)
-          if (buysM5 < (sellsM5 * 1.2)) {
+          // Paridade: buys >= sells * 1.0
+          if (buysM5 < (sellsM5 * 1.0)) {
             technicalDiscards++;
+            console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: B/S insuficiente [${buysM5}/${sellsM5}] | Liq: $${Math.round(liquidityUsd)} | m5: ${priceChangeM5}% | B/S: ${buysM5}/${sellsM5}`);
             continue;
           }
         }
@@ -266,8 +271,10 @@ export class DexScreenerScanner {
         const volumeBuysM5 = item.volume?.m5?.buys !== undefined ? Number(item.volume.m5.buys) : undefined;
         const volumeSellsM5 = item.volume?.m5?.sells !== undefined ? Number(item.volume.m5.sells) : undefined;
         if (volumeBuysM5 !== undefined && volumeSellsM5 !== undefined && (volumeBuysM5 + volumeSellsM5 > 0)) {
-          if (volumeBuysM5 <= volumeSellsM5) {
+          const buyVolRatio = volumeBuysM5 / (volumeBuysM5 + volumeSellsM5);
+          if (buyVolRatio < 0.45) {
             technicalDiscards++;
+            console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Vol comprador insuficiente [${(buyVolRatio * 100).toFixed(1)}%] | Liq: $${Math.round(liquidityUsd)} | m5: ${priceChangeM5}% | B/S: ${buysM5}/${sellsM5}`);
             continue;
           }
         }
@@ -284,9 +291,10 @@ export class DexScreenerScanner {
           h1HighPriceUsd = Number(item.h1HighPriceUsd);
         }
 
-        // Filtro anti-faca caindo: preço atual deve ser >= 70% da máxima h1
-        if (h1HighPriceUsd > 0 && (currentPriceUsd / h1HighPriceUsd) < 0.70) {
+        // Filtro anti-faca caindo: preço atual deve ser >= 65% da máxima h1
+        if (h1HighPriceUsd > 0 && (currentPriceUsd / h1HighPriceUsd) < 0.65) {
           technicalDiscards++;
+          console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Faca caindo [${((currentPriceUsd / h1HighPriceUsd) * 100).toFixed(1)}% da max h1] | Liq: $${Math.round(liquidityUsd)} | m5: ${priceChangeM5}% | B/S: ${buysM5}/${sellsM5}`);
           continue;
         }
 
@@ -295,6 +303,7 @@ export class DexScreenerScanner {
         const sells = Number(item.txns?.h1?.sells || item.txns?.m5?.sells || 0);
         if (buys + sells >= 20 && !this.isBuyingAggressionValid(buys, sells)) {
           technicalDiscards++;
+          console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Agressao compradora insuficiente [${((buys / (buys + sells)) * 100).toFixed(1)}%] | Liq: $${Math.round(liquidityUsd)} | m5: ${priceChangeM5}% | B/S: ${buysM5}/${sellsM5}`);
           continue;
         }
 
@@ -342,7 +351,7 @@ export class DexScreenerScanner {
     const total = buys + sells;
     if (total === 0) return false;
     const buyRatio = buys / total;
-    return buyRatio >= 0.70;
+    return buyRatio >= 0.50;
   }
 
   public async fetchCurrentTokenPriceUsd(mint: string): Promise<number | null> {
