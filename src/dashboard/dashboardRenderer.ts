@@ -1,3 +1,5 @@
+import { renderJournalSection } from './dashboardJournal.js';
+
 export interface ClosedTradeView {
   mint: string;
   symbol: string;
@@ -286,6 +288,9 @@ export function renderDashboardHtml(state: DashboardState): string {
         </table>
       </div>
     </section>
+
+    <!-- DECISION JOURNAL & CALIBRAÇÃO DE EV v2.5.0 (4 CARDS) -->
+    ${renderJournalSection()}
 
     <!-- PAINEL DE TELEMETRIA E LOGS EM TEMPO REAL -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 md:p-6 shadow-xl space-y-3">

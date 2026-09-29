@@ -1,5 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Pool } from 'pg';
 import { DashboardState, renderDashboardHtml } from '../dashboard/dashboardRenderer.js';
+import type { DecisionLogger } from '../database/decisionJournal.js';
+import { handleJournalRoutes } from './journalRoutes.js';
 
 export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
 
@@ -13,6 +16,8 @@ export interface RouteContext {
   panicAll?: () => Promise<{ success: boolean; liquidationsCount: number; message?: string; error?: string }>;
   runCalibration?: () => Promise<any>;
   getSnapshots?: (limit: number) => Promise<any[]>;
+  pgPool?: Pool | null;
+  journal?: DecisionLogger | null;
 }
 
 /**
@@ -39,6 +44,12 @@ export async function handleApiRoutes(
     res.writeHead(204);
     res.end();
     return true;
+  }
+
+  // 0. Rotas Especializadas do Decision Journal & Calibração v2.5.0
+  if (pathname.startsWith('/api/journal')) {
+    const handledJournal = await handleJournalRoutes(req, res, ctx.pgPool ?? null, ctx.journal ?? null);
+    if (handledJournal) return true;
   }
 
   // 1. Healthcheck padrão para monitoramento (Railway, K8s, UptimeRobot)

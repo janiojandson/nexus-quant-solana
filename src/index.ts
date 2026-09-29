@@ -402,7 +402,9 @@ const server = http.createServer(async (req, res) => {
         [limit]
       );
       return res.rows;
-    }
+    },
+    pgPool,
+    journal
   });
 
   if (!handled) {
