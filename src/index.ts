@@ -18,6 +18,7 @@ import { randomUUID } from 'crypto';
 import { DecisionLogger, DecisionType, GateEvaluation } from './database/decisionJournal.js';
 import { startCalibrationCron, runCalibrationNow } from './calibration/calibrationCron.js';
 import { runMaintenance } from './database/maintenanceJob.js';
+import { DrawdownBreaker } from './risk/drawdownBreaker.js';
 
 dotenv.config();
 
@@ -68,6 +69,7 @@ const journal = new DecisionLogger(pgPool, {
   maxBufferSize: 100
 });
 const cerebroService = new CerebroIntegrationService();
+const drawdownBreaker = new DrawdownBreaker();
 
 // Estado compartilhado em memória para o Dashboard
 const latestState: DashboardState = {
@@ -169,6 +171,10 @@ async function executeExitOrder(
 
   // 4. Registra Trade Fechado
   const pnlSol = pnlPct * (pos.entrySol || 0.015);
+
+  // Registro do resultado no Drawdown Breaker para proteção de capital diária
+  drawdownBreaker.recordTradeResult(pnlSol);
+
   positionEngine.recordClosedTrade({
     mint: pos.mint,
     symbol: pos.symbol,
@@ -282,6 +288,7 @@ function updateDashboardViews() {
 const server = http.createServer(async (req, res) => {
   const handled = await handleApiRoutes(req, res, {
     latestState,
+    drawdownState: drawdownBreaker.getState(),
     executeExitOrder: (mint, reason, pnlPct, exitSolValue) =>
       executeExitOrder(mint, reason as any, pnlPct, exitSolValue),
     liquidateHolding: async (payload: { mint: string; symbol: string; amount: number; decimals: number }) => {
@@ -624,6 +631,14 @@ async function executeAutonomousCycle() {
       return;
     }
 
+    // 🛑 DRAWDOWN BREAKER: Bloqueia novas entradas se o PnL diário exceder os limiares de risco
+    if (!drawdownBreaker.canOpenNewPosition()) {
+      const ddState = drawdownBreaker.getState();
+      const pauseLabel = ddState.tier === 'PAUSED_DRAWDOWN_TIER2' ? 'até 00:00 UTC' : 'por 4h';
+      console.log(`🛑 [DRAWDOWN BREAKER: ${ddState.tier}] PnL diário: ${ddState.dailyPnlSol.toFixed(4)} SOL. Novas entradas bloqueadas ${pauseLabel}.`);
+      return;
+    }
+
     const totalAllocatedSol = activePositions.reduce((acc, p) => acc + (p.entrySol || TRADE_AMOUNT_SOL), 0);
     if (totalAllocatedSol >= MAX_TOTAL_ALLOCATION_SOL) {
       console.log(`💰 [ALOCAÇÃO MÁXIMA ATINGIDA] Capital alocado (${totalAllocatedSol.toFixed(2)} SOL) atingiu teto de ${MAX_TOTAL_ALLOCATION_SOL} SOL. Aguardando saídas.`);
@@ -905,7 +920,7 @@ async function executeAutonomousCycle() {
             tokenAmount: swapSim.outAmount,
             entryPriceUsd: topCandidate.priceUsd,
             entryTimestamp: nowTs,
-            stopLossPct: -0.08,
+            stopLossPct: -0.06,
             takeProfitPct: 0.35, // +35% para colheita parcial 50%
             entrySol: dynamicAllocSol,
             entrySolValue: dynamicAllocSol,
@@ -913,7 +928,7 @@ async function executeAutonomousCycle() {
             entryVolume5m: topCandidate.volume5mUsd || 0,
             traceId: currentTraceId
           });
-          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -8% | TP: +35%)`);
+          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -6% | TP: +35%)`);
           updateDashboardViews();
 
           // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)

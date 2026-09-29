@@ -63,12 +63,16 @@ export class PositionExitEngine {
   private closedPositions: ClosedTrade[] = [];
   /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
   private peakSolValues = new Map<string, number>();
-  public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos
-  public static readonly DEFAULT_STOP_LOSS_PCT = -0.08;         // -8% Stop Loss Inicial
+  public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos (hard limit condicional)
+  public static readonly DEFAULT_STOP_LOSS_PCT = -0.06;         // -6% Stop Loss Lógico (efetivo ~-8% a -9% com slippage)
   public static readonly BREAKEVEN_TRIGGER_PCT = 0.12;          // +12% ativa Breakeven (+1%)
   public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
   /** Trailing pós-parcial: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
   public static readonly TRAILING_DISTANCE = 0.10;              // -10% do pico máximo
+  /** Time-Stop estendido para posições com PnL positivo após 10min */
+  public static readonly EXTENDED_TIME_STOP_POSITIVE_MS = 25 * 60 * 1000;  // 25 minutos
+  /** Time-Stop estendido para posições com PnL neutro (-3% a 0%) e volume ativo */
+  public static readonly EXTENDED_TIME_STOP_NEUTRAL_MS = 20 * 60 * 1000;   // 20 minutos
 
   /**
    * Retorna descrição visual padronizada do estado dos stops da posição.
@@ -178,9 +182,12 @@ export class PositionExitEngine {
    * - Se o valor cair abaixo de trailingStopSolValue: encerra os 50% restantes e FECHA a ATA (Rent Exemption).
    *
    * Proteções Iniciais (Pré-Parcial):
-   * - Stop-Loss Inicial Fixo em -8% (<= 0.92 * entrySol) -> Encerra 100% e FECHA ATA.
+   * - Stop-Loss Lógico em -6% (efetivo ~-8% a -9% com slippage) -> Encerra 100% e FECHA ATA.
    * - Breakeven em +12%: Se o pico atingir >= +12%, stop sobe para +1% (trade sem risco de perda).
-   * - Time-Stop de 15 minutos se estagnada sem atingir parcial nem SL -> Encerra 100% e FECHA ATA.
+   * - Time-Stop Condicional:
+   *   - PnL > 0% após 10min: estende para 25 minutos (momentum lento positivo).
+   *   - PnL entre -3% e 0% com volume crescente: estende para 20 minutos.
+   *   - PnL < -3% e volume estagnado: encerra aos 15 minutos (hard limit).
    */
   public evaluateExitBySol(
     mint: string,
@@ -329,7 +336,7 @@ export class PositionExitEngine {
     // PROTEÇÕES PRÉ-PARCIAL (Risco Fixo Inicial)
     // ==========================================
     if (!position.partialTaken) {
-      // 1. Stop-Loss Inicial Fixo (-20%)
+      // 1. Stop-Loss Lógico (-6%, efetivo ~-8% a -9% com slippage)
       if (pnlPct <= position.stopLossPct) {
         return {
           shouldExit: true,
@@ -343,9 +350,29 @@ export class PositionExitEngine {
         };
       }
 
-      // 2. Time-Stop de Estagnação Máxima (15 minutos)
+      // 2. Time-Stop Condicional (adapta duração ao contexto da posição)
       const maxDuration = position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS;
-      if (elapsedMs >= maxDuration) {
+      const isVolumeGrowing = context?.currentVolume5m !== undefined && position.entryVolume5m !== undefined
+        ? context.currentVolume5m > position.entryVolume5m * 1.05
+        : false;
+
+      let effectiveTimeStopMs = maxDuration; // 15min hard limit
+      if (pnlPct > 0 && elapsedMinutes >= 10) {
+        effectiveTimeStopMs = PositionExitEngine.EXTENDED_TIME_STOP_POSITIVE_MS; // 25min
+      } else if (pnlPct >= -0.03 && pnlPct <= 0 && isVolumeGrowing) {
+        effectiveTimeStopMs = PositionExitEngine.EXTENDED_TIME_STOP_NEUTRAL_MS;  // 20min
+      }
+
+      if (elapsedMs >= effectiveTimeStopMs) {
+        const reasonParts: string[] = [];
+        if (effectiveTimeStopMs === maxDuration) {
+          reasonParts.push(`Hard limit ${Math.round(maxDuration / 60000)}min`);
+        } else {
+          reasonParts.push(`Extended ${Math.round(effectiveTimeStopMs / 60000)}min`);
+        }
+        reasonParts.push(`PnL: ${(pnlPct * 100).toFixed(1)}%`);
+        if (!isVolumeGrowing) reasonParts.push('volume estagnado');
+
         return {
           shouldExit: true,
           type: 'TIME_STOP',
@@ -354,7 +381,8 @@ export class PositionExitEngine {
           exitTokenAmount: position.tokenAmount,
           shouldCloseAta: true,
           peakSolValue: newPeak,
-          trailingStopSolValue
+          trailingStopSolValue,
+          reasonDetail: `TIME_STOP_CONDICIONAL: ${reasonParts.join(' | ')}`
         };
       }
     }

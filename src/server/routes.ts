@@ -8,6 +8,7 @@ export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' 
 
 export interface RouteContext {
   latestState: DashboardState;
+  drawdownState?: { tier: string; dailyPnlSol: number; dailyTradeCount: number; pausedUntil: number | null; lastResetDate: string };
   executeExitOrder?: (mint: string, reason: ExitReason | string, pnlPct: number, exitSolValue: number, options?: { exitTokenAmount?: number; shouldCloseAta?: boolean }) => Promise<any>;
   liquidateHolding?: (payload: { mint: string; symbol: string; amount: number; decimals: number }) => Promise<any>;
   getAllOpenPositions?: () => any[];
@@ -94,6 +95,7 @@ export async function handleApiRoutes(
         status: s.macroRegime || 'NORMAL',
         circuitBreaker: s.circuitBreakerActive ? 'ENGAGED' : 'DISENGAGED'
       },
+      drawdown: ctx.drawdownState || { tier: 'ACTIVE', dailyPnlSol: 0, dailyTradeCount: 0, pausedUntil: null, lastResetDate: '' },
       incubator: {
         waiting: s.incubator?.waiting ?? 0,
         mature: s.incubator?.mature ?? 0,
