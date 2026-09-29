@@ -280,4 +280,69 @@ test('handleApiRoutes: deve executar POST /api/panic/all desarmando e liquidando
   assert.strictEqual(resObj.message, 'Pânico geral executado com sucesso.');
 });
 
+test('handleApiRoutes: deve acionar rota POST /api/calibration/run com sucesso', async () => {
+  const mockReq = { url: '/api/calibration/run', method: 'POST', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    setHeader: () => {},
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  let calibrationCalled = false;
+  const mockContext = {
+    latestState: {},
+    runCalibration: async () => {
+      calibrationCalled = true;
+      return {
+        totalTrades: 50,
+        totalDecisions: 120,
+        overallWinRate: 55.0,
+        overallEV: 3.2,
+        gateMetrics: [{ gateName: 'BUY_DOMINANCE', sampleSize: 50, winRate: 55, verdict: 'KEEP' }],
+        latencyMetrics: [],
+        warnings: []
+      };
+    }
+  } as any;
+
+  const handled = await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 200);
+  assert.strictEqual(calibrationCalled, true);
+  const resObj = JSON.parse(responseData);
+  assert.strictEqual(resObj.success, true);
+  assert.strictEqual(resObj.mode, 'READ_ONLY');
+  assert.strictEqual(resObj.summary.totalTrades, 50);
+  assert.strictEqual(resObj.gates[0].gateName, 'BUY_DOMINANCE');
+});
+
+test('handleApiRoutes: deve responder snapshots na rota GET /api/calibration/snapshots', async () => {
+  const mockReq = { url: '/api/calibration/snapshots?limit=10', method: 'GET', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    setHeader: () => {},
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  const mockContext = {
+    latestState: {},
+    getSnapshots: async (limit: number) => {
+      assert.strictEqual(limit, 10);
+      return [{ id: 'snap-1', gate_name: 'BUY_DOMINANCE', gate_verdict: 'KEEP' }];
+    }
+  } as any;
+
+  const handled = await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 200);
+  const resObj = JSON.parse(responseData);
+  assert.strictEqual(resObj.snapshots.length, 1);
+  assert.strictEqual(resObj.snapshots[0].gate_name, 'BUY_DOMINANCE');
+});
+
+
 

@@ -14,6 +14,7 @@ export interface PositionTracking {
   entrySolValue?: number;
   entryLiquidityUsd?: number;
   entryVolume5m?: number;
+  traceId?: string;
 }
 
 export interface PositionInput extends Omit<PositionTracking, 'stopLossPct' | 'takeProfitPct'> {

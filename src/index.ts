@@ -14,6 +14,10 @@ import { PositionExitEngine } from './execution/positionExitEngine.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
+import { randomUUID } from 'crypto';
+import { DecisionLogger, DecisionType, GateEvaluation } from './database/decisionJournal.js';
+import { startCalibrationCron, runCalibrationNow } from './calibration/calibrationCron.js';
+import { runMaintenance } from './database/maintenanceJob.js';
 
 dotenv.config();
 
@@ -58,6 +62,11 @@ const jupiterEngine = new JupiterExecutionEngine({
 
 const reproduction = new ReproductionEngine();
 const postgresRepo = new SolanaPostgresRepository();
+const pgPool = postgresRepo.getPool();
+const journal = new DecisionLogger(pgPool, {
+  flushIntervalMs: 5000,
+  maxBufferSize: 100
+});
 const cerebroService = new CerebroIntegrationService();
 
 // Estado compartilhado em memória para o Dashboard
@@ -173,6 +182,40 @@ async function executeExitOrder(
     pnlSolEst: pnlSol,
     exitReason,
     txSignature: exitSwap.txSignature
+  });
+
+  // 4.1 Registro assíncrono no Decision Journal (trade_outcomes) — ZERO bloqueio do loop de 1.5s
+  const exitTypeMap: Record<string, DecisionType> = {
+    STOP_LOSS: 'EXIT_SL',
+    PARTIAL_TAKE_PROFIT_50: 'EXIT_PARTIAL',
+    TRAILING_STOP: 'EXIT_TRAILING',
+    TIME_STOP: 'EXIT_TIME_STOP',
+    MANUAL: 'EXIT_PANIC',
+    TAKE_PROFIT: 'EXIT_PARTIAL',
+  };
+
+  const rentRecovered = shouldCloseAta ? 0.00204 : 0;
+  const feesSol = 0.00005;
+  const netPnlSol = pnlSol - feesSol + rentRecovered;
+  const tradeDurationS = Math.floor((Date.now() - pos.entryTimestamp) / 1000);
+
+  journal.logOutcome({
+    traceId: pos.traceId || randomUUID(),
+    mint: pos.mint,
+    entryPriceUsd: pos.entryPriceUsd,
+    entrySizeSol: pos.entrySol || 0.05,
+    entryTimestamp: new Date(pos.entryTimestamp),
+    exitPriceUsd: exitSolValue > 0 ? (exitSolValue / tokenAmountToSell) : pos.entryPriceUsd,
+    exitSizeSol: exitSolValue,
+    exitTimestamp: new Date(),
+    exitReason: exitTypeMap[exitReason] || 'EXIT_WATCHDOG',
+    pnlSol,
+    pnlPct: pnlPct * 100,
+    feesTotalSol: feesSol,
+    rentRecoveredSol: rentRecovered,
+    netPnlSol,
+    totalTradeDurationS: tradeDurationS,
+    status: shouldCloseAta ? (exitReason === 'MANUAL' ? 'PANIC_CLOSED' : 'FULLY_CLOSED') : 'PARTIAL_CLOSED'
   });
 
   // Se for liquidação total, remove do Gestor de Posições
@@ -348,6 +391,17 @@ const server = http.createServer(async (req, res) => {
         liquidationsCount,
         message: 'Pânico geral executado com sucesso.'
       };
+    },
+    runCalibration: async () => {
+      return runCalibrationNow(pgPool);
+    },
+    getSnapshots: async (limit: number) => {
+      if (!pgPool) return [];
+      const res = await pgPool.query(
+        `SELECT * FROM calibration_snapshots ORDER BY computed_at DESC LIMIT $1`,
+        [limit]
+      );
+      return res.rows;
     }
   });
 
@@ -608,6 +662,31 @@ async function executeAutonomousCycle() {
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
       if (!classification.isEligibleForMemeScan) {
         technicalDiscardCount++;
+        // Registro assíncrono no Decision Journal (rejeição de maturação / descarte técnico)
+        journal.logDecision({
+          traceId: randomUUID(),
+          decision: 'ENTRY_REJECTED',
+          token: {
+            mint: token.mint,
+            tokenSymbol: token.symbol,
+            poolAddress: (token as any).pairAddress,
+            liquidityUsd: token.liquidityUsd,
+            priceUsd: token.priceUsd,
+            priceChange5mPct: token.priceChangeM5,
+            volume5mUsd: token.volume5mUsd
+          },
+          market: {
+            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+            sessionHourUtc: new Date().getUTCHours(),
+            isWeekend: [0, 6].includes(new Date().getUTCDay())
+          },
+          gateEvaluations: [
+            DecisionLogger.evaluateGate('MATURITY_AGE', ((token as any).ageMinutes || 0) >= 15, (token as any).ageMinutes, 15),
+            DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', (token.liquidityUsd || 0) >= 15000, token.liquidityUsd, 15000)
+          ],
+          rejectionReason: classification.reason || 'Descarte por classificação técnica'
+        });
+
         // TTL inteligente de 5 minutos: permite que tokens com liquidez oscilante ou status transitório sejam reavaliados
         antiSpamMemory.recordTechnicalDiscard(token.mint, classification.reason || 'Descarte por classificação técnica', 5);
         continue;
@@ -678,6 +757,29 @@ async function executeAutonomousCycle() {
 
       let txSignature: string | null = null;
 
+      // Avaliação detalhada dos 9 gates para o Decision Journal
+      const openPositions = positionEngine.getAllPositions().length;
+      const buySellRatio = topCandidate.sellsM5 && topCandidate.sellsM5 > 0
+        ? Number(((topCandidate.buysM5 || 0) / topCandidate.sellsM5).toFixed(2))
+        : (topCandidate.buysM5 ? 2.0 : 1.0);
+      const isPriceWindowValid = (topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 35;
+      const isBuyDominanceValid = buySellRatio >= 1.2;
+      const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
+
+      const gates: GateEvaluation[] = [
+        DecisionLogger.evaluateGate('MINT_AUTHORITY', true),
+        DecisionLogger.evaluateGate('FREEZE_AUTHORITY', true),
+        DecisionLogger.evaluateGate('TOP_HOLDERS', true, 20, 20),
+        DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 35),
+        DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.2),
+        DecisionLogger.evaluateGate('SENTINEL_REGIME', isSentinelValid),
+        DecisionLogger.evaluateGate('SLOT_AVAILABILITY', openPositions < MAX_CONCURRENT_POSITIONS, openPositions, MAX_CONCURRENT_POSITIONS),
+        DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
+        DecisionLogger.evaluateGate('DISTANCE_FROM_LOW', true, 15, 35),
+      ];
+
+      const currentTraceId = randomUUID();
+
       if (!audit.safe) {
         console.log(`   Motivo do Veto: ${audit.reason}`);
         const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Ayla)';
@@ -689,8 +791,63 @@ async function executeAutonomousCycle() {
           reason: vetoReasonText,
           expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
         }).catch(() => {});
+
+        // Registro assíncrono no Decision Journal (rejeição no Gatekeeper)
+        journal.logDecision({
+          traceId: currentTraceId,
+          decision: 'ENTRY_REJECTED',
+          compositeScore: audit.score,
+          token: {
+            mint: topCandidate.mint,
+            tokenSymbol: topCandidate.symbol,
+            poolAddress: (topCandidate as any).pairAddress,
+            liquidityUsd: topCandidate.liquidityUsd,
+            priceUsd: topCandidate.priceUsd,
+            priceChange5mPct: topCandidate.priceChangeM5,
+            buysCount5m: topCandidate.buysM5,
+            sellsCount5m: topCandidate.sellsM5,
+            buySellRatio,
+            volume5mUsd: topCandidate.volume5mUsd,
+          },
+          market: {
+            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+            sessionHourUtc: new Date().getUTCHours(),
+            isWeekend: [0, 6].includes(new Date().getUTCDay()),
+          },
+          gateEvaluations: gates,
+          rejectionReason: vetoReasonText,
+        });
       } else {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
+
+        // Registro assíncrono no Decision Journal (aprovação no Gatekeeper)
+        journal.logDecision({
+          traceId: currentTraceId,
+          decision: 'ENTRY_APPROVED',
+          compositeScore: audit.score,
+          token: {
+            mint: topCandidate.mint,
+            tokenSymbol: topCandidate.symbol,
+            poolAddress: (topCandidate as any).pairAddress,
+            liquidityUsd: topCandidate.liquidityUsd,
+            priceUsd: topCandidate.priceUsd,
+            priceChange5mPct: topCandidate.priceChangeM5,
+            buysCount5m: topCandidate.buysM5,
+            sellsCount5m: topCandidate.sellsM5,
+            buySellRatio,
+            volume5mUsd: topCandidate.volume5mUsd,
+          },
+          market: {
+            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+            sessionHourUtc: new Date().getUTCHours(),
+            isWeekend: [0, 6].includes(new Date().getUTCDay()),
+          },
+          execution: {
+            sizeSol: TRADE_AMOUNT_SOL,
+            estimatedSlippagePct: 5.0,
+          },
+          gateEvaluations: gates,
+        });
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
         // Parâmetros de Banca: exatamente 0.05 SOL por trade respeitando reserva intocável de 0.05 SOL
@@ -738,7 +895,8 @@ async function executeAutonomousCycle() {
             entrySol: dynamicAllocSol,
             entrySolValue: dynamicAllocSol,
             entryLiquidityUsd: topCandidate.liquidityUsd,
-            entryVolume5m: topCandidate.volume5mUsd || 0
+            entryVolume5m: topCandidate.volume5mUsd || 0,
+            traceId: currentTraceId
           });
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -8% | TP: +35%)`);
           updateDashboardViews();
@@ -925,6 +1083,14 @@ async function main() {
     console.warn(`⚠️ [ALERTA DE CHAVE] Chave pública derivada (${wallet.getPublicKey()}) diverge da carteira oficial configurada (${OFFICIAL_PHANTOM_WALLET})!`);
   }
 
+  // 0. Inicialização do Decision Journal & Agendamento do Cron Noturno (03:00 UTC)
+  await journal.initSchema();
+  startCalibrationCron(pgPool);
+  runMaintenance(pgPool).catch(() => {});
+  setInterval(() => {
+    runMaintenance(pgPool).catch(() => {});
+  }, 24 * 60 * 60 * 1000);
+
   // 1. Reidratação da Quarentena do Banco (Fim da Amnésia pós-Deploy)
   await rehydrateQuarantineFromDbOnBoot();
 
@@ -955,6 +1121,19 @@ async function main() {
   // 5. Loop Independente de Scanner de Novos Tokens a cada 30s
   setInterval(executeAutonomousCycle, SCAN_INTERVAL_MS);
 }
+
+// 🛑 SHUTDOWN GRACIOSO (SIGTERM / SIGINT) — Esvazia o buffer do Decision Journal antes de sair
+process.on('SIGTERM', async () => {
+  console.log('🛑 [SIGTERM] Encerrando serviço e esvaziando buffer do Decision Journal...');
+  await journal.shutdown();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('🛑 [SIGINT] Encerrando serviço e esvaziando buffer do Decision Journal...');
+  await journal.shutdown();
+  process.exit(0);
+});
 
 main().catch(err => {
   console.error('❌ Falha fatal ao inicializar o agente:', err);

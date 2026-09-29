@@ -11,6 +11,8 @@ export interface RouteContext {
   sweepRent?: () => Promise<any>;
   panicToken?: (mint: string) => Promise<{ success: boolean; txid?: string; message?: string; error?: string }>;
   panicAll?: () => Promise<{ success: boolean; liquidationsCount: number; message?: string; error?: string }>;
+  runCalibration?: () => Promise<any>;
+  getSnapshots?: (limit: number) => Promise<any[]>;
 }
 
 /**
@@ -253,7 +255,58 @@ export async function handleApiRoutes(
     return true;
   }
 
-  // 8. Dashboard Web Terminal Visual
+  // 8. Rota de Calibração Manual (POST /api/calibration/run)
+  if (pathname === '/api/calibration/run' && method === 'POST') {
+    if (ctx.runCalibration) {
+      try {
+        const report = await ctx.runCalibration();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          mode: 'READ_ONLY',
+          summary: {
+            totalTrades: report.totalTrades,
+            totalDecisions: report.totalDecisions,
+            overallWinRate: report.overallWinRate,
+            overallEV: report.overallEV,
+            gateCount: report.gateMetrics?.length || 0,
+            warningCount: report.warnings?.length || 0,
+          },
+          gates: report.gateMetrics || [],
+          latency: report.latencyMetrics || [],
+          warnings: report.warnings || [],
+        }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err?.message || 'Falha ao executar calibração' }));
+      }
+    } else {
+      res.writeHead(501, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'runCalibration não configurado no contexto' }));
+    }
+    return true;
+  }
+
+  // 9. Rota de Consulta de Snapshots (GET /api/calibration/snapshots)
+  if (pathname === '/api/calibration/snapshots' && method === 'GET') {
+    const limit = Math.min(parseInt(parsedUrl.searchParams.get('limit') || '50', 10), 200);
+    if (ctx.getSnapshots) {
+      try {
+        const rows = await ctx.getSnapshots(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ snapshots: rows }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err?.message || 'Falha ao consultar snapshots' }));
+      }
+    } else {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ snapshots: [] }));
+    }
+    return true;
+  }
+
+  // 10. Dashboard Web Terminal Visual
   if ((pathname === '/' || pathname === '/dashboard') && method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(renderDashboardHtml(ctx.latestState));

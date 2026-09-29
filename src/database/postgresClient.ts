@@ -40,6 +40,10 @@ export class SolanaPostgresRepository {
     }
   }
 
+  public getPool(): Pool | null {
+    return this.pool;
+  }
+
   public async initTable(): Promise<void> {
     if (!this.pool || this.isTableInitialized) return;
 
