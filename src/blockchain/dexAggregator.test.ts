@@ -22,7 +22,7 @@ describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
     assert.ok(route.outAmount > 0);
   });
 
-  it('deve rejeitar swaps com slippage abusivo (> 500 bps / 5%) para evitar sandwich attack', async () => {
+  it('deve rejeitar swaps com slippage abusivo (> 750 bps / 7.5%) para evitar sandwich attack', async () => {
     const dex = new DexAggregatorService();
     await assert.rejects(
       async () => {
@@ -30,7 +30,7 @@ describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
           inputMint: SOL_MINT,
           outputMint: USDC_MINT,
           amountLamports: 100_000_000,
-          slippageBps: 600 // 6% -> Risco MEV
+          slippageBps: 800 // 8% -> Risco MEV excessivo (> 750 bps)
         });
       },
       /Slippage maximo excedido/

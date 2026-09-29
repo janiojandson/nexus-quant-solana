@@ -667,8 +667,8 @@ async function executeAutonomousCycle() {
     }
 
     // Ciclo 2: Scanner On-Chain (DexScreener)
-    console.log('🔍 [1/3 Scanner Descoberta] Buscando piscinas consolidadas (15-60m | Liquidez >= $20k)...');
-    const candidates = await scanner.scanSolanaTrends(20000);
+    console.log('🔍 [1/3 Scanner Descoberta] Buscando piscinas consolidadas (5-60m | Liquidez >= $15k)...');
+    const candidates = await scanner.scanSolanaTrends(15000);
     const { waiting, mature, technicalDiscards: scannerDiscards } = scanner.lastIncubatorStats;
 
     let technicalDiscardCount = scannerDiscards || 0;
@@ -704,7 +704,7 @@ async function executeAutonomousCycle() {
             isWeekend: [0, 6].includes(new Date().getUTCDay())
           },
           gateEvaluations: [
-            DecisionLogger.evaluateGate('MATURITY_AGE', tokenAgeMinutes >= 15, tokenAgeMinutes, 15),
+            DecisionLogger.evaluateGate('MATURITY_AGE', tokenAgeMinutes >= 5, tokenAgeMinutes, 5),
             DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', (token.liquidityUsd || 0) >= 15000, token.liquidityUsd, 15000)
           ],
           rejectionReason: classification.reason || 'Descarte por classificação técnica'
@@ -789,17 +789,17 @@ async function executeAutonomousCycle() {
         ? Number(((topCandidate.buysM5 || 0) / topCandidate.sellsM5).toFixed(2))
         : (topCandidate.buysM5 ? 2.0 : 1.0);
       const isPriceWindowValid = (topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 35;
-      const isBuyDominanceValid = buySellRatio >= 1.2;
+      const isBuyDominanceValid = buySellRatio >= 1.0;
       const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
 
       const gates: GateEvaluation[] = [
-        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 15, candidateAgeMinutes, 15),
+        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 5, candidateAgeMinutes, 5),
         DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
         DecisionLogger.evaluateGate('MINT_AUTHORITY', true),
         DecisionLogger.evaluateGate('FREEZE_AUTHORITY', true),
         DecisionLogger.evaluateGate('TOP_HOLDERS', true, 20, 20),
         DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 35),
-        DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.2),
+        DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.0),
         DecisionLogger.evaluateGate('SENTINEL_REGIME', isSentinelValid),
         DecisionLogger.evaluateGate('SLOT_AVAILABILITY', openPositions < MAX_CONCURRENT_POSITIONS, openPositions, MAX_CONCURRENT_POSITIONS),
         DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
@@ -874,7 +874,7 @@ async function executeAutonomousCycle() {
           },
           execution: {
             sizeSol: TRADE_AMOUNT_SOL,
-            estimatedSlippagePct: 5.0,
+            estimatedSlippagePct: 7.5,
           },
           gateEvaluations: gates,
         });
@@ -890,14 +890,14 @@ async function executeAutonomousCycle() {
         const dynamicAllocSol = TRADE_AMOUNT_SOL; // Exatamente 0.05 SOL por trade
         const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
 
-        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra com pré-voo ativo (${dynamicAllocSol} SOL | autoSlippage blindado)...`);
+        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra com pré-voo ativo (${dynamicAllocSol} SOL | autoSlippage 750bps)...`);
         const swapSim = await jupiterEngine.executeSwap({
           inputMint: 'So11111111111111111111111111111111111111112', // SOL
           outputMint: topCandidate.mint,
           amountLamports: tradeLamports,
           autoSlippage: true,
           autoSlippageCollisionUsdValue: 1000,
-          maxAutoSlippageBps: 500, // Teto máximo seguro contra sandwich (500 bps)
+          maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
           skipPreflight: false, // Ativa simulação pré-voo RPC para evitar gasto de taxas em erro 0x1789/6025
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()

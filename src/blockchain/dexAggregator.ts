@@ -23,7 +23,7 @@ export interface SwapQuoteResult {
 
 export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
-  public static readonly MAX_ALLOWED_SLIPPAGE_BPS = 500; // 5.0%
+  public static readonly MAX_ALLOWED_SLIPPAGE_BPS = 750; // 7.5%
 
   constructor(jupiterApiBaseUrl = process.env.JUPITER_API_URL || 'https://public.jupiterapi.com') {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl;
@@ -32,7 +32,7 @@ export class DexAggregatorService {
   public async getQuote(params: SwapQuoteParams): Promise<SwapQuoteResult> {
     const slippageBps = params.slippageBps ?? 50; // Padrão 0.5%
 
-    // Se autoSlippage estiver ativo, valida maxAutoSlippageBps (até 600 bps conforme solicitação)
+    // Se autoSlippage estiver ativo, valida maxAutoSlippageBps (até 750 bps)
     if (!params.autoSlippage && slippageBps > DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS) {
       throw new Error(`Slippage maximo excedido (${slippageBps} bps). Teto seguro contra sandwich MEV é ${DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS} bps.`);
     }
@@ -47,7 +47,7 @@ export class DexAggregatorService {
       if (params.autoSlippage) {
         queryParams.autoSlippage = true;
         queryParams.autoSlippageCollisionUsdValue = params.autoSlippageCollisionUsdValue ?? 1000;
-        queryParams.maxAutoSlippageBps = params.maxAutoSlippageBps ?? 600;
+        queryParams.maxAutoSlippageBps = params.maxAutoSlippageBps ?? 750;
       } else {
         queryParams.slippageBps = slippageBps;
       }

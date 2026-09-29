@@ -90,7 +90,7 @@ test('PositionExitEngine: deve disparar STOP_LOSS inicial a -6% antes da parcial
   assert.strictEqual(evalStop.shouldCloseAta, true);
 });
 
-test('PositionExitEngine: deve disparar TIME_STOP apos 15 minutos de estagnacao com PnL negativo e fechar ATA', () => {
+test('PositionExitEngine: deve disparar TIME_STOP apos 10 minutos de estagnacao com PnL negativo e fechar ATA', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestTimeStop';
   const now = Date.now();
@@ -99,12 +99,12 @@ test('PositionExitEngine: deve disparar TIME_STOP apos 15 minutos de estagnacao 
     symbol: 'TEST',
     tokenAmount: 1000,
     entryPriceUsd: 1.0,
-    entryTimestamp: now - (16 * 60 * 1000),
+    entryTimestamp: now - (11 * 60 * 1000),
     entrySol: 0.015,
     entryVolume5m: 1000
   });
 
-  // PnL = -4% (< -3%), volume estagnado -> deve encerrar aos 15min
+  // PnL = -4% (< -3%), volume estagnado -> deve encerrar aos 10min
   const evalTime = engine.evaluateExitBySol(mint, 0.0144, now, {
     currentVolume5m: 1000
   });
@@ -113,7 +113,7 @@ test('PositionExitEngine: deve disparar TIME_STOP apos 15 minutos de estagnacao 
   assert.strictEqual(evalTime.shouldCloseAta, true);
 });
 
-test('PositionExitEngine: deve estender TIME_STOP para 25min quando PnL > 0% apos 10min', () => {
+test('PositionExitEngine: deve estender TIME_STOP para 25min quando PnL > 0% apos 8min', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestTimeStopExtended';
   const now = Date.now();
@@ -122,12 +122,12 @@ test('PositionExitEngine: deve estender TIME_STOP para 25min quando PnL > 0% apo
     symbol: 'TEST',
     tokenAmount: 1000,
     entryPriceUsd: 1.0,
-    entryTimestamp: now - (16 * 60 * 1000),
+    entryTimestamp: now - (12 * 60 * 1000),
     entrySol: 0.015,
     entryVolume5m: 1000
   });
 
-  // PnL = +5% (> 0%), deve NÃO encerrar aos 16min (estendido para 25min)
+  // PnL = +5% (> 0%), deve NÃO encerrar aos 12min (estendido para 25min)
   const evalHold = engine.evaluateExitBySol(mint, 0.01575, now, {
     currentVolume5m: 1500
   });
@@ -135,7 +135,7 @@ test('PositionExitEngine: deve estender TIME_STOP para 25min quando PnL > 0% apo
   assert.strictEqual(evalHold.type, 'HOLD');
 
   // Mas deve encerrar aos 26min
-  const evalTimeout = engine.evaluateExitBySol(mint, 0.01575, now + (10 * 60 * 1000));
+  const evalTimeout = engine.evaluateExitBySol(mint, 0.01575, now + (14 * 60 * 1000));
   assert.strictEqual(evalTimeout.shouldExit, true);
   assert.strictEqual(evalTimeout.type, 'TIME_STOP');
 });

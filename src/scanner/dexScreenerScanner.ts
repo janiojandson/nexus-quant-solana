@@ -45,7 +45,7 @@ export class DexScreenerScanner {
 
   constructor(options?: ScannerOptions) {
     this.cooldownCache = new MintCooldownCache(5);
-    this.incubator = options?.incubator || new MaturityIncubator({ minMaturityMinutes: 15, maxMaturityMinutes: 60 });
+    this.incubator = options?.incubator || new MaturityIncubator({ minMaturityMinutes: 5, maxMaturityMinutes: 60 });
     this.fetchClient = options?.fetchClient || (async (url: string) => {
       const startTime = Date.now();
       try {
@@ -130,9 +130,9 @@ export class DexScreenerScanner {
           const poolCreatedAt = attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : nowTs;
           const ageMinutes = (nowTs - poolCreatedAt) / (60 * 1000);
 
-          if (ageMinutes < 15) {
-            // Token recém-nascido (< 15 min): NÃO descarta sumariamente!
-            // Envia para a Incubadora aguardar os 15 minutos pós-dump inicial.
+          if (ageMinutes < 5) {
+            // Token recém-nascido (< 5 min): NÃO descarta sumariamente!
+            // Envia para a Incubadora aguardar os 5 minutos pós-dump inicial.
             this.incubator.add({
               mint,
               poolAddress: attr.address || gp.id || '',
@@ -141,7 +141,7 @@ export class DexScreenerScanner {
               pairCreatedAt: poolCreatedAt
             }, nowTs);
           } else if (ageMinutes <= 60) {
-            // Se já tiver entre 15 e 60 minutos na captura: avalia imediatamente
+            // Se já tiver entre 5 e 60 minutos na captura: avalia imediatamente
             discoveredMints.add(mint);
             rawPairs.push({
               chainId: 'solana',
@@ -236,11 +236,11 @@ export class DexScreenerScanner {
         seenMints.add(mint);
 
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
-        // Filtro de maturidade estrita da piscina: janela aceita entre 15 e 60 minutos
+        // Filtro de maturidade estrita da piscina: janela aceita entre 5 e 60 minutos
         if (pairCreatedAt > 0 && !this.isMaturityValid(pairCreatedAt, now)) {
           technicalDiscards++;
           this.cooldownCache.recordRejection(mint);
-          console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Maturidade fora 15-60m | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
+          console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Maturidade fora 5-60m | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
 
@@ -334,12 +334,12 @@ export class DexScreenerScanner {
   }
 
   /**
-   * Valida se a idade da pool está entre 15 e 60 minutos (pós-dump inicial).
+   * Valida se a idade da pool está entre 5 e 60 minutos (pós-dump inicial).
    */
   public isMaturityValid(pairCreatedAt: number, now: number = Date.now()): boolean {
     if (!pairCreatedAt || pairCreatedAt <= 0) return false;
     const ageMs = now - pairCreatedAt;
-    const minMaturityMs = 15 * 60 * 1000;      // Mínimo 15 minutos
+    const minMaturityMs = 5 * 60 * 1000;       // Mínimo 5 minutos
     const maxMaturityMs = 60 * 60 * 1000;      // Máximo 60 minutos (1 hora)
     return ageMs >= minMaturityMs && ageMs <= maxMaturityMs;
   }

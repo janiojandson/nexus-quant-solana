@@ -20,7 +20,7 @@ export class MaturityIncubator {
   public readonly maxMaturityMs: number;
 
   constructor(options?: { minMaturityMinutes?: number; maxMaturityMinutes?: number }) {
-    this.minMaturityMs = (options?.minMaturityMinutes ?? 15) * 60 * 1000;
+    this.minMaturityMs = (options?.minMaturityMinutes ?? 5) * 60 * 1000;
     this.maxMaturityMs = (options?.maxMaturityMinutes ?? 60) * 60 * 1000;
   }
 

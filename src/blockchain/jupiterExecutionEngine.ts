@@ -73,7 +73,7 @@ export class JupiterExecutionEngine {
         slippageBps: req.slippageBps ?? 400,
         autoSlippage: useAutoSlippage,
         autoSlippageCollisionUsdValue: req.autoSlippageCollisionUsdValue ?? 1000,
-        maxAutoSlippageBps: req.maxAutoSlippageBps ?? 600
+        maxAutoSlippageBps: req.maxAutoSlippageBps ?? 750
       });
 
       // 2. Se for Modo Simulação (DRY RUN): Retorna sucesso teórico sem gastar SOL

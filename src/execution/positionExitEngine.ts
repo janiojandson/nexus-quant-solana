@@ -63,7 +63,7 @@ export class PositionExitEngine {
   private closedPositions: ClosedTrade[] = [];
   /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
   private peakSolValues = new Map<string, number>();
-  public static readonly DEFAULT_TIME_STOP_MS = 15 * 60 * 1000; // 15 minutos (hard limit condicional)
+  public static readonly DEFAULT_TIME_STOP_MS = 10 * 60 * 1000; // 10 minutos (hard limit ágil condicional)
   public static readonly DEFAULT_STOP_LOSS_PCT = -0.06;         // -6% Stop Loss Lógico (efetivo ~-8% a -9% com slippage)
   public static readonly BREAKEVEN_TRIGGER_PCT = 0.12;          // +12% ativa Breakeven (+1%)
   public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
@@ -356,8 +356,8 @@ export class PositionExitEngine {
         ? context.currentVolume5m > position.entryVolume5m * 1.05
         : false;
 
-      let effectiveTimeStopMs = maxDuration; // 15min hard limit
-      if (pnlPct > 0 && elapsedMinutes >= 10) {
+      let effectiveTimeStopMs = maxDuration; // 10min base
+      if (pnlPct > 0 && elapsedMinutes >= 8) {
         effectiveTimeStopMs = PositionExitEngine.EXTENDED_TIME_STOP_POSITIVE_MS; // 25min
       } else if (pnlPct >= -0.03 && pnlPct <= 0 && isVolumeGrowing) {
         effectiveTimeStopMs = PositionExitEngine.EXTENDED_TIME_STOP_NEUTRAL_MS;  // 20min

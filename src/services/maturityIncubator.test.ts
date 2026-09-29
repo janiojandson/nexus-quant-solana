@@ -2,9 +2,9 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import { MaturityIncubator } from './maturityIncubator.js';
 
-describe('MaturityIncubator - Pipeline de Maturação Ayla (15-60 min)', () => {
-  test('deve reter tokens com menos de 15 minutos na fila de incubação', () => {
-    const incubator = new MaturityIncubator({ minMaturityMinutes: 15, maxMaturityMinutes: 60 });
+describe('MaturityIncubator - Pipeline de Maturação Ayla (5-60 min)', () => {
+  test('deve reter tokens com menos de 5 minutos na fila de incubação', () => {
+    const incubator = new MaturityIncubator({ minMaturityMinutes: 5, maxMaturityMinutes: 60 });
     const now = Date.now();
 
     // Token criado há 2 minutos
@@ -26,22 +26,22 @@ describe('MaturityIncubator - Pipeline de Maturação Ayla (15-60 min)', () => {
     assert.strictEqual(expiredCount, 0);
   });
 
-  test('deve promover para maduro tokens entre 15 e 60 minutos', () => {
-    const incubator = new MaturityIncubator({ minMaturityMinutes: 15, maxMaturityMinutes: 60 });
+  test('deve promover para maduro tokens entre 5 e 60 minutos', () => {
+    const incubator = new MaturityIncubator({ minMaturityMinutes: 5, maxMaturityMinutes: 60 });
     const now = Date.now();
 
-    // Token criado há 25 minutos
+    // Token criado há 8 minutos
     incubator.add({
-      mint: 'MintMaduro25Min',
+      mint: 'MintMaduro8Min',
       poolAddress: 'PoolMadura1',
       symbol: 'MATURE',
-      pairCreatedAt: now - (25 * 60 * 1000)
+      pairCreatedAt: now - (8 * 60 * 1000)
     }, now);
 
     const { waiting, mature, expiredCount } = incubator.sweep(now);
     assert.strictEqual(waiting.length, 0);
     assert.strictEqual(mature.length, 1);
-    assert.strictEqual(mature[0].mint, 'MintMaduro25Min');
+    assert.strictEqual(mature[0].mint, 'MintMaduro8Min');
     assert.strictEqual(expiredCount, 0);
   });
 
