@@ -121,6 +121,74 @@ export class CerebroIntegrationService {
   }
 
   /**
+   * Envia o Morning Briefing diário com telemetria quantitativa factual
+   */
+  public async notifyMorningBriefing(briefing: {
+    totalTrades: number;
+    totalDecisions: number;
+    winRate: number;
+    overallEV: number;
+    rugVetoesCount: number;
+    walletBalanceSol?: number;
+    warnings: string[];
+  }): Promise<boolean> {
+    const lines = [
+      `🌅 <b>[NEXUS QUANT SOLANA] — MORNING BRIEFING DIÁRIO</b>`,
+      `📅 <b>Data (UTC):</b> ${new Date().toISOString().slice(0, 10)}`,
+      `💰 <b>Saldo Carteira:</b> ${briefing.walletBalanceSol !== undefined ? `${briefing.walletBalanceSol.toFixed(4)} SOL` : 'N/A'}`,
+      ``,
+      `📊 <b>Telemetria de Operação:</b>`,
+      `• Decisões Avaliadas: <b>${briefing.totalDecisions}</b>`,
+      `• Trades Executados: <b>${briefing.totalTrades}</b>`,
+      `• Win Rate: <b>${(briefing.winRate * 100).toFixed(1)}%</b>`,
+      `• Expectância Líquida (EV): <b>${briefing.overallEV >= 0 ? '+' : ''}${briefing.overallEV.toFixed(2)}%</b>`,
+      `• Vetos Anti-Rug (RugCheck): <b>${briefing.rugVetoesCount} defesas de capital</b>`,
+    ];
+
+    if (briefing.warnings.length > 0) {
+      lines.push(``, `⚠️ <b>Avisos da Calibração:</b>`);
+      briefing.warnings.forEach(w => lines.push(`• ${w}`));
+    }
+
+    lines.push(``, `🔒 <i>Relatório factual gerado pelo cron de calibração. Motor em operação segura.</i>`);
+
+    const message = lines.join('\n');
+
+    if (this.botToken && this.chatId) {
+      try {
+        await axios.post(
+          `https://api.telegram.org/bot${this.botToken}/sendMessage`,
+          {
+            chat_id: this.chatId,
+            text: message,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+          },
+          { timeout: 5000 }
+        );
+        return true;
+      } catch (err: any) {
+        console.warn(`⚠️ [Telegram Direct] Falha ao enviar morning briefing:`, err?.message || err);
+      }
+    }
+
+    try {
+      await axios.post(
+        `${this.cerebroUrl}/v1/comunicacao/notificar`,
+        {
+          canal: 'telegram',
+          mensagem: message,
+          contexto: 'SOLANA_MORNING_BRIEFING'
+        },
+        { timeout: 3000 }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Consulta o Cérebro / OmniRoute para análise LLM sob demanda
    */
   public async askOmniRoute(prompt: string): Promise<string | null> {
@@ -139,3 +207,4 @@ export class CerebroIntegrationService {
     }
   }
 }
+
