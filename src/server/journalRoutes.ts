@@ -23,6 +23,44 @@ export async function handleJournalRoutes(
   }
 
   // ──────────────────────────────────────────────
+  // Auditoria Detalhada dos Gates Rejeitados — GET /api/journal/rejections
+  // ──────────────────────────────────────────────
+  if (pathname === '/api/journal/rejections' && method === 'GET') {
+    if (!pgPool) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ rejections: [] }));
+      return true;
+    }
+
+    try {
+      const q = await pgPool.query(`
+        SELECT
+          gate_details->0->>'gate' as first_gate,
+          gate_details->0->>'result' as first_result,
+          gate_details->0->>'value' as actual_value,
+          gate_details->0->>'threshold' as required_threshold,
+          rejection_reason,
+          token_age_minutes,
+          liquidity_usd,
+          token_symbol,
+          mint,
+          gate_details,
+          created_at
+        FROM decision_journal
+        ORDER BY created_at DESC
+        LIMIT 10;
+      `);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ rejections: q.rows }, null, 2));
+    } catch (err: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err?.message || 'Falha ao buscar auditoria de rejeições' }));
+    }
+    return true;
+  }
+
+  // ──────────────────────────────────────────────
   // CARD 1: Funil de Coleta — GET /api/journal/stats
   // ──────────────────────────────────────────────
   if (pathname === '/api/journal/stats' && method === 'GET') {

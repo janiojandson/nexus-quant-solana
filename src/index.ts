@@ -661,6 +661,11 @@ async function executeAutonomousCycle() {
     const eligibleCandidates: typeof candidates = [];
 
     for (const token of candidates) {
+      const nowTs = Date.now();
+      const tokenAgeMinutes = token.pairCreatedAt
+        ? Math.max(0, Math.floor((nowTs - token.pairCreatedAt) / 60000))
+        : 0;
+
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
       if (!classification.isEligibleForMemeScan) {
         technicalDiscardCount++;
@@ -672,6 +677,7 @@ async function executeAutonomousCycle() {
             mint: token.mint,
             tokenSymbol: token.symbol,
             poolAddress: (token as any).pairAddress,
+            ageMinutes: tokenAgeMinutes,
             liquidityUsd: token.liquidityUsd,
             priceUsd: token.priceUsd,
             priceChange5mPct: token.priceChangeM5,
@@ -683,7 +689,7 @@ async function executeAutonomousCycle() {
             isWeekend: [0, 6].includes(new Date().getUTCDay())
           },
           gateEvaluations: [
-            DecisionLogger.evaluateGate('MATURITY_AGE', ((token as any).ageMinutes || 0) >= 15, (token as any).ageMinutes, 15),
+            DecisionLogger.evaluateGate('MATURITY_AGE', tokenAgeMinutes >= 15, tokenAgeMinutes, 15),
             DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', (token.liquidityUsd || 0) >= 15000, token.liquidityUsd, 15000)
           ],
           rejectionReason: classification.reason || 'Descarte por classificação técnica'
@@ -761,6 +767,9 @@ async function executeAutonomousCycle() {
 
       // Avaliação detalhada dos 9 gates para o Decision Journal
       const openPositions = positionEngine.getAllPositions().length;
+      const candidateAgeMinutes = topCandidate.pairCreatedAt
+        ? Math.max(0, Math.floor((Date.now() - topCandidate.pairCreatedAt) / 60000))
+        : 0;
       const buySellRatio = topCandidate.sellsM5 && topCandidate.sellsM5 > 0
         ? Number(((topCandidate.buysM5 || 0) / topCandidate.sellsM5).toFixed(2))
         : (topCandidate.buysM5 ? 2.0 : 1.0);
@@ -769,6 +778,7 @@ async function executeAutonomousCycle() {
       const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
 
       const gates: GateEvaluation[] = [
+        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 15, candidateAgeMinutes, 15),
         DecisionLogger.evaluateGate('MINT_AUTHORITY', true),
         DecisionLogger.evaluateGate('FREEZE_AUTHORITY', true),
         DecisionLogger.evaluateGate('TOP_HOLDERS', true, 20, 20),
@@ -803,6 +813,7 @@ async function executeAutonomousCycle() {
             mint: topCandidate.mint,
             tokenSymbol: topCandidate.symbol,
             poolAddress: (topCandidate as any).pairAddress,
+            ageMinutes: candidateAgeMinutes,
             liquidityUsd: topCandidate.liquidityUsd,
             priceUsd: topCandidate.priceUsd,
             priceChange5mPct: topCandidate.priceChangeM5,
@@ -831,6 +842,7 @@ async function executeAutonomousCycle() {
             mint: topCandidate.mint,
             tokenSymbol: topCandidate.symbol,
             poolAddress: (topCandidate as any).pairAddress,
+            ageMinutes: candidateAgeMinutes,
             liquidityUsd: topCandidate.liquidityUsd,
             priceUsd: topCandidate.priceUsd,
             priceChange5mPct: topCandidate.priceChangeM5,
