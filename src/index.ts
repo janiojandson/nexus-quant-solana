@@ -1086,7 +1086,11 @@ async function main() {
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');
   console.log(`🪙 Carteira Phantom Oficial: ${OFFICIAL_PHANTOM_WALLET}`);
-  console.log(`🛡️ Modo Operacional: ${IS_DRY_RUN ? 'SIMULAÇÃO ATIVA (DRY-RUN 🟢)' : 'EXECUÇÃO REAL ON-CHAIN ⚠️'}`);
+  console.log(
+    IS_DRY_RUN
+      ? '⚠️ [MODO SIMULADO] DRY_RUN ativo. Swaps reais bloqueados.'
+      : '🚀 [MODO REAL ON-CHAIN] Jupiter Swap armado para execução real em SOL.'
+  );
   console.log(`⏱️ Intervalo de Varredura: ${SCAN_INTERVAL_MS / 1000}s`);
   console.log(`⚡ Ultra-Fast Exit Monitor: ${FAST_EXIT_INTERVAL_MS}ms (Jupiter Quote Direto)`);
   console.log(`🎯 Modo Sniper: MAX_CONCURRENT_POSITIONS = ${MAX_CONCURRENT_POSITIONS}`);

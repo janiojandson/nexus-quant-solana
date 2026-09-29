@@ -231,31 +231,32 @@ export class MemeRiskGatekeeper {
 
     // 2. Dominância de Compradores (Order Flow nos 5m: transações e volumes recentes)
     if (pair.buysM5 !== undefined && pair.sellsM5 !== undefined) {
-      const minRequiredBuys = pair.sellsM5 * 1.2;
+      const minRequiredBuys = pair.sellsM5 * 1.0;
       if (pair.buysM5 < minRequiredBuys) {
         return {
           valid: false,
-          reason: `Ayla Veto: Pressão vendedora dominante (Compras: ${pair.buysM5} < ${minRequiredBuys.toFixed(1)} [exigido 1.2x vendas: ${pair.sellsM5}])`
+          reason: `Ayla Veto: Pressão vendedora dominante (Compras: ${pair.buysM5} < ${minRequiredBuys.toFixed(1)} [exigido paridade: ${pair.sellsM5}])`
         };
       }
     }
 
     if (pair.volumeBuysM5 !== undefined && pair.volumeSellsM5 !== undefined && (pair.volumeBuysM5 + pair.volumeSellsM5 > 0)) {
-      if (pair.volumeBuysM5 <= pair.volumeSellsM5) {
+      const buyVolumeRatio = pair.volumeBuysM5 / (pair.volumeBuysM5 + pair.volumeSellsM5);
+      if (buyVolumeRatio < 0.45) {
         return {
           valid: false,
-          reason: `Ayla Veto: Pressão vendedora dominante (Vol Compras: $${pair.volumeBuysM5.toFixed(0)} <= Vol Vendas: $${pair.volumeSellsM5.toFixed(0)})`
+          reason: `Ayla Veto: Volume comprador insuficiente (${(buyVolumeRatio * 100).toFixed(1)}% < 45% do total)`
         };
       }
     }
 
-    // 3. Filtro Anti-Faca Caindo (Queda Pós-Topo h1: preço atual >= 70% da máxima h1)
+    // 3. Filtro Anti-Faca Caindo (Queda Pós-Topo h1: preço atual >= 65% da máxima h1)
     if (pair.priceUsd !== undefined && pair.h1HighPriceUsd !== undefined && pair.h1HighPriceUsd > 0) {
       const ratioFromHigh = pair.priceUsd / pair.h1HighPriceUsd;
-      if (ratioFromHigh < 0.70) {
+      if (ratioFromHigh < 0.65) {
         return {
           valid: false,
-          reason: `Ayla Veto: Ativo em distribuição pós-topo (Preço $${pair.priceUsd} é ${(ratioFromHigh * 100).toFixed(1)}% da máxima h1 $${pair.h1HighPriceUsd} < 70%)`
+          reason: `Ayla Veto: Ativo em distribuição pós-topo (Preço $${pair.priceUsd} é ${(ratioFromHigh * 100).toFixed(1)}% da máxima h1 $${pair.h1HighPriceUsd} < 65%)`
         };
       }
     }

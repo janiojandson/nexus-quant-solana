@@ -15,6 +15,7 @@ export interface IncubatorSweepResult {
 
 export class MaturityIncubator {
   private queue = new Map<string, IncubatedToken>();
+  private maxQueueSize = 500;
   public readonly minMaturityMs: number;
   public readonly maxMaturityMs: number;
 
@@ -30,6 +31,11 @@ export class MaturityIncubator {
     if (!token.mint) return false;
     if (this.queue.has(token.mint)) {
       return false; // Já está na incubadora
+    }
+
+    if (this.queue.size >= this.maxQueueSize) {
+      const oldestKey = this.queue.keys().next().value;
+      if (oldestKey) this.queue.delete(oldestKey);
     }
 
     this.queue.set(token.mint, {

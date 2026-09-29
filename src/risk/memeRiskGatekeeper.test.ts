@@ -103,7 +103,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     assert.match(audit.reason || '', /Ayla Veto: Preço esticado demais, risco de topo/);
   });
 
-  it('deve rejeitar token com order flow insuficiente (buys < sells * 1.2)', async () => {
+  it('deve rejeitar token com order flow insuficiente (buys < sells)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeVendedores5m',
@@ -112,8 +112,8 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       freezeAuthority: null,
       holdersCount: 200,
       priceChangeM5: 10.0,
-      buysM5: 11,
-      sellsM5: 10 // buys 11 < 10 * 1.2 = 12
+      buysM5: 9,
+      sellsM5: 10 // buys 9 < sells 10 (paridade)
     };
 
     const audit = await gatekeeper.auditToken(token);
@@ -121,7 +121,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     assert.match(audit.reason || '', /Ayla Veto: Pressão vendedora dominante/);
   });
 
-  it('deve rejeitar token se volume de vendas for maior ou igual ao de compras', async () => {
+  it('deve rejeitar token se volume comprador for menor que 45% do total', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeVolVendedor',
@@ -133,15 +133,15 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       buysM5: 25,
       sellsM5: 10,
       volumeBuysM5: 4000,
-      volumeSellsM5: 5000 // Volume vendedor maior
+      volumeSellsM5: 5000 // 4000 / 9000 = 44.4% < 45%
     };
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Pressão vendedora dominante/);
+    assert.match(audit.reason || '', /Ayla Veto: Volume comprador insuficiente/);
   });
 
-  it('deve rejeitar token se preço atual estiver a menos de 70% da máxima h1 (queda pós-topo)', async () => {
+  it('deve rejeitar token se preço atual estiver a menos de 65% da máxima h1 (queda pós-topo)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeFacaCaindo',
@@ -152,8 +152,8 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       priceChangeM5: 8.0,
       buysM5: 30,
       sellsM5: 10,
-      priceUsd: 0.065,
-      h1HighPriceUsd: 0.100 // 0.065 / 0.100 = 65% < 70%
+      priceUsd: 0.060,
+      h1HighPriceUsd: 0.100 // 0.060 / 0.100 = 60% < 65%
     };
 
     const audit = await gatekeeper.auditToken(token);

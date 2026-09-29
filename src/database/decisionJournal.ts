@@ -144,6 +144,7 @@ export class DecisionLogger {
   private buffer: BufferedItem[] = [];
   private flushIntervalMs: number;
   private maxBufferSize: number;
+  private maxBufferMemoryItems = 1000;
   private flushTimer: NodeJS.Timeout | null = null;
   private isFlushing = false;
   private totalLogged = 0;
@@ -176,9 +177,12 @@ export class DecisionLogger {
     this.buffer.push({ type: 'decision', payload: entry });
     this.totalLogged++;
 
-    // Flush imediato se o buffer atingir o limite
+    if (this.buffer.length > this.maxBufferMemoryItems) {
+      this.buffer.splice(0, this.buffer.length - this.maxBufferMemoryItems);
+    }
+
     if (this.buffer.length >= this.maxBufferSize) {
-      void this.flush(); // fire-and-forget
+      void this.flush();
     }
   }
 
