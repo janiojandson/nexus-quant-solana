@@ -779,6 +779,7 @@ async function executeAutonomousCycle() {
 
       const gates: GateEvaluation[] = [
         DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 15, candidateAgeMinutes, 15),
+        DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
         DecisionLogger.evaluateGate('MINT_AUTHORITY', true),
         DecisionLogger.evaluateGate('FREEZE_AUTHORITY', true),
         DecisionLogger.evaluateGate('TOP_HOLDERS', true, 20, 20),

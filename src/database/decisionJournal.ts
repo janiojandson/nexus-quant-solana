@@ -35,7 +35,8 @@ export type GateName =
   | 'SLOT_AVAILABILITY'
   | 'DISTANCE_FROM_LOW'
   | 'SLIPPAGE_CHECK'
-  | 'LATENCY_ABORT';
+  | 'LATENCY_ABORT'
+  | 'RUG_CHECK';
 
 export type GateResult = 'PASS' | 'FAIL' | 'WARN';
 
@@ -263,8 +264,13 @@ export class DecisionLogger {
           CREATE TYPE gate_name AS ENUM (
             'MATURITY_AGE', 'LIQUIDITY_THRESHOLD', 'MINT_AUTHORITY', 'FREEZE_AUTHORITY',
             'TOP_HOLDERS', 'PRICE_WINDOW', 'BUY_DOMINANCE', 'SENTINEL_REGIME',
-            'SLOT_AVAILABILITY', 'DISTANCE_FROM_LOW', 'SLIPPAGE_CHECK', 'LATENCY_ABORT'
+            'SLOT_AVAILABILITY', 'DISTANCE_FROM_LOW', 'SLIPPAGE_CHECK', 'LATENCY_ABORT',
+            'RUG_CHECK'
           );
+        EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+        DO $$ BEGIN
+          ALTER TYPE gate_name ADD VALUE IF NOT EXISTS 'RUG_CHECK';
         EXCEPTION WHEN duplicate_object THEN null; END $$;
 
         DO $$ BEGIN
