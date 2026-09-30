@@ -8,6 +8,144 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Pool } from 'pg';
 import type { DecisionLogger } from '../database/decisionJournal.js';
 
+export interface CategoryBreakdown {
+  category: string;
+  label: string;
+  total: number;
+  pct: number;
+}
+
+export function categorizeReason(reason: string | null | undefined, decision: string): string {
+  if (decision === 'ENTRY_APPROVED') return 'APROVADO';
+  if (!reason) return 'OUTROS';
+  const r = reason.toLowerCase();
+  if (r.includes('rugcheck') || r.includes('lp unlocked') || r.includes('holder') || r.includes('mintauthority') || r.includes('freezeauthority') || r.includes('honeypot')) {
+    return 'RUGCHECK';
+  }
+  if (r.includes('pressão vendedora') || r.includes('b/s') || r.includes('volume comprador') || r.includes('order flow') || r.includes('agressao')) {
+    return 'ORDER_FLOW_BS';
+  }
+  if (r.includes('sangria') || r.includes('esticado') || r.includes('m5') || r.includes('momentum') || r.includes('distribuição pós-topo') || r.includes('faca')) {
+    return 'MOMENTUM_M5';
+  }
+  if (r.includes('swap') || r.includes('simulação') || r.includes('6014') || r.includes('0x177e') || r.includes('slippage')) {
+    return 'JUPITER_SLIPPAGE';
+  }
+  if (r.includes('maturidade') || r.includes('idade')) {
+    return 'MATURIDADE';
+  }
+  if (r.includes('liquidez') || r.includes('liq')) {
+    return 'LIQUIDEZ';
+  }
+  return 'OUTROS';
+}
+
+const CATEGORY_META: Record<string, { label: string; icon: string }> = {
+  'RUGCHECK': { label: 'RugCheck', icon: '🔴' },
+  'ORDER_FLOW_BS': { label: 'Fluxo B/S', icon: '🟡' },
+  'JUPITER_SLIPPAGE': { label: 'Simulação Jupiter', icon: '🟣' },
+  'MOMENTUM_M5': { label: 'Momentum M5', icon: '🔵' },
+  'LIQUIDEZ': { label: 'Liquidez Baixa', icon: '🟠' },
+  'MATURIDADE': { label: 'Maturidade Fora', icon: '⏳' },
+  'APROVADO': { label: 'Aprovado', icon: '🟢' },
+  'OUTROS': { label: 'Outros Filtros', icon: '⚪' },
+};
+
+export async function fetchAuditData(pgPool: Pool | null): Promise<{
+  totalDecisions: number;
+  categoriesBreakdown: CategoryBreakdown[];
+  reasonRanking: Array<{ rejection_reason: string; decision: string; total: number }>;
+  recentDecisions: Array<{
+    timestamp: string;
+    token_symbol: string;
+    mint: string;
+    decision: string;
+    composite_score: number | null;
+    rejection_reason: string | null;
+    liquidity_usd: number | null;
+    price_change_5m_pct: number | null;
+    token_age_minutes: number | null;
+  }>;
+}> {
+  if (!pgPool) {
+    return {
+      totalDecisions: 0,
+      categoriesBreakdown: [],
+      reasonRanking: [],
+      recentDecisions: [],
+    };
+  }
+
+  const [rankingRes, recentRes, totalRes] = await Promise.all([
+    pgPool.query(`
+      SELECT 
+        COALESCE(rejection_reason, 'Aprovado / Sem veto') as rejection_reason, 
+        decision, 
+        COUNT(*) as total 
+      FROM decision_journal 
+      GROUP BY rejection_reason, decision 
+      ORDER BY total DESC
+      LIMIT 15
+    `),
+    pgPool.query(`
+      SELECT 
+        created_at as timestamp, 
+        token_symbol, 
+        mint, 
+        decision, 
+        composite_score,
+        rejection_reason, 
+        liquidity_usd,
+        price_change_5m_pct,
+        token_age_minutes
+      FROM decision_journal 
+      ORDER BY created_at DESC 
+      LIMIT 25
+    `),
+    pgPool.query('SELECT COUNT(*) as count FROM decision_journal')
+  ]);
+
+  const totalDecisions = parseInt(totalRes.rows[0]?.count || '0', 10);
+
+  // Calcula agregação por categoria
+  const catCounts: Record<string, number> = {};
+  for (const row of rankingRes.rows) {
+    const cat = categorizeReason(row.rejection_reason, row.decision);
+    catCounts[cat] = (catCounts[cat] || 0) + parseInt(row.total, 10);
+  }
+
+  const categoriesBreakdown: CategoryBreakdown[] = Object.entries(catCounts).map(([cat, cnt]) => {
+    const meta = CATEGORY_META[cat] || { label: cat, icon: '⚪' };
+    return {
+      category: cat,
+      label: `${meta.icon} ${meta.label}`,
+      total: cnt,
+      pct: totalDecisions > 0 ? Number(((cnt / totalDecisions) * 100).toFixed(1)) : 0,
+    };
+  }).sort((a, b) => b.total - a.total);
+
+  return {
+    totalDecisions,
+    categoriesBreakdown,
+    reasonRanking: rankingRes.rows.map(r => ({
+      rejection_reason: r.rejection_reason,
+      decision: r.decision,
+      total: parseInt(r.total, 10),
+    })),
+    recentDecisions: recentRes.rows.map(r => ({
+      timestamp: r.timestamp,
+      token_symbol: r.token_symbol || 'UNKNOWN',
+      mint: r.mint,
+      decision: r.decision,
+      composite_score: r.composite_score != null ? Number(r.composite_score) : null,
+      rejection_reason: r.rejection_reason,
+      liquidity_usd: r.liquidity_usd != null ? Number(r.liquidity_usd) : null,
+      price_change_5m_pct: r.price_change_5m_pct != null ? Number(r.price_change_5m_pct) : null,
+      token_age_minutes: r.token_age_minutes != null ? Number(r.token_age_minutes) : null,
+    }))
+  };
+}
+
 export async function handleJournalRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -18,8 +156,25 @@ export async function handleJournalRoutes(
   const pathname = parsedUrl.pathname;
   const method = req.method || 'GET';
 
-  if (!pathname.startsWith('/api/journal')) {
+  const isAuditPath = pathname === '/api/decisions/audit' || pathname === '/api/audit' || pathname === '/api/journal/audit';
+
+  if (!pathname.startsWith('/api/journal') && !isAuditPath) {
     return false;
+  }
+
+  // ──────────────────────────────────────────────
+  // Rota de Auditoria do Ledger — GET/POST /api/decisions/audit ou /api/audit
+  // ──────────────────────────────────────────────
+  if (isAuditPath && (method === 'GET' || method === 'POST')) {
+    try {
+      const data = await fetchAuditData(pgPool);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, ...data }, null, 2));
+    } catch (err: any) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err?.message || 'Falha ao buscar auditoria de decisões' }));
+    }
+    return true;
   }
 
   // ──────────────────────────────────────────────
@@ -48,7 +203,7 @@ export async function handleJournalRoutes(
           created_at
         FROM decision_journal
         ORDER BY created_at DESC
-        LIMIT 10;
+        LIMIT 25;
       `);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -71,6 +226,8 @@ export async function handleJournalRoutes(
         totalClosedTrades: 0,
         targetN: 150,
         decisionBreakdown: [],
+        categoriesBreakdown: [],
+        recentDecisions: [],
         buffer: journal ? journal.getStats() : { bufferSize: 0, totalLogged: 0, totalFlushed: 0, totalErrors: 0 },
         progressPct: 0,
       }));
@@ -78,7 +235,7 @@ export async function handleJournalRoutes(
     }
 
     try {
-      const [decisions, trades, rejBuffer] = await Promise.all([
+      const [decisions, trades, rejBuffer, auditData] = await Promise.all([
         pgPool.query('SELECT COUNT(*) FROM decision_journal'),
         pgPool.query(`
           SELECT COUNT(*) FROM trade_outcomes
@@ -90,6 +247,7 @@ export async function handleJournalRoutes(
           GROUP BY decision
           ORDER BY total DESC
         `),
+        fetchAuditData(pgPool)
       ]);
 
       const bufferStats = journal ? journal.getStats() : { bufferSize: 0, totalLogged: 0, totalFlushed: 0, totalErrors: 0 };
@@ -102,6 +260,8 @@ export async function handleJournalRoutes(
         totalClosedTrades,
         targetN: 150,
         decisionBreakdown: rejBuffer.rows.map(r => ({ decision: r.decision, total: parseInt(r.total, 10) })),
+        categoriesBreakdown: auditData.categoriesBreakdown,
+        recentDecisions: auditData.recentDecisions,
         buffer: bufferStats,
         progressPct: Math.min(100, Math.round((totalClosedTrades / 150) * 100)),
       }));
@@ -121,13 +281,14 @@ export async function handleJournalRoutes(
       res.end(JSON.stringify({
         lastCalibrationAt: null,
         gates: [],
+        recentDecisions: [],
         summary: { keep: 0, adjust: 0, remove: 0, waiting: 0 },
       }));
       return true;
     }
 
     try {
-      const [gatesRes, lastRunRes] = await Promise.all([
+      const [gatesRes, lastRunRes, auditData] = await Promise.all([
         pgPool.query(`
           SELECT
             gate_name,
@@ -152,6 +313,7 @@ export async function handleJournalRoutes(
           SELECT MAX(computed_at) as last_run
           FROM calibration_snapshots
         `),
+        fetchAuditData(pgPool)
       ]);
 
       const gates = gatesRes.rows.map(g => ({
@@ -170,6 +332,7 @@ export async function handleJournalRoutes(
       res.end(JSON.stringify({
         lastCalibrationAt: lastRunRes.rows[0]?.last_run || null,
         gates,
+        recentDecisions: auditData.recentDecisions,
         summary: {
           keep: gates.filter(g => g.gate_verdict === 'KEEP').length,
           adjust: gates.filter(g => ['LOOSEN', 'TIGHTEN'].includes(g.gate_verdict)).length,

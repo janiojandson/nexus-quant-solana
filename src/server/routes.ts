@@ -47,8 +47,12 @@ export async function handleApiRoutes(
     return true;
   }
 
-  // 0. Rotas Especializadas do Decision Journal & Calibração v2.5.0
-  if (pathname.startsWith('/api/journal')) {
+  // 0. Rotas Especializadas do Decision Journal, Auditoria do Ledger & Calibração
+  if (
+    pathname.startsWith('/api/journal') ||
+    pathname === '/api/decisions/audit' ||
+    pathname === '/api/audit'
+  ) {
     const handledJournal = await handleJournalRoutes(req, res, ctx.pgPool ?? null, ctx.journal ?? null);
     if (handledJournal) return true;
   }

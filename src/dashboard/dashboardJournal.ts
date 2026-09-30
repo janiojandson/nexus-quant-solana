@@ -18,7 +18,7 @@ export function renderJournalSection(): string {
       <span class="text-xs text-slate-400 font-mono">Telemetria Quantitativa On-Chain</span>
     </div>
 
-    <!-- ── CARD 1: FUNIL DE COLETA ── -->
+    <!-- ── CARD 1: FUNIL DE COLETA & DISTRIBUIÇÃO DO LEDGER ── -->
     <div id="card-funnel" class="bg-slate-900/80 rounded-2xl p-5 border border-purple-900/30 shadow-xl backdrop-blur-sm">
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-sm font-bold text-slate-200 flex items-center gap-2">
@@ -77,10 +77,21 @@ export function renderJournalSection(): string {
       </div>
 
       <!-- Breakdown por Tipo de Decisão -->
-      <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/80">
+      <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/80 mb-3">
         <div class="text-xs text-slate-400 mb-2 font-medium">Distribuição de Decisões no Ledger:</div>
         <div id="dj-decision-breakdown" class="flex flex-wrap gap-2">
           <span class="text-slate-600 text-xs">Carregando telemetria...</span>
+        </div>
+      </div>
+
+      <!-- Breakdown por Categoria de Filtro / Veto -->
+      <div class="bg-slate-950/60 rounded-xl p-3 border border-slate-800/80">
+        <div class="text-xs text-slate-400 mb-2 font-medium flex items-center justify-between">
+          <span>Distribuição Percentual de Motivos de Descarte & Aprovação:</span>
+          <span class="text-[10px] text-purple-400 font-mono">Forensic Analysis</span>
+        </div>
+        <div id="dj-categories-breakdown" class="flex flex-wrap gap-2">
+          <span class="text-slate-600 text-xs">Aguardando dados de agregação...</span>
         </div>
       </div>
 
@@ -92,34 +103,32 @@ export function renderJournalSection(): string {
       </button>
     </div>
 
-    <!-- ── CARD 2: LIFT POR GATE ── -->
+    <!-- ── CARD 2: LIFT POR GATE / AUDITORIA FORENSE DE DECISÕES ── -->
     <div id="card-gates" class="bg-slate-900/80 rounded-2xl p-5 border border-purple-900/30 shadow-xl backdrop-blur-sm">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-3">
         <h3 class="text-sm font-bold text-slate-200 flex items-center gap-2">
-          <span>🧮 Lift por Gate — Eficiência dos Filtros</span>
+          <span id="dj-gates-title">🧮 Auditoria do Ledger — Últimas 25 Decisões</span>
         </h3>
         <div id="dj-gates-header" class="text-xs text-slate-400 font-mono">
-          Aguardando primeira calibração...
+          Carregando ledger...
         </div>
       </div>
 
       <div class="overflow-x-auto rounded-xl border border-slate-800">
         <table class="w-full text-xs text-left">
-          <thead class="bg-slate-950/90 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800">
+          <thead id="dj-gates-thead" class="bg-slate-950/90 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800">
             <tr>
-              <th class="py-2.5 px-3">Gate</th>
-              <th class="py-2.5 px-2 text-right">N</th>
-              <th class="py-2.5 px-2 text-right">WR%</th>
-              <th class="py-2.5 px-2 text-right">EV%</th>
-              <th class="py-2.5 px-2 text-right">Lift%</th>
-              <th class="py-2.5 px-2 text-right">IC 95%</th>
-              <th class="py-2.5 px-3 text-center">Verdict</th>
+              <th class="py-2.5 px-3">Horário (BRT)</th>
+              <th class="py-2.5 px-3">Token / Mint</th>
+              <th class="py-2.5 px-2 text-center">Decisão</th>
+              <th class="py-2.5 px-2 text-center">Métricas</th>
+              <th class="py-2.5 px-3">Motivo Detalhado / Veredito</th>
             </tr>
           </thead>
           <tbody id="dj-gates-body" class="divide-y divide-slate-800/60 font-mono">
             <tr>
-              <td colspan="7" class="text-center text-slate-500 py-6 font-sans">
-                Sem dados de calibração ainda. Execute a auditoria manual ou aguarde o ciclo de 03:00 UTC...
+              <td colspan="5" class="text-center text-slate-500 py-6 font-sans">
+                Carregando decisões do Decision Journal...
               </td>
             </tr>
           </tbody>
@@ -127,22 +136,22 @@ export function renderJournalSection(): string {
       </div>
 
       <!-- Resumo de Verdicts -->
-      <div class="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+      <div id="dj-summary-cards" class="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
         <div class="bg-emerald-950/30 border border-emerald-800/50 rounded-xl p-2.5 text-center">
           <div id="dj-keep-count" class="text-emerald-400 font-black text-xl font-mono">0</div>
-          <div class="text-emerald-500 font-medium mt-0.5">KEEP</div>
-        </div>
-        <div class="bg-amber-950/30 border border-amber-800/50 rounded-xl p-2.5 text-center">
-          <div id="dj-adjust-count" class="text-amber-400 font-black text-xl font-mono">0</div>
-          <div class="text-amber-500 font-medium mt-0.5">AJUSTE</div>
+          <div class="text-emerald-500 font-medium mt-0.5">APROVADAS</div>
         </div>
         <div class="bg-rose-950/30 border border-rose-800/50 rounded-xl p-2.5 text-center">
-          <div id="dj-remove-count" class="text-rose-400 font-black text-xl font-mono">0</div>
-          <div class="text-rose-500 font-medium mt-0.5">REVISAR</div>
+          <div id="dj-adjust-count" class="text-rose-400 font-black text-xl font-mono">0</div>
+          <div class="text-rose-500 font-medium mt-0.5">REJEITADAS</div>
+        </div>
+        <div class="bg-purple-950/30 border border-purple-800/50 rounded-xl p-2.5 text-center">
+          <div id="dj-remove-count" class="text-purple-400 font-black text-xl font-mono">0</div>
+          <div class="text-purple-500 font-medium mt-0.5">RUGCHECK</div>
         </div>
         <div class="bg-slate-800/40 border border-slate-700/50 rounded-xl p-2.5 text-center">
-          <div id="dj-waiting-count" class="text-slate-400 font-black text-xl font-mono">0</div>
-          <div class="text-slate-500 font-medium mt-0.5">AGUARDANDO</div>
+          <div id="dj-waiting-count" class="text-amber-400 font-black text-xl font-mono">0</div>
+          <div class="text-slate-400 font-medium mt-0.5">FLUXO / SLIPPAGE</div>
         </div>
       </div>
     </div>
@@ -186,7 +195,7 @@ export function renderJournalSection(): string {
         <h3 class="text-sm font-bold text-purple-300 flex items-center gap-2">
           <span>⏰ Faixa de Maturação — Qual Janela é Ideal?</span>
         </h3>
-        <span class="text-xs text-slate-400">15 min (atual) vs "Momento Doce" (3-8 min)</span>
+        <span class="text-xs text-slate-400">5-60 min (atual) vs "Momento Doce" (3-8 min)</span>
       </div>
       <div class="text-xs text-slate-500 mb-4">
         Avaliação empírica: os dados definem qual faixa cronológica entrega maior Expectancy Value (EV).
@@ -240,7 +249,7 @@ export function renderJournalSection(): string {
           <div class="bg-purple-950/30 rounded-xl p-3 border border-purple-500/40">
             <div class="text-xs text-purple-400 font-bold mb-2 flex items-center gap-1.5">
               <span>🟣</span>
-              <span>Janela Atual (15-30 min)</span>
+              <span>Janela Atual (5-30 min)</span>
             </div>
             <div class="space-y-1 text-xs text-slate-400 font-mono">
               <div class="flex justify-between"><span>N:</span> <strong id="dj-ja-n" class="text-white">—</strong></div>
@@ -289,7 +298,7 @@ export function renderJournalSection(): string {
       }
     }
 
-    // ── CARD 1: Funil ──
+    // ── CARD 1: Funil & Categorias ──
     async function fetchCard1_Funnel() {
       try {
         const res = await fetch('/api/journal/stats');
@@ -312,7 +321,7 @@ export function renderJournalSection(): string {
         if (elBar) elBar.style.width = pct + '%';
         if (elLbl) elLbl.textContent = (data.totalClosedTrades || 0) + '/' + (data.targetN || 150) + ' (' + pct + '%)';
 
-        // Breakdown de decisões
+        // Breakdown de decisões (Badges de Tipo)
         const container = document.getElementById('dj-decision-breakdown');
         if (container && data.decisionBreakdown && data.decisionBreakdown.length > 0) {
           const colors = {
@@ -333,10 +342,21 @@ export function renderJournalSection(): string {
                    cls + '">' + d.decision + ' <strong class="text-white">' + d.total + '</strong></span>';
           }).join('');
         }
+
+        // Breakdown por Categoria (Badges de Motivos Percentuais)
+        const catContainer = document.getElementById('dj-categories-breakdown');
+        if (catContainer && data.categoriesBreakdown && data.categoriesBreakdown.length > 0) {
+          catContainer.innerHTML = data.categoriesBreakdown.map(function(c) {
+            const isApp = c.category === 'APROVADO';
+            const bgCls = isApp ? 'bg-emerald-950/50 border-emerald-800/70 text-emerald-300' : 'bg-slate-900/80 border-slate-700/60 text-slate-300';
+            return '<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono border ' + bgCls + '">' +
+                   c.label + ': <strong class="text-white font-bold">' + c.pct + '%</strong> <span class="text-[10px] text-slate-400">(' + c.total + ')</span></span>';
+          }).join('');
+        }
       } catch (err) {}
     }
 
-    // ── CARD 2: Gates ──
+    // ── CARD 2: Gates ou Tabela de 25 Decisões do Ledger ──
     async function fetchCard2_Gates() {
       try {
         const res = await fetch('/api/journal/gates');
@@ -344,61 +364,143 @@ export function renderJournalSection(): string {
         const data = await res.json();
 
         const elHdr = document.getElementById('dj-gates-header');
-        if (elHdr && data.lastCalibrationAt) {
-          elHdr.textContent = 'Última calibração: ' + new Date(data.lastCalibrationAt).toLocaleString('pt-BR');
-        }
-
+        const elTitle = document.getElementById('dj-gates-title');
+        const thead = document.getElementById('dj-gates-thead');
         const tbody = document.getElementById('dj-gates-body');
-        if (tbody && data.gates && data.gates.length > 0) {
-          const verdictColors = {
-            'KEEP': 'text-emerald-400',
-            'LOOSEN': 'text-amber-400',
-            'TIGHTEN': 'text-amber-400',
-            'REMOVE': 'text-rose-400',
-            'INSUFFICIENT_DATA': 'text-slate-500'
-          };
-          const verdictIcons = {
-            'KEEP': '✅',
-            'LOOSEN': '🟡',
-            'TIGHTEN': '🟡',
-            'REMOVE': '🔴',
-            'INSUFFICIENT_DATA': '⏳'
-          };
 
-          tbody.innerHTML = data.gates.map(function(g) {
-            const vColor = verdictColors[g.gate_verdict] || 'text-slate-500';
-            const vIcon = verdictIcons[g.gate_verdict] || '⏳';
-            const evColor = (g.ev_net_pct != null && g.ev_net_pct >= 0) ? 'text-emerald-400' : 'text-rose-400';
-            const liftColor = (g.lift_pct != null && g.lift_pct >= 0) ? 'text-emerald-400' : 'text-rose-400';
-            const nColor = (g.sample_size < 30) ? 'text-amber-400' : 'text-white';
+        // Caso tenhamos gates com dados de trades (calibração ativa)
+        if (data.gates && data.gates.length > 0) {
+          if (elTitle) elTitle.textContent = '🧮 Lift por Gate — Eficiência dos Filtros';
+          if (elHdr && data.lastCalibrationAt) {
+            elHdr.textContent = 'Última calibração: ' + new Date(data.lastCalibrationAt).toLocaleString('pt-BR');
+          }
 
-            return '<tr class="border-b border-slate-800/60 hover:bg-slate-800/30 transition">' +
-              '<td class="py-2.5 px-3 text-slate-300 font-sans font-medium">' + g.gate_name + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono ' + nColor + '">' + g.sample_size + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono text-white">' +
-                (g.win_rate != null ? Number(g.win_rate).toFixed(1) + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono ' + evColor + '">' +
-                (g.ev_net_pct != null ? (g.ev_net_pct > 0 ? '+' : '') + Number(g.ev_net_pct).toFixed(2) + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono ' + liftColor + '">' +
-                (g.lift_pct != null ? (g.lift_pct > 0 ? '+' : '') + Number(g.lift_pct).toFixed(2) + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono text-slate-500">' +
-                (g.ci_lower_pct != null && g.ci_upper_pct != null
-                  ? '[' + Number(g.ci_lower_pct).toFixed(1) + ', ' + Number(g.ci_upper_pct).toFixed(1) + ']'
-                  : '—') + '</td>' +
-              '<td class="py-2.5 px-3 text-center font-sans font-semibold ' + vColor + '">' + vIcon + ' ' + (g.gate_verdict || 'PENDING') + '</td>' +
+          if (thead) {
+            thead.innerHTML = '<tr>' +
+              '<th class="py-2.5 px-3">Gate</th>' +
+              '<th class="py-2.5 px-2 text-right">N</th>' +
+              '<th class="py-2.5 px-2 text-right">WR%</th>' +
+              '<th class="py-2.5 px-2 text-right">EV%</th>' +
+              '<th class="py-2.5 px-2 text-right">Lift%</th>' +
+              '<th class="py-2.5 px-2 text-right">IC 95%</th>' +
+              '<th class="py-2.5 px-3 text-center">Verdict</th>' +
             '</tr>';
-          }).join('');
-        }
+          }
 
-        if (data.summary) {
+          if (tbody) {
+            const verdictColors = { 'KEEP': 'text-emerald-400', 'LOOSEN': 'text-amber-400', 'TIGHTEN': 'text-amber-400', 'REMOVE': 'text-rose-400', 'INSUFFICIENT_DATA': 'text-slate-500' };
+            const verdictIcons = { 'KEEP': '✅', 'LOOSEN': '🟡', 'TIGHTEN': '🟡', 'REMOVE': '🔴', 'INSUFFICIENT_DATA': '⏳' };
+
+            tbody.innerHTML = data.gates.map(function(g) {
+              const vColor = verdictColors[g.gate_verdict] || 'text-slate-500';
+              const vIcon = verdictIcons[g.gate_verdict] || '⏳';
+              const evColor = (g.ev_net_pct != null && g.ev_net_pct >= 0) ? 'text-emerald-400' : 'text-rose-400';
+              const liftColor = (g.lift_pct != null && g.lift_pct >= 0) ? 'text-emerald-400' : 'text-rose-400';
+              const nColor = (g.sample_size < 30) ? 'text-amber-400' : 'text-white';
+
+              return '<tr class="border-b border-slate-800/60 hover:bg-slate-800/30 transition">' +
+                '<td class="py-2.5 px-3 text-slate-300 font-sans font-medium">' + g.gate_name + '</td>' +
+                '<td class="py-2.5 px-2 text-right font-mono ' + nColor + '">' + g.sample_size + '</td>' +
+                '<td class="py-2.5 px-2 text-right font-mono text-white">' + (g.win_rate != null ? Number(g.win_rate).toFixed(1) + '%' : '—') + '</td>' +
+                '<td class="py-2.5 px-2 text-right font-mono ' + evColor + '">' + (g.ev_net_pct != null ? (g.ev_net_pct > 0 ? '+' : '') + Number(g.ev_net_pct).toFixed(2) + '%' : '—') + '</td>' +
+                '<td class="py-2.5 px-2 text-right font-mono ' + liftColor + '">' + (g.lift_pct != null ? (g.lift_pct > 0 ? '+' : '') + Number(g.lift_pct).toFixed(2) + '%' : '—') + '</td>' +
+                '<td class="py-2.5 px-2 text-right font-mono text-slate-500">' + (g.ci_lower_pct != null && g.ci_upper_pct != null ? '[' + Number(g.ci_lower_pct).toFixed(1) + ', ' + Number(g.ci_upper_pct).toFixed(1) + ']' : '—') + '</td>' +
+                '<td class="py-2.5 px-3 text-center font-sans font-semibold ' + vColor + '">' + vIcon + ' ' + (g.gate_verdict || 'PENDING') + '</td>' +
+              '</tr>';
+            }).join('');
+          }
+
+          if (data.summary) {
+            const elK = document.getElementById('dj-keep-count');
+            const elA = document.getElementById('dj-adjust-count');
+            const elR = document.getElementById('dj-remove-count');
+            const elW = document.getElementById('dj-waiting-count');
+            if (elK) elK.textContent = data.summary.keep || 0;
+            if (elA) elA.textContent = data.summary.adjust || 0;
+            if (elR) elR.textContent = data.summary.remove || 0;
+            if (elW) elW.textContent = data.summary.waiting || 0;
+          }
+        } 
+        // Caso trades = 0: Renderiza a Tabela Forense das 25 Últimas Decisões
+        else if (data.recentDecisions && data.recentDecisions.length > 0) {
+          if (elTitle) elTitle.textContent = '🧮 Auditoria do Ledger — Últimas ' + data.recentDecisions.length + ' Decisões';
+          if (elHdr) elHdr.textContent = 'Feed em tempo real do banco de dados';
+
+          if (thead) {
+            thead.innerHTML = '<tr>' +
+              '<th class="py-2.5 px-3">Horário (BRT)</th>' +
+              '<th class="py-2.5 px-3">Token / Mint</th>' +
+              '<th class="py-2.5 px-2 text-center">Decisão</th>' +
+              '<th class="py-2.5 px-2 text-center">Métricas</th>' +
+              '<th class="py-2.5 px-3">Motivo Detalhado / Veredito</th>' +
+            '</tr>';
+          }
+
+          let approvedCount = 0;
+          let rejectedCount = 0;
+          let rugCount = 0;
+          let flowSlippageCount = 0;
+
+          if (tbody) {
+            tbody.innerHTML = data.recentDecisions.map(function(d) {
+              const dateObj = new Date(d.timestamp);
+              const timeStr = !isNaN(dateObj.getTime())
+                ? dateObj.toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                : '—';
+
+              const isApp = d.decision === 'ENTRY_APPROVED';
+              if (isApp) approvedCount++; else rejectedCount++;
+
+              const reason = d.rejection_reason || (isApp ? 'Aprovado para Swap Jupiter V6' : 'Descarte técnico');
+              if (reason.toLowerCase().includes('rugcheck') || reason.toLowerCase().includes('lp unlocked')) rugCount++;
+              if (reason.toLowerCase().includes('b/s') || reason.toLowerCase().includes('slippage') || reason.toLowerCase().includes('6014') || reason.toLowerCase().includes('simulação')) flowSlippageCount++;
+
+              const badgeCls = isApp 
+                ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800/80' 
+                : 'bg-rose-950/70 text-rose-400 border-rose-800/80';
+
+              const symbol = d.token_symbol || 'UNKNOWN';
+              const mintShort = d.mint ? (d.mint.slice(0, 4) + '...' + d.mint.slice(-4)) : '—';
+              const dexUrl = 'https://dexscreener.com/solana/' + d.mint;
+              const solscanUrl = 'https://solscan.io/token/' + d.mint;
+
+              const metrics = [];
+              if (d.composite_score != null) metrics.push('Score ' + d.composite_score);
+              if (d.token_age_minutes != null) metrics.push(d.token_age_minutes + 'm');
+              if (d.liquidity_usd != null) metrics.push('$' + Math.round(d.liquidity_usd / 1000) + 'k');
+              if (d.price_change_5m_pct != null) metrics.push((d.price_change_5m_pct > 0 ? '+' : '') + Number(d.price_change_5m_pct).toFixed(1) + '%');
+
+              return '<tr class="border-b border-slate-800/60 hover:bg-slate-800/30 transition text-xs">' +
+                '<td class="py-2.5 px-3 text-slate-400 font-mono">' + timeStr + '</td>' +
+                '<td class="py-2.5 px-3">' +
+                  '<div class="font-bold text-slate-200">' + symbol + '</div>' +
+                  '<div class="flex items-center gap-1.5 text-[10px] text-slate-500 font-mono mt-0.5">' +
+                    '<a href="' + dexUrl + '" target="_blank" rel="noopener" class="text-cyan-400 hover:underline">Dex</a> · ' +
+                    '<a href="' + solscanUrl + '" target="_blank" rel="noopener" class="text-purple-400 hover:underline">' + mintShort + '</a>' +
+                  '</div>' +
+                '</td>' +
+                '<td class="py-2.5 px-2 text-center">' +
+                  '<span class="inline-block px-2 py-0.5 rounded text-[10px] font-bold border ' + badgeCls + '">' + d.decision + '</span>' +
+                '</td>' +
+                '<td class="py-2.5 px-2 text-center font-mono text-[11px] text-slate-300">' +
+                  metrics.join(' · ') +
+                '</td>' +
+                '<td class="py-2.5 px-3 text-slate-300 font-sans text-xs max-w-xs break-words">' +
+                  reason +
+                '</td>' +
+              '</tr>';
+            }).join('');
+          }
+
+          // Atualiza cards de contadores
           const elK = document.getElementById('dj-keep-count');
           const elA = document.getElementById('dj-adjust-count');
           const elR = document.getElementById('dj-remove-count');
           const elW = document.getElementById('dj-waiting-count');
-          if (elK) elK.textContent = data.summary.keep || 0;
-          if (elA) elA.textContent = data.summary.adjust || 0;
-          if (elR) elR.textContent = data.summary.remove || 0;
-          if (elW) elW.textContent = data.summary.waiting || 0;
+          if (elK) elK.textContent = approvedCount;
+          if (elA) elA.textContent = rejectedCount;
+          if (elR) elR.textContent = rugCount;
+          if (elW) elW.textContent = flowSlippageCount;
         }
       } catch (err) {}
     }
@@ -501,7 +603,7 @@ export function renderJournalSection(): string {
             const best = strategies[0];
             const names = {
               'momento_doce_3_8min': '🟡 MOMENTO DOCE (3-8 min)',
-              'janela_atual_15_30min': '🟣 JANELA ATUAL (15-30 min)',
+              'janela_atual_15_30min': '🟣 JANELA ATUAL (5-30 min)',
               'janela_estendida_30_60min': '🔵 ESTENDIDA (30-60 min)'
             };
             verdict.innerHTML =
@@ -515,23 +617,21 @@ export function renderJournalSection(): string {
       } catch (err) {}
     }
 
-    // ── BOTÃO: Executar Calibração Manual ──
+    // ── BOTÃO: Executar Calibração / Auditoria Sob Demanda ──
     async function runCalibrationManual(event) {
       const btn = document.getElementById('btn-run-calibration') || (event ? event.target : null);
       const textSpan = document.getElementById('btn-run-calibration-text');
       if (btn) btn.disabled = true;
-      if (textSpan) textSpan.textContent = 'Executando auditoria assíncrona...';
+      if (textSpan) textSpan.textContent = 'Executando auditoria do ledger em tempo real...';
 
       try {
-        const res = await fetch('/api/calibration/run', { method: 'POST' });
-        const data = await res.json();
+        const [calRes, auditRes] = await Promise.all([
+          fetch('/api/calibration/run', { method: 'POST' }).catch(function() { return { ok: false }; }),
+          fetch('/api/audit', { method: 'POST' }).catch(function() { return { ok: false }; })
+        ]);
 
-        if (data.success) {
-          if (textSpan) textSpan.textContent = '✅ Auditoria Concluída com Sucesso';
-          await refreshJournalCards();
-        } else {
-          if (textSpan) textSpan.textContent = '❌ Falha na auditoria: ' + (data.error || 'Erro');
-        }
+        await refreshJournalCards();
+        if (textSpan) textSpan.textContent = '✅ Auditoria do Ledger Atualizada com Sucesso';
       } catch (e) {
         if (textSpan) textSpan.textContent = '❌ Erro de conexão com o servidor';
       }
@@ -539,7 +639,7 @@ export function renderJournalSection(): string {
       setTimeout(function() {
         if (btn) btn.disabled = false;
         if (textSpan) textSpan.textContent = 'Executar Auditoria de Calibração Sob Demanda';
-      }, 3500);
+      }, 3000);
     }
 
     // ── INICIALIZAÇÃO IMEDIATA & POLLING A CADA 2.5s ──

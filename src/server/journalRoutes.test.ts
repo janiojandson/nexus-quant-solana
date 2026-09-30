@@ -80,6 +80,26 @@ test('handleJournalRoutes: GET /api/journal/maturity deve responder análise de 
   assert.deepStrictEqual(payload.strategyComparison, []);
 });
 
+test('handleJournalRoutes: GET /api/decisions/audit deve responder estrutura de auditoria mesmo sem banco', async () => {
+  const req = { url: '/api/decisions/audit', method: 'GET', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  const res = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  const handled = await handleJournalRoutes(req, res, null, null);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 200);
+
+  const payload = JSON.parse(responseData);
+  assert.strictEqual(payload.success, true);
+  assert.strictEqual(payload.totalDecisions, 0);
+  assert.deepStrictEqual(payload.categoriesBreakdown, []);
+  assert.deepStrictEqual(payload.recentDecisions, []);
+});
+
 test('handleJournalRoutes: deve ignorar rotas não-journal', async () => {
   const req = { url: '/api/status', method: 'GET', headers: {} } as any;
   const res = {} as any;
