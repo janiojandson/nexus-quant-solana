@@ -144,7 +144,7 @@ async function executeExitOrder(
   console.log(`⚡ [Jupiter V6] Saída com slippage 500bps (5.0%) e priority HIGH...`);
 
   // 1. Swap na Jupiter V6 — Blindagem de saída: 500bps slippage + priority HIGH
-  const exitSwap = await jupiterEngine.executeSwap({
+  let exitSwap = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
     amountLamports: exitAmountAtomic,
@@ -153,6 +153,48 @@ async function executeExitOrder(
     slippageBps: 500,       // 5.0% — Saídas/Stops
     priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
   });
+
+  // CORREÇÃO: Mecanismo de liquidação de emergência com 3 tentativas
+  if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
+    console.warn(`⚠️ [TENTATIVA 1 FALHOU] ${pos.symbol}: ${exitSwap.error} | Tentando slippage 1000bps...`);
+    
+    // Tentativa 2: Slippage aberto a 1000 bps (10%)
+    exitSwap = await jupiterEngine.executeSwap({
+      inputMint: pos.mint,
+      outputMint: 'So11111111111111111111111111111111111111112',
+      amountLamports: exitAmountAtomic,
+      userPublicKey: OFFICIAL_PHANTOM_WALLET,
+      keypair: wallet.getKeypair(),
+      slippageBps: 1000,     // 10.0% — Slippage de emergência
+      priorityLevel: 'veryHigh'
+    });
+    
+    if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
+      console.error(`🚨 [TENTATIVA 2 FALHOU] ${pos.symbol}: ${exitSwap.error} | Tentando pânico com skipPreflight...`);
+      
+      // Tentativa 3: Pânico com skipPreflight (liquidação a qualquer preço)
+      exitSwap = await jupiterEngine.executeSwap({
+        inputMint: pos.mint,
+        outputMint: 'So11111111111111111111111111111111111111112',
+        amountLamports: exitAmountAtomic,
+        userPublicKey: OFFICIAL_PHANTOM_WALLET,
+        keypair: wallet.getKeypair(),
+        slippageBps: 2000,     // 20.0% — Pânico total
+        priorityLevel: 'veryHigh',
+        skipPreflight: true    // PULA simulação — liquida a qualquer custo
+      });
+      
+      if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
+        console.error(`❌ [TENTATIVA 3 FALHOU] ${pos.symbol}: ${exitSwap.error} | POSIÇÃO PRESA EM EMERGÊNCIA!`);
+        // Não remove a posição - mantém para retry manual
+        return { success: false, txSignature: '', error: `Todas as 3 tentativas falharam: ${exitSwap.error}` };
+      }
+      
+      console.log(`✅ [TENTATIVA 3 SUCESSO] ${pos.symbol}: Liquidação de emergência executada com skipPreflight`);
+    } else {
+      console.log(`✅ [TENTATIVA 2 SUCESSO] ${pos.symbol}: Liquidação com slippage 1000bps`);
+    }
+  }
 
   // 2. Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
   // foi de fato confirmado. Sem esta trava, uma saída falha fechava a ATA
@@ -285,6 +327,15 @@ async function executeExitOrder(
   // Se for liquidação total, remove do Gestor de Posições
   if (shouldCloseAta) {
     positionEngine.removePosition(pos.mint);
+  }
+
+  // CORREÇÃO: Atualiza saldo imediatamente após venda
+  try {
+    const newBalance = await wallet.getBalanceSol();
+    latestState.balanceSol = newBalance;
+    console.log(`💰 [SALDO ATUALIZADO] Novo saldo após venda: ${newBalance.toFixed(4)} SOL`);
+  } catch (balanceErr: any) {
+    console.warn(`⚠️ [SALDO] Falha ao atualizar saldo após venda: ${balanceErr?.message || balanceErr}`);
   }
 
   // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
@@ -500,7 +551,11 @@ async function runUltraFastExitMonitor() {
 
   try {
     const openPositions = positionEngine.getAllPositions();
-    if (openPositions.length === 0) return;
+    
+    // CORREÇÃO: Log de debug mesmo sem posições (para diagnóstico)
+    if (openPositions.length === 0) {
+      return;
+    }
 
     for (const pos of openPositions) {
       try {
@@ -516,6 +571,11 @@ async function runUltraFastExitMonitor() {
         const currentSolValue = (quote.outAmount || 0) / 1e9;
         const entrySol = pos.entrySol || 0.015;
         const pnlPct = (currentSolValue - entrySol) / entrySol;
+        
+        // CORREÇÃO: Log de debug a cada ciclo de cotação
+        const trailingStatus = pos.partialTaken ? 'ATIVO' : 'INATIVO';
+        const shouldExit = pnlPct <= (pos.stopLossPct || -0.06);
+        console.log(`[ExitMonitor] Token: ${pos.symbol} | PnL: ${(pnlPct * 100).toFixed(2)}% | SL: ${((pos.stopLossPct || -0.06) * 100).toFixed(0)}% | Trailing: ${trailingStatus} | Disparando Saída: ${shouldExit ? 'SIM' : 'NÃO'}`);
 
         // Atualiza PnL flutuante e pico no estado do Dashboard
         const peakSolValue = positionEngine.getPeakSolValue(pos.mint);
@@ -1075,6 +1135,13 @@ async function executeAutonomousCycle() {
         console.log(`   Retorno: ${swapSim.outAmount.toLocaleString()} tokens`);
 
         if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
+          // CORREÇÃO: Só adiciona posição se houver txid on-chain confirmado
+          if (!swapSim.txSignature && swapSim.status !== 'DRY_RUN_SUCCESS') {
+            console.error(`🛑 [ENTRADA REJEITADA] Swap sem txid on-chain: ${topCandidate.symbol} | Status: ${swapSim.status}`);
+            antiSpamMemory.recordVeto(topCandidate.mint, 'Swap sem txid on-chain', 60 * 60 * 1000);
+            return;
+          }
+          
           // Snapshot de Entrada (Contexto Inicial da Operação):
           const nowTs = Date.now();
           positionEngine.addPosition({
@@ -1092,6 +1159,12 @@ async function executeAutonomousCycle() {
             traceId: currentTraceId
           });
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -6% | TP: +35%)`);
+          
+          // CORREÇÃO: Atualiza saldo imediatamente após compra
+          const newBalance = await wallet.getBalanceSol();
+          latestState.balanceSol = newBalance;
+          console.log(`💰 [SALDO ATUALIZADO] Novo saldo após compra: ${newBalance.toFixed(4)} SOL`);
+          
           updateDashboardViews();
 
           // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)

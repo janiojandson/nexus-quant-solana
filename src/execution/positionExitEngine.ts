@@ -203,6 +203,10 @@ export class PositionExitEngine {
     const position = this.activePositions.get(mint);
     const entrySol = position?.entrySol || 0.015;
     if (!position || entrySol <= 0) {
+      // CORREÇÃO: Log de debug para posição não encontrada
+      if (!position) {
+        console.warn(`[ExitEngine] Posição não encontrada: ${mint}`);
+      }
       return { shouldExit: false, type: 'HOLD', pnlPct: 0, currentPriceUsd: 0 };
     }
 
@@ -213,6 +217,9 @@ export class PositionExitEngine {
 
     const pnlPct = Math.round(((currentSolValue - entrySol) / entrySol) * 100000) / 100000;
     const peakPnlPct = Math.round(((newPeak - entrySol) / entrySol) * 100000) / 100000;
+
+    // CORREÇÃO: Log de debug para avaliação de saída
+    console.log(`[ExitEngine] ${position.symbol} | PnL: ${(pnlPct * 100).toFixed(2)}% | SL: ${(position.stopLossPct * 100).toFixed(0)}% | partialTaken: ${position.partialTaken} | Valor: ${currentSolValue.toFixed(4)} SOL`);
 
     // Breakeven Dinâmico Pré-Parcial: ao atingir +12%, stop loss sobe para +1%
     if (!position.partialTaken && peakPnlPct >= (PositionExitEngine.BREAKEVEN_TRIGGER_PCT - 0.0001) && position.stopLossPct < 0.01) {
@@ -343,6 +350,8 @@ export class PositionExitEngine {
     if (!position.partialTaken) {
       // 1. Stop-Loss Lógico (-6%, efetivo ~-8% a -9% com slippage)
       if (pnlPct <= position.stopLossPct) {
+        // CORREÇÃO: Log de debug para stop loss
+        console.log(`🛑 [STOP LOSS DISPARADO] ${position.symbol} | PnL: ${(pnlPct * 100).toFixed(2)}% | SL: ${(position.stopLossPct * 100).toFixed(0)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
         return {
           shouldExit: true,
           type: 'STOP_LOSS',
