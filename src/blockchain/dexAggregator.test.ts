@@ -32,7 +32,8 @@ describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
 
     assert.strictEqual(route.inputMint, SOL_MINT);
     assert.strictEqual(route.outputMint, USDC_MINT);
-    assert.strictEqual(route.slippageBps, 50);
+    // CORREÇÃO: Com piso de 250 bps, slippage de 50 bps é elevado para 250 bps
+    assert.strictEqual(route.slippageBps, 250);
     assert.strictEqual(route.outAmount, 20_000_000);
     assert.strictEqual(route.priceImpactPct, 0.42);
   });

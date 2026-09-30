@@ -6,8 +6,7 @@
 
 import { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import { DECISION_JOURNAL_DDL } from './schemaSql.js';
 
 // ──────────────────────────────────────────────
 // TIPOS E INTERFACES
@@ -257,13 +256,8 @@ export class DecisionLogger {
       const startDate = `${year}-${month}-01`;
       const endDate = `${nextYear}-${nextMonth}-01`;
 
-      // CONSOLIDAÇÃO P3: Carrega DDL da fonte única (schema_decision_journal.sql)
-      // Usa caminho relativo ao diretório do código compilado (dist/database)
-      const schemaPath = join(__dirname, 'schema_decision_journal.sql');
-      const schemaSql = readFileSync(schemaPath, 'utf-8');
-      
-      // Executa o DDL completo do arquivo
-      await this.pool.query(schemaSql);
+      // CORREÇÃO P3 + DOCKER: DDL embutido como constante TypeScript (elimina ENOENT)
+      await this.pool.query(DECISION_JOURNAL_DDL);
       
       // Cria partição para o mês atual se não existir (específico para runtime)
       await this.pool.query(`
