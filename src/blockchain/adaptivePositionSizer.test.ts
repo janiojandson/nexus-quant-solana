@@ -125,6 +125,8 @@ describe('AdaptivePositionSizer - dimensionamento por profundidade de pool', () 
     });
 
     assert.strictEqual(res.success, false);
-    assert.strictEqual(res.abortReason, 'INSUFFICIENT_POOL_DEPTH');
+    // Todos os degraus passaram no impacto e falharam na simulacao on-chain:
+    // a causa e SIMULATION_REJECTED, nao profundidade insuficiente.
+    assert.strictEqual(res.abortReason, 'SIMULATION_REJECTED');
   });
 });

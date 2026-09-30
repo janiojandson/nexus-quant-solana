@@ -992,7 +992,12 @@ async function executeAutonomousCycle() {
                 keypair: wallet.getKeypair(),
                 priorityLevel: 'medium'
               });
-              return sim.success ? null : (sim.error || 'pré-voo rejeitou o lote');
+              if (sim.success) {
+                console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao APROVADA (CU=${sim.unitsConsumed ?? 'n/d'})`);
+                return null;
+              }
+              console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao FALHOU -> ${sim.error}`);
+              return sim.error || 'SIMULATION_REJECTED';
             } catch (err: any) {
               console.warn(`   [Sizing] Pré-voo do lote ${sizeSol} SOL lançou exceção: ${err?.message || err}`);
               return err?.message || 'exceção na simulação pré-voo';
