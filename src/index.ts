@@ -25,6 +25,7 @@ import { DecisionLogger, DecisionType, GateEvaluation } from './database/decisio
 import { startCalibrationCron, runCalibrationNow } from './calibration/calibrationCron.js';
 import { runMaintenance } from './database/maintenanceJob.js';
 import { DrawdownBreaker } from './risk/drawdownBreaker.js';
+import { assertAtomicAmountToNumber } from './execution/atomicAmount.js';
 
 dotenv.config();
 
@@ -123,14 +124,30 @@ async function executeExitOrder(
   const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50';
   const shouldCloseAta = options?.shouldCloseAta ?? !isPartial;
 
-  console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${tokenAmountToSell.toLocaleString()} | PnL: ${(pnlPct * 100).toFixed(2)}%`);
+  // Validação atômica ANTES de qualquer cotação. `tokenAmount` vem de
+  // `swapSim.outAmount` (inteiro do Jupiter), mas um refactor futuro poderia
+  // trocar a origem por uiAmount sem quebrar nenhum teste — e o swap passaria
+  // a vender 5 lamports em vez de milhões, deixando a posição presa na carteira.
+  let exitAmountAtomic: number;
+  try {
+    exitAmountAtomic = assertAtomicAmountToNumber(tokenAmountToSell);
+  } catch (err: any) {
+    console.error(`🛑 [PositionExit] ${pos.symbol}: ${err.message}`);
+    latestState.recentAudits[0] = {
+      ...latestState.recentAudits[0],
+      swapFailReason: `Montante de saida invalido: ${err.message}`
+    } as any;
+    return { success: false, error: err.message };
+  }
+
+  console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
   console.log(`⚡ [Jupiter V6] Saída com slippage 500bps (5.0%) e priority HIGH...`);
 
   // 1. Swap na Jupiter V6 — Blindagem de saída: 500bps slippage + priority HIGH
   const exitSwap = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
-    amountLamports: Math.floor(tokenAmountToSell),
+    amountLamports: exitAmountAtomic,
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
     keypair: wallet.getKeypair(),
     slippageBps: 500,       // 5.0% — Saídas/Stops

@@ -7,9 +7,10 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test src/**/*.test.ts test/**/*.test.ts",
     "db:reset-ledger": "tsx scripts/resetLedger.ts",
-    "trade:canary": "tsx scripts/testCanaryTrade.ts"
+    "trade:canary": "tsx scripts/testCanaryTrade.ts",
+    "trade:rescue": "tsx scripts/rescueJup.ts"
   },
   "keywords": [
     "solana",
