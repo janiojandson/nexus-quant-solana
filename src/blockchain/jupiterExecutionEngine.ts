@@ -29,6 +29,8 @@ export interface SwapExecutionResponse {
   outAmount: number;
   isDryRun: boolean;
   error?: string;
+  /** Compute Units consumidas na simulação pré-voo (telemetria de custo de execução). */
+  unitsConsumed?: number;
 }
 
 export interface JupiterEngineConfig {
@@ -122,19 +124,28 @@ export class JupiterExecutionEngine {
       const swapTransactionBuf = Buffer.from(swapRes.data.swapTransaction, 'base64');
       const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
 
-      // 4. Assinar com a Chave Phantom do Agente
-      transaction.sign([req.keypair]);
+      // 4. Assinar com a Chave do Agente. `VersionedTransaction.sign` lança
+      // "Cannot sign with non signer key" quando a carteira não é um signer
+      // requerido pela transação. Nesse caso abortamos com diagnóstico claro,
+      // em vez de deixar a falha chegar ao catch genérico como erro de swap.
+      try {
+        transaction.sign([req.keypair]);
+      } catch (signErr: any) {
+        throw new Error(`Assinatura rejeitada: a carteira ${req.userPublicKey} nao e signer requerido desta transacao Jupiter. ${signErr?.message || signErr}`);
+      }
 
       // 4.1 Simulação Pré-Voo Fail-Closed:
       // Se a simulação indicar que a transação falharia on-chain (ex.: Custom 6014
       // SlippageExceeded), a tx NÃO é transmitida — preserva taxa de rede.
       // Falha do próprio RPC de simulação também aborta: enviar sem validação é
-      // exatamente o comportamento fail-open que gerou compras emriotadas.
+      // exatamente o comportamento fail-open que gerava compras na escuridão.
+      let unitsConsumed: number | undefined;
       if (!req.skipPreflight) {
         let simErr: unknown = null;
         try {
           const simRes = await this.connection.simulateTransaction(transaction);
           if (simRes.value.err) simErr = simRes.value.err;
+          else unitsConsumed = simRes.value.unitsConsumed;
         } catch (e: any) {
           simErr = e;
         }
@@ -148,6 +159,7 @@ export class JupiterExecutionEngine {
             inAmount: req.amountLamports,
             outAmount: 0,
             isDryRun: false,
+            unitsConsumed,
             error: `Simulação pré-voo rejeitada pelo nó RPC: ${errStr}`
           };
         }
@@ -164,7 +176,8 @@ export class JupiterExecutionEngine {
         status: 'SUCCESS',
         inAmount: quote.inAmount,
         outAmount: quote.outAmount,
-        isDryRun: false
+        isDryRun: false,
+        unitsConsumed
       };
     } catch (err: any) {
       console.error('❌ [JUPITER SWAP ERROR DETALHADO]:', err.response?.data || err.message || err);
