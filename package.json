@@ -4,7 +4,7 @@
   "description": "Agente Economico Soberano e Gestor Quantitativo Solana com Sobrevivencia Darwinista",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').mkdirSync('dist/database', {recursive: true}) && require('fs').copyFileSync('src/database/schema_decision_journal.sql', 'dist/database/schema_decision_journal.sql')\"",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test src/**/*.test.ts test/**/*.test.ts",

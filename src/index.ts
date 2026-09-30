@@ -816,16 +816,21 @@ async function executeAutonomousCycle() {
     if (latestState.scannerLogs.length > 15) latestState.scannerLogs.pop();
 
     if (eligibleCandidates.length > 0) {
-      const topCandidate = eligibleCandidates[0];
-      const classification = TokenClassifier.classify(topCandidate.mint, topCandidate.symbol, topCandidate.liquidityUsd);
+      // PRIORIDADE 2: Fila de fallback - tenta até 3 candidatos se os primeiros falharem
+      const maxCandidatesToTry = Math.min(3, eligibleCandidates.length);
+      let candidateProcessed = false;
+      
+      for (let candidateIndex = 0; candidateIndex < maxCandidatesToTry && !candidateProcessed; candidateIndex++) {
+        const topCandidate = eligibleCandidates[candidateIndex];
+        const classification = TokenClassifier.classify(topCandidate.mint, topCandidate.symbol, topCandidate.liquidityUsd);
 
-      console.log(`🔥 Analisando Candidato: ${topCandidate.symbol} (${topCandidate.name})`);
-      console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
-      console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
+        console.log(`🔥 Analisando Candidato #${candidateIndex + 1}/${maxCandidatesToTry}: ${topCandidate.symbol} (${topCandidate.name})`);
+        console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
+        console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
 
-      // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
-      console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
-      const audit = await gatekeeper.auditToken({
+        // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
+        console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
+        const audit = await gatekeeper.auditToken({
         mint: topCandidate.mint,
         liquidityUsd: topCandidate.liquidityUsd,
         mintAuthority: null,
@@ -880,20 +885,20 @@ async function executeAutonomousCycle() {
 
       const currentTraceId = randomUUID();
 
-      if (!audit.safe) {
-        console.log(`   Motivo do Veto: ${audit.reason}`);
-        const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Ayla)';
-        antiSpamMemory.recordVeto(topCandidate.mint, vetoReasonText, 24 * 60 * 60 * 1000);
-        // Persistência ativa no banco por 24 horas
-        postgresRepo.saveQuarantine({
-          mint: topCandidate.mint,
-          symbol: topCandidate.symbol,
-          reason: vetoReasonText,
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-        }).catch(() => {});
+        if (!audit.safe) {
+          console.log(`   Motivo do Veto: ${audit.reason}`);
+          const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Ayla)';
+          antiSpamMemory.recordVeto(topCandidate.mint, vetoReasonText, 24 * 60 * 60 * 1000);
+          // Persistência ativa no banco por 24 horas
+          postgresRepo.saveQuarantine({
+            mint: topCandidate.mint,
+            symbol: topCandidate.symbol,
+            reason: vetoReasonText,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+          }).catch(() => {});
 
-        // Registro assíncrono no Decision Journal (rejeição no Gatekeeper)
-        journal.logDecision({
+          // Registro assíncrono no Decision Journal (rejeição no Gatekeeper)
+          journal.logDecision({
           traceId: currentTraceId,
           decision: 'ENTRY_REJECTED',
           compositeScore: audit.score,
@@ -918,6 +923,10 @@ async function executeAutonomousCycle() {
           gateEvaluations: gates,
           rejectionReason: vetoReasonText,
         });
+        
+        console.log(`⏭️ Candidato #${candidateIndex + 1} reprovado no gatekeeper. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
+        // Não marca como processado - continua loop para próximo candidato
+        continue;
       } else {
         antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
 
@@ -957,7 +966,7 @@ async function executeAutonomousCycle() {
         const safeBalance = currentBalance - GAS_RESERVE_SOL;
         if (safeBalance < MIN_TRADE_AMOUNT_SOL) {
           console.log(`🛡️ [Reserva Intocável] Saldo livre (${safeBalance.toFixed(4)} SOL) insuficiente para alocar o lote mínimo ${MIN_TRADE_AMOUNT_SOL} SOL mantendo ${GAS_RESERVE_SOL} SOL de reserva para taxas de saída.`);
-          return;
+          break; // Sem saldo, não tenta mais candidatos
         }
 
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -1033,7 +1042,10 @@ async function executeAutonomousCycle() {
             reason: `Sizing abortado: ${failReason}`,
             expiresAt: new Date(Date.now() + 60 * 60 * 1000)
           }).catch(() => {});
-          return;
+          
+          console.log(`⏭️ Candidato #${candidateIndex + 1} falhou no dimensionamento. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
+          // Não marca como processado - continua loop para próximo candidato
+          continue;
         }
 
         const dynamicAllocSol = sizing.sizeSol;
@@ -1092,6 +1104,9 @@ async function executeAutonomousCycle() {
             txSignature: swapSim.txSignature,
             detail: `Liq: $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m: $${(topCandidate.volume5mUsd || 0).toLocaleString()}`
           }).catch(() => {});
+          
+          // Marca candidato como processado com sucesso - não tenta próximo
+          candidateProcessed = true;
         } else {
           const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';
           const swapVetoText = `Swap Jupiter falhou: ${failReason}`;
@@ -1105,35 +1120,39 @@ async function executeAutonomousCycle() {
           }).catch(() => {});
           // Registra falha no dashboard como auditoria com swapFailReason visivel
           latestState.recentAudits[0] = { ...latestState.recentAudits[0], swapFailReason: failReason } as any;
+          
+          console.log(`⏭️ Swap falhou para candidato #${candidateIndex + 1}. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
+          // Não marca como processado - continua loop para próximo candidato
         }
-      }
+        
+        // Persistência no Postgres Central (Stateless Event Store) - dentro do loop
+        await postgresRepo.saveAudit({
+          mint: topCandidate.mint,
+          symbol: topCandidate.symbol,
+          name: topCandidate.name,
+          liquidityUsd: topCandidate.liquidityUsd,
+          priceUsd: topCandidate.priceUsd,
+          isSafe: audit.safe,
+          score: audit.score,
+          validatedBy: audit.validatedBy,
+          vetoReason: audit.reason || null,
+          dryRun: IS_DRY_RUN,
+          txSignature
+        });
 
-      // Persistência no Postgres Central (Stateless Event Store)
-      await postgresRepo.saveAudit({
-        mint: topCandidate.mint,
-        symbol: topCandidate.symbol,
-        name: topCandidate.name,
-        liquidityUsd: topCandidate.liquidityUsd,
-        priceUsd: topCandidate.priceUsd,
-        isSafe: audit.safe,
-        score: audit.score,
-        validatedBy: audit.validatedBy,
-        vetoReason: audit.reason || null,
-        dryRun: IS_DRY_RUN,
-        txSignature
-      });
-
-      latestState.recentAudits.unshift({
-        mint: topCandidate.mint,
-        symbol: topCandidate.symbol,
-        isSafe: audit.safe,
-        score: audit.score,
-        reason: audit.reason,
-        swapFailReason: undefined, // preenchido abaixo se o swap falhar
-        timestamp: Date.now()
-      } as any);
-      if (latestState.recentAudits.length > 20) latestState.recentAudits.pop();
-    } else {
+        latestState.recentAudits.unshift({
+          mint: topCandidate.mint,
+          symbol: topCandidate.symbol,
+          isSafe: audit.safe,
+          score: audit.score,
+          reason: audit.reason,
+          swapFailReason: undefined, // preenchido abaixo se o swap falhar
+          timestamp: Date.now()
+        } as any);
+        if (latestState.recentAudits.length > 20) latestState.recentAudits.pop();
+      } // fecha else do if (!audit.safe)
+      } // fecha for loop
+    } else { // fecha if (eligibleCandidates.length > 0)
       console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
     }
 

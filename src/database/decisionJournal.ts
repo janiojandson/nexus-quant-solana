@@ -6,6 +6,8 @@
 
 import { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 // ──────────────────────────────────────────────
 // TIPOS E INTERFACES
@@ -247,6 +249,7 @@ export class DecisionLogger {
       const year = now.getUTCFullYear();
       const month = String(now.getUTCMonth() + 1).padStart(2, '0');
       const partitionName = `decision_journal_${year}_${month}`;
+
       const nextMonthDate = new Date(Date.UTC(year, now.getUTCMonth() + 1, 1));
       const nextYear = nextMonthDate.getUTCFullYear();
       const nextMonth = String(nextMonthDate.getUTCMonth() + 1).padStart(2, '0');
@@ -254,128 +257,19 @@ export class DecisionLogger {
       const startDate = `${year}-${month}-01`;
       const endDate = `${nextYear}-${nextMonth}-01`;
 
-      // Garante tipos e tabelas básicas
+      // CONSOLIDAÇÃO P3: Carrega DDL da fonte única (schema_decision_journal.sql)
+      // Usa caminho relativo ao diretório do código compilado (dist/database)
+      const schemaPath = join(__dirname, 'schema_decision_journal.sql');
+      const schemaSql = readFileSync(schemaPath, 'utf-8');
+      
+      // Executa o DDL completo do arquivo
+      await this.pool.query(schemaSql);
+      
+      // Cria partição para o mês atual se não existir (específico para runtime)
       await this.pool.query(`
-        DO $$ BEGIN
-          CREATE TYPE decision_type AS ENUM (
-            'ENTRY_APPROVED', 'ENTRY_REJECTED', 'EXIT_SL', 'EXIT_BE',
-            'EXIT_PARTIAL', 'EXIT_TRAILING', 'EXIT_TIME_STOP', 'EXIT_WATCHDOG',
-            'EXIT_PANIC', 'ABORTED_LATENCY'
-          );
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-
-        DO $$ BEGIN
-          CREATE TYPE gate_name AS ENUM (
-            'MATURITY_AGE', 'LIQUIDITY_THRESHOLD', 'MINT_AUTHORITY', 'FREEZE_AUTHORITY',
-            'TOP_HOLDERS', 'PRICE_WINDOW', 'BUY_DOMINANCE', 'SENTINEL_REGIME',
-            'SLOT_AVAILABILITY', 'DISTANCE_FROM_LOW', 'SLIPPAGE_CHECK', 'LATENCY_ABORT',
-            'RUG_CHECK'
-          );
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-
-        DO $$ BEGIN
-          ALTER TYPE gate_name ADD VALUE IF NOT EXISTS 'RUG_CHECK';
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-
-        DO $$ BEGIN
-          CREATE TYPE gate_result AS ENUM ('PASS', 'FAIL', 'WARN');
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-
-        DO $$ BEGIN
-          CREATE TYPE sentinel_regime AS ENUM (
-            'NORMAL', 'NEUTRAL_RANGING', 'BULL_MOMENTUM', 'HIGH_VOLATILITY', 'CRASH_RISK', 'PANIC'
-          );
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-
-        DO $$ BEGIN
-          CREATE TYPE confidence_level AS ENUM ('LOW', 'MEDIUM', 'HIGH');
-        EXCEPTION WHEN duplicate_object THEN null; END $$;
-
-        CREATE TABLE IF NOT EXISTS decision_journal (
-          id                  UUID         DEFAULT gen_random_uuid(),
-          trace_id            UUID         NOT NULL DEFAULT gen_random_uuid(),
-          created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
-          mint                VARCHAR(64)  NOT NULL,
-          token_symbol        VARCHAR(32),
-          pool_address        VARCHAR(64),
-          decision            decision_type NOT NULL,
-          composite_score     SMALLINT     CHECK (composite_score BETWEEN 0 AND 100),
-          confidence          confidence_level DEFAULT 'MEDIUM',
-          token_age_minutes   SMALLINT,
-          liquidity_usd       NUMERIC(14,2),
-          market_cap_usd      NUMERIC(14,2),
-          price_usd           NUMERIC(20,10),
-          price_change_5m_pct NUMERIC(8,2),
-          buys_count_5m       INTEGER,
-          sells_count_5m      INTEGER,
-          buy_sell_ratio      NUMERIC(6,2),
-          volume_5m_usd       NUMERIC(14,2),
-          top5_holders_pct    NUMERIC(5,2),
-          holders_count       INTEGER,
-          distance_from_low   NUMERIC(8,2),
-          sentinel_regime     sentinel_regime,
-          btc_trend           VARCHAR(16),
-          sol_trend           VARCHAR(16),
-          session_hour_utc    SMALLINT     CHECK (session_hour_utc BETWEEN 0 AND 23),
-          is_weekend          BOOLEAN,
-          estimated_slippage_pct NUMERIC(6,2),
-          latency_to_send_ms  INTEGER,
-          size_sol            NUMERIC(10,6),
-          gate_details        JSONB        DEFAULT '{}',
-          rejection_reason    TEXT,
-          metadata            JSONB        DEFAULT '{}',
-          PRIMARY KEY (id, created_at)
-        ) PARTITION BY RANGE (created_at);
-
         CREATE TABLE IF NOT EXISTS ${partitionName} PARTITION OF decision_journal
           FOR VALUES FROM ('${startDate}') TO ('${endDate}');
-
-        CREATE TABLE IF NOT EXISTS trade_outcomes (
-          id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-          trace_id            UUID         NOT NULL,
-          mint                VARCHAR(64)  NOT NULL,
-          created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
-          entry_price_usd     NUMERIC(20,10) NOT NULL,
-          entry_size_sol      NUMERIC(10,6)  NOT NULL,
-          entry_timestamp     TIMESTAMPTZ    NOT NULL,
-          entry_slippage_pct  NUMERIC(6,2),
-          exit_price_usd      NUMERIC(20,10),
-          exit_size_sol       NUMERIC(10,6),
-          exit_timestamp      TIMESTAMPTZ,
-          exit_slippage_pct   NUMERIC(6,2),
-          exit_reason         decision_type,
-          pnl_sol             NUMERIC(10,6),
-          pnl_pct             NUMERIC(8,2),
-          fees_total_sol      NUMERIC(10,6),
-          rent_recovered_sol  NUMERIC(10,6) DEFAULT 0,
-          net_pnl_sol         NUMERIC(10,6),
-          detection_to_send_ms INTEGER,
-          send_to_confirm_ms  INTEGER,
-          total_trade_duration_s INTEGER,
-          status              VARCHAR(16) DEFAULT 'OPEN'
-            CHECK (status IN ('OPEN', 'PARTIAL_CLOSED', 'FULLY_CLOSED', 'WATCHDOG_CLOSED', 'PANIC_CLOSED')),
-          CONSTRAINT uq_outcome_trace UNIQUE (trace_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS calibration_snapshots (
-          id                  UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-          computed_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
-          window_days         SMALLINT     NOT NULL DEFAULT 30,
-          gate_name           gate_name    NOT NULL,
-          gate_result         gate_result,
-          sample_size         INTEGER      NOT NULL,
-          win_rate            NUMERIC(5,2),
-          avg_win_pct         NUMERIC(8,2),
-          avg_loss_pct        NUMERIC(8,2),
-          ev_net_pct          NUMERIC(8,2),
-          ci_lower_pct        NUMERIC(8,2),
-          ci_upper_pct        NUMERIC(8,2),
-          lift_pct            NUMERIC(8,2),
-          gate_verdict        VARCHAR(16) CHECK (gate_verdict IN ('KEEP', 'TIGHTEN', 'LOOSEN', 'REMOVE', 'INSUFFICIENT_DATA')),
-          metadata            JSONB        DEFAULT '{}'
-        );
       `);
-
       this.isSchemaInitialized = true;
     } catch (err: any) {
       console.warn('⚠️ [DecisionJournal] Aviso na inicialização de tabelas (não-bloqueante):', err.message);

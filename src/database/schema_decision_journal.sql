@@ -38,7 +38,8 @@ DO $$ BEGIN
     'SLOT_AVAILABILITY',   -- max 2 posições
     'DISTANCE_FROM_LOW',   -- veto > 35% do fundo
     'SLIPPAGE_CHECK',
-    'LATENCY_ABORT'
+    'LATENCY_ABORT',
+    'RUG_CHECK'
   );
 EXCEPTION
   WHEN duplicate_object THEN null;
