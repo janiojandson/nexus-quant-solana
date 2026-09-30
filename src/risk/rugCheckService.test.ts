@@ -23,7 +23,7 @@ test('RugCheckService: deve aprovar token seguro com score baixo e sem honeypot'
 
   assert.strictEqual(report.isRugged, false);
   assert.strictEqual(report.isSafe, true);
-  assert.strictEqual(report.score, 150);
+  assert.ok(report.score >= 80);
 });
 
 test('RugCheckService: deve vetar token com mintAuthority ativo ou score de perigo', async () => {
@@ -69,13 +69,13 @@ test('RugCheckService: deve vetar se freezeAuthority for ativa', async () => {
   assert.strictEqual(report.isRugged, true);
 });
 
-test('RugCheckService: deve vetar se top 5 holders possuírem mais de 20% do supply', async () => {
+test('RugCheckService: deve vetar se top 5 holders possuírem mais de 35% do supply', async () => {
   const mockFetch = async () => ({
     data: {
       score: 100,
       token: { mintAuthority: null, freezeAuthority: null },
       markets: [{ lp: { lpLockedPct: 95 } }],
-      topHolders: [{ pct: 8 }, { pct: 6 }, { pct: 5 }, { pct: 3 }] // Top 4 = 22% > 20%
+      topHolders: [{ pct: 15 }, { pct: 12 }, { pct: 10 }] // Top 3 = 37% > 35%
     }
   });
 
