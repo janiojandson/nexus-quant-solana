@@ -966,7 +966,9 @@ async function executeAutonomousCycle() {
           outputMint: topCandidate.mint,
           slippageBps: 750,
           autoSlippage: true,
-          autoSlippageCollisionUsdValue: 1000,
+          poolLiquidityUsd: topCandidate.liquidityUsd,
+          // Colisao calibrada pela profundidade real da pool, em vez do valor
+          // fixo de 1000 USD que apertava demais o slippage em pools de 15k-100k.
           maxAutoSlippageBps: 750
         };
 
@@ -985,7 +987,7 @@ async function executeAutonomousCycle() {
                 outputMint: topCandidate.mint,
                 amountLamports: Math.floor(sizeSol * 1e9),
                 autoSlippage: true,
-                autoSlippageCollisionUsdValue: 1000,
+                poolLiquidityUsd: topCandidate.liquidityUsd,
                 maxAutoSlippageBps: 750,
                 skipPreflight: false,
                 userPublicKey: OFFICIAL_PHANTOM_WALLET,
@@ -1045,7 +1047,7 @@ async function executeAutonomousCycle() {
           outputMint: topCandidate.mint,
           amountLamports: tradeLamports,
           autoSlippage: true,
-          autoSlippageCollisionUsdValue: 1000,
+                poolLiquidityUsd: topCandidate.liquidityUsd,
           maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
           skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
           userPublicKey: OFFICIAL_PHANTOM_WALLET,

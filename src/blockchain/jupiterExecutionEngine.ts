@@ -18,6 +18,8 @@ export interface SwapExecutionRequest {
   autoSlippage?: boolean;
   autoSlippageCollisionUsdValue?: number;
   maxAutoSlippageBps?: number;
+  /** Liquidez da pool em USD. Propaga a calibracao dinamica da colisao. */
+  poolLiquidityUsd?: number | null;
   /** Se true, pula simulação local prévia da compra para envio ultra-rápido aos validadores */
   skipPreflight?: boolean;
 }
@@ -86,7 +88,8 @@ export class JupiterExecutionEngine {
         amountLamports: req.amountLamports,
         slippageBps: req.slippageBps ?? 400,
         autoSlippage: useAutoSlippage,
-        autoSlippageCollisionUsdValue: req.autoSlippageCollisionUsdValue ?? 1000,
+        // Colisao calibrada no aggregator a partir de poolLiquidityUsd.
+        poolLiquidityUsd: req.poolLiquidityUsd,
         maxAutoSlippageBps: req.maxAutoSlippageBps ?? 750
       });
 
@@ -167,7 +170,8 @@ export class JupiterExecutionEngine {
         amountLamports: req.amountLamports,
         slippageBps: req.slippageBps ?? 400,
         autoSlippage: useAutoSlippage,
-        autoSlippageCollisionUsdValue: req.autoSlippageCollisionUsdValue ?? 1000,
+        // Colisao calibrada no aggregator a partir de poolLiquidityUsd.
+        poolLiquidityUsd: req.poolLiquidityUsd,
         maxAutoSlippageBps: req.maxAutoSlippageBps ?? 750
       });
 

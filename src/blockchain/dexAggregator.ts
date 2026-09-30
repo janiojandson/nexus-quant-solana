@@ -1,4 +1,9 @@
 import axios from 'axios';
+import {
+  computeCollisionUsd,
+  describeSlippageParams,
+  HARD_CAP_SLIPPAGE_BPS
+} from './slippageCalibration.js';
 
 export interface SwapQuoteParams {
   inputMint: string;
@@ -8,6 +13,8 @@ export interface SwapQuoteParams {
   autoSlippage?: boolean;
   autoSlippageCollisionUsdValue?: number;
   maxAutoSlippageBps?: number;
+  /** Liquidez real da pool em USD. Baseia a calibracao dinamica da colisao. */
+  poolLiquidityUsd?: number | null;
 }
 
 export interface SwapQuoteResult {
@@ -26,7 +33,7 @@ export interface SwapQuoteResult {
  *
  * Existe para impedir que qualquer falha de rede, rate-limit (429) ou resposta
  * malformada da Jupiter seja silenciosamente convertida em cotação. Sem esta
- * exceção, o motor executaria ordens com `outAmount` inventado.
+ * excecao, o motor executaria ordens com `outAmount` inventado.
  */
 export class JupiterQuoteException extends Error {
   public readonly status?: number;
@@ -42,7 +49,7 @@ export class JupiterQuoteException extends Error {
 
 export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
-  public static readonly MAX_ALLOWED_SLIPPAGE_BPS = 750; // 7.5%
+  public static readonly MAX_ALLOWED_SLIPPAGE_BPS = HARD_CAP_SLIPPAGE_BPS; // 7.5%
 
   constructor(jupiterApiBaseUrl = process.env.JUPITER_API_URL || 'https://public.jupiterapi.com') {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl;
@@ -52,13 +59,13 @@ export class DexAggregatorService {
     const slippageBps = params.slippageBps ?? 50; // Padrão 0.5%
     const maxAutoSlippageBps = params.maxAutoSlippageBps ?? DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS;
 
-    // Teto anti-MEV aplicado em AMBOS os modos. A validação anterior apenas cobria
-    // o caminho com slippage explícito, deixando as compras (autoSlippage=true)
-    // sem nenhuma proteção.
+    // Teto anti-MEV aplicado em AMBOS os modos. A validacao anterior apenas
+    // cobria o caminho com slippage explícito, deixando as compras
+    // (autoSlippage=true) sem nenhuma protecao.
     const effectiveSlippageBps = params.autoSlippage ? maxAutoSlippageBps : slippageBps;
     if (effectiveSlippageBps > DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS) {
       throw new JupiterQuoteException(
-        `Slippage maximo excedido (${effectiveSlippageBps} bps). Teto seguro contra sandwich MEV é ${DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS} bps.`
+        `Slippage maximo excedido (${effectiveSlippageBps} bps). Teto seguro contra sandwich MEV e ${DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS} bps.`
       );
     }
 
@@ -69,9 +76,22 @@ export class DexAggregatorService {
     };
 
     if (params.autoSlippage) {
+      // Colisao dinamica. O valor fixo de 1000 USD dimensionava o slippage
+      // como se fosse um negocio grande, o que em pool rasa (15k-100k) gerava
+      // erro 6014 (SlippageExceeded) falso positivo em quase toda entrada.
+      const collisionUsd =
+        params.autoSlippageCollisionUsdValue ?? computeCollisionUsd(params.poolLiquidityUsd);
       queryParams.autoSlippage = true;
-      queryParams.autoSlippageCollisionUsdValue = params.autoSlippageCollisionUsdValue ?? 1000;
+      queryParams.autoSlippageCollisionUsdValue = collisionUsd;
       queryParams.maxAutoSlippageBps = maxAutoSlippageBps;
+      console.log(
+        describeSlippageParams({
+          sizeSol: params.amountLamports / 1e9,
+          collisionUsd,
+          poolLiquidityUsd: params.poolLiquidityUsd,
+          maxAutoSlippageBps
+        })
+      );
     } else {
       queryParams.slippageBps = slippageBps;
     }
@@ -83,11 +103,13 @@ export class DexAggregatorService {
         timeout: 5000
       });
     } catch (err: any) {
-      // Fail-Closed: NÃO existe mais caminho de fallback. Uma falha de cotação
-      // aborta o trade; jamais é convertida em preço fictício.
+      // Fail-Closed: NAO existe mais caminho de fallback. Uma falha de cotação
+      // aborta o trade; jamais e convertida em preco ficticio.
       const status = err?.response?.status;
       const detail = err?.response?.data?.error || err?.message || String(err);
-      console.error(`[JupiterQuoteException] Falha ao cotar ${params.inputMint} -> ${params.outputMint} (${params.amountLamports} lamports): ${detail}`);
+      console.error(
+        `[JupiterQuoteException] Falha ao cotar ${params.inputMint} -> ${params.outputMint} (${params.amountLamports} lamports): ${detail}`
+      );
       throw new JupiterQuoteException(
         `Falha na cotação Jupiter (${status ?? 'sem status'}): ${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`,
         status,
@@ -97,7 +119,7 @@ export class DexAggregatorService {
 
     const data = response?.data;
 
-    // Validação de integridade: resposta sem par in/out é cotação inutilizável.
+    // Validacao de integridade: resposta sem par in/out e cotação inutilizavel.
     if (!data || data.inAmount === undefined || data.outAmount === undefined) {
       console.error('[JupiterQuoteException] Resposta da Jupiter sem inAmount/outAmount:', JSON.stringify(data));
       throw new JupiterQuoteException('Resposta inválida da Jupiter: inAmount/outAmount ausentes.');
@@ -110,7 +132,8 @@ export class DexAggregatorService {
       outAmount: Number(data.outAmount),
       priceImpactPct: Number(data.priceImpactPct || 0),
       slippageBps: params.autoSlippage ? maxAutoSlippageBps : slippageBps,
-      routePlanSummary: data.routePlan?.map((r: { swapInfo: { label: string } }) => r.swapInfo?.label).join(' -> ') || 'Direct',
+      routePlanSummary:
+        data.routePlan?.map((r: { swapInfo: { label: string } }) => r.swapInfo?.label).join(' -> ') || 'Direct',
       rawQuote: data
     };
   }
