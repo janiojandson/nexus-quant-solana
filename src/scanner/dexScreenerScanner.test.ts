@@ -123,7 +123,7 @@ test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >
   assert.strictEqual(scanner.isBuyingAggressionValid(40, 60), false);
 });
 
-test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela de +3% a +40%', async () => {
+test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela de +3% a +85%', async () => {
   const mockFetch = async () => ({
     data: [
       {
@@ -139,7 +139,7 @@ test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela 
         baseToken: { address: 'MintEsticado', symbol: 'ESTICK' },
         liquidity: { usd: 25000 },
         pairCreatedAt: Date.now() - (30 * 60 * 1000),
-        priceChange: { m5: 65.0 }, // Excessivamente esticado (> +40%)
+        priceChange: { m5: 95.0 }, // Excessivamente esticado (> +85%)
         txns: { m5: { buys: 20, sells: 5 } }
       },
       {
@@ -155,7 +155,7 @@ test('DexScreenerScanner: deve rejeitar moedas em queda nos 5m e fora da janela 
         baseToken: { address: 'MintPerfeito', symbol: 'PERFECT' },
         liquidity: { usd: 25000 },
         pairCreatedAt: Date.now() - (30 * 60 * 1000),
-        priceChange: { m5: 15.0 }, // +15% (dentro de +3% a +40%)
+        priceChange: { m5: 15.0 }, // +15% (dentro de +3% a +85%)
         txns: { m5: { buys: 25, sells: 8 } } // Compras superam vendas
       }
     ]

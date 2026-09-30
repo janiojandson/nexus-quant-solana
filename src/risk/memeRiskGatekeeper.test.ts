@@ -87,7 +87,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     assert.match(audit.reason || '', /Ayla Veto: Preço em sangria\/queda nos últimos 5m/);
   });
 
-  it('deve rejeitar token com priceChangeM5 > 35 (Ayla Veto: Preço esticado demais, risco de topo)', async () => {
+  it('deve rejeitar token com priceChangeM5 > 85 (Ayla Veto: Preço esticado demais, risco de topo)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeEsticado5m',
@@ -95,7 +95,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       mintAuthority: null,
       freezeAuthority: null,
       holdersCount: 200,
-      priceChangeM5: 48.5
+      priceChangeM5: 92.5
     };
 
     const audit = await gatekeeper.auditToken(token);

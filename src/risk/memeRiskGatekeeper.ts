@@ -207,7 +207,7 @@ export class MemeRiskGatekeeper {
    * Valida Price Action e pressão de compradores para evitar ativos em sangria, topo esticado ou faca caindo.
    */
   public validatePriceMomentum(pair: Partial<TokenSecurityMetadata>): MomentumValidationResult {
-    // 1. Janela de Momentum nos 5 Minutos (m5): entre +3% e +35%
+    // 1. Janela de Momentum nos 5 Minutos (m5): entre +3% e +85%
     if (pair.priceChangeM5 !== undefined) {
       if (pair.priceChangeM5 <= 0) {
         return {
@@ -215,10 +215,10 @@ export class MemeRiskGatekeeper {
           reason: `Ayla Veto: Preço em sangria/queda nos últimos 5m (${pair.priceChangeM5.toFixed(2)}% <= 0%)`
         };
       }
-      if (pair.priceChangeM5 > 35) {
+      if (pair.priceChangeM5 > 85) {
         return {
           valid: false,
-          reason: `Ayla Veto: Preço esticado demais, risco de topo (${pair.priceChangeM5.toFixed(2)}% > +35%)`
+          reason: `Ayla Veto: Preço esticado demais, risco de topo (${pair.priceChangeM5.toFixed(2)}% > +85%)`
         };
       }
       if (pair.priceChangeM5 < 3) {

@@ -244,11 +244,11 @@ export class DexScreenerScanner {
           continue;
         }
 
-        // 1. Filtro de Variação de Preço nos Últimos 5 Minutos (m5): +3% a +35%
+        // 1. Filtro de Variação de Preço nos Últimos 5 Minutos (m5): +3% a +85%
         const priceChangeM5 = item.priceChange?.m5 !== undefined ? Number(item.priceChange.m5) : undefined;
         if (priceChangeM5 !== undefined) {
-          // VETO TÉCNICO IMEDIATO: Se priceChange.m5 <= 0 ou > 35
-          if (priceChangeM5 <= 0 || priceChangeM5 > 35 || priceChangeM5 < 3) {
+          // VETO TÉCNICO IMEDIATO: Se priceChange.m5 < 3 ou > 85
+          if (priceChangeM5 < 3 || priceChangeM5 > 85) {
             technicalDiscards++;
             console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: m5 fora janela [${priceChangeM5}%] | Liq: $${Math.round(liquidityUsd)} | m5: ${priceChangeM5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
             continue;

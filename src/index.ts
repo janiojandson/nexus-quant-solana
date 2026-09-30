@@ -788,7 +788,7 @@ async function executeAutonomousCycle() {
       const buySellRatio = topCandidate.sellsM5 && topCandidate.sellsM5 > 0
         ? Number(((topCandidate.buysM5 || 0) / topCandidate.sellsM5).toFixed(2))
         : (topCandidate.buysM5 ? 2.0 : 1.0);
-      const isPriceWindowValid = (topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 35;
+      const isPriceWindowValid = (topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 85;
       const isBuyDominanceValid = buySellRatio >= 1.0;
       const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
 
@@ -798,7 +798,7 @@ async function executeAutonomousCycle() {
         DecisionLogger.evaluateGate('MINT_AUTHORITY', true),
         DecisionLogger.evaluateGate('FREEZE_AUTHORITY', true),
         DecisionLogger.evaluateGate('TOP_HOLDERS', true, 20, 20),
-        DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 35),
+        DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 85),
         DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.0),
         DecisionLogger.evaluateGate('SENTINEL_REGIME', isSentinelValid),
         DecisionLogger.evaluateGate('SLOT_AVAILABILITY', openPositions < MAX_CONCURRENT_POSITIONS, openPositions, MAX_CONCURRENT_POSITIONS),
