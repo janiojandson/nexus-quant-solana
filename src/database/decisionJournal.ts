@@ -454,60 +454,65 @@ export class DecisionLogger {
     const gateDetailsJson = JSON.stringify(entry.gateEvaluations);
     const metadataJson = JSON.stringify(entry.metadata ?? {});
 
+    // `confidence` tem DEFAULT 'MEDIUM' no schema. Listar a coluna e passar NULL
+    // anulava esse default, produzindo 100% de linhas com confidence IS NULL.
+    // A chave só entra no INSERT quando explicitamente informada.
+    const confidenceProvided = entry.confidence !== undefined && entry.confidence !== null;
+
+    const columns = [
+      'trace_id', 'mint', 'token_symbol', 'pool_address',
+      'decision', 'composite_score',
+      'token_age_minutes', 'liquidity_usd', 'market_cap_usd',
+      'price_usd', 'price_change_5m_pct',
+      'buys_count_5m', 'sells_count_5m', 'buy_sell_ratio',
+      'volume_5m_usd', 'top5_holders_pct', 'holders_count', 'distance_from_low',
+      'sentinel_regime', 'btc_trend', 'sol_trend', 'session_hour_utc', 'is_weekend',
+      'estimated_slippage_pct', 'latency_to_send_ms', 'size_sol',
+      'gate_details', 'rejection_reason', 'metadata'
+    ];
+    const values: any[] = [
+      entry.traceId || randomUUID(),
+      entry.token.mint,
+      entry.token.tokenSymbol ?? null,
+      entry.token.poolAddress ?? null,
+      entry.decision,
+      entry.compositeScore ?? null,
+      entry.token.ageMinutes ?? null,
+      entry.token.liquidityUsd ?? null,
+      entry.token.marketCapUsd ?? null,
+      entry.token.priceUsd ?? null,
+      entry.token.priceChange5mPct ?? null,
+      entry.token.buysCount5m ?? null,
+      entry.token.sellsCount5m ?? null,
+      entry.token.buySellRatio ?? null,
+      entry.token.volume5mUsd ?? null,
+      entry.token.top5HoldersPct ?? null,
+      entry.token.holdersCount ?? null,
+      entry.token.distanceFromLow ?? null,
+      entry.market.sentinelRegime,
+      entry.market.btcTrend ?? null,
+      entry.market.solTrend ?? null,
+      entry.market.sessionHourUtc ?? null,
+      entry.market.isWeekend ?? null,
+      entry.execution?.estimatedSlippagePct ?? null,
+      entry.execution?.latencyToSendMs ?? null,
+      entry.execution?.sizeSol ?? null,
+      gateDetailsJson,
+      entry.rejectionReason ?? null,
+      metadataJson,
+    ];
+
+    // Inserir confidence no índice correspondente (após composite_score).
+    if (confidenceProvided) {
+      columns.splice(6, 0, 'confidence');
+      values.splice(6, 0, entry.confidence);
+    }
+
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+
     await client.query(
-      `INSERT INTO decision_journal (
-        trace_id, mint, token_symbol, pool_address,
-        decision, composite_score, confidence,
-        token_age_minutes, liquidity_usd, market_cap_usd,
-        price_usd, price_change_5m_pct,
-        buys_count_5m, sells_count_5m, buy_sell_ratio,
-        volume_5m_usd, top5_holders_pct, holders_count, distance_from_low,
-        sentinel_regime, btc_trend, sol_trend, session_hour_utc, is_weekend,
-        estimated_slippage_pct, latency_to_send_ms, size_sol,
-        gate_details, rejection_reason, metadata
-      ) VALUES (
-        $1, $2, $3, $4,
-        $5, $6, $7,
-        $8, $9, $10,
-        $11, $12,
-        $13, $14, $15,
-        $16, $17, $18, $19,
-        $20, $21, $22, $23, $24,
-        $25, $26, $27,
-        $28, $29, $30
-      )`,
-      [
-        entry.traceId || randomUUID(),
-        entry.token.mint,
-        entry.token.tokenSymbol ?? null,
-        entry.token.poolAddress ?? null,
-        entry.decision,
-        entry.compositeScore ?? null,
-        entry.confidence ?? null,
-        entry.token.ageMinutes ?? null,
-        entry.token.liquidityUsd ?? null,
-        entry.token.marketCapUsd ?? null,
-        entry.token.priceUsd ?? null,
-        entry.token.priceChange5mPct ?? null,
-        entry.token.buysCount5m ?? null,
-        entry.token.sellsCount5m ?? null,
-        entry.token.buySellRatio ?? null,
-        entry.token.volume5mUsd ?? null,
-        entry.token.top5HoldersPct ?? null,
-        entry.token.holdersCount ?? null,
-        entry.token.distanceFromLow ?? null,
-        entry.market.sentinelRegime,
-        entry.market.btcTrend ?? null,
-        entry.market.solTrend ?? null,
-        entry.market.sessionHourUtc ?? null,
-        entry.market.isWeekend ?? null,
-        entry.execution?.estimatedSlippagePct ?? null,
-        entry.execution?.latencyToSendMs ?? null,
-        entry.execution?.sizeSol ?? null,
-        gateDetailsJson,
-        entry.rejectionReason ?? null,
-        metadataJson,
-      ]
+      `INSERT INTO decision_journal (${columns.join(', ')}) VALUES (${placeholders})`,
+      values
     );
   }
 

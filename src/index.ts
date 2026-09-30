@@ -4,6 +4,12 @@ import axios from 'axios';
 import { VitalityState, getAgentVitalityState } from './core/vitalityEngine.js';
 import { SolanaWalletService } from './blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
+import {
+  AdaptivePositionSizer,
+  LADDER_SOL,
+  MAX_TRADE_AMOUNT_SOL,
+  MIN_TRADE_AMOUNT_SOL
+} from './blockchain/adaptivePositionSizer.js';
 import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
@@ -28,7 +34,7 @@ const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMUL
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
 const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
-const TRADE_AMOUNT_SOL = 0.05;      // Exatamente 0.05 SOL por trade
+const TRADE_AMOUNT_SOL = MAX_TRADE_AMOUNT_SOL; // Teto do lote por trade (o lote real é dimensionado adaptativamente)
 const GAS_RESERVE_SOL = 0.05;       // Reserva mínima intocável em 0.05 SOL (gás de saída)
 const MAX_TOTAL_ALLOCATION_SOL = 0.10; // Alocação máxima total de capital em 0.10 SOL (> 0.19 SOL livres)
 const PORT = Number(process.env.PORT) || 3009;
@@ -62,6 +68,7 @@ const jupiterEngine = new JupiterExecutionEngine({
 });
 
 const reproduction = new ReproductionEngine();
+const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
 const postgresRepo = new SolanaPostgresRepository();
 const pgPool = postgresRepo.getPool();
 const journal = new DecisionLogger(pgPool, {
@@ -130,7 +137,41 @@ async function executeExitOrder(
     priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
   });
 
-  // 2. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido)
+  // 2. Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
+  // foi de fato confirmado. Sem esta trava, uma saída falha fechava a ATA
+  // (prendendo os tokens), gravava PnLperformed fictício e notificava "Saída Executada".
+  const exitConfirmed = exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS';
+
+  if (!exitConfirmed) {
+    const failReason = exitSwap.error || `Swap de saída não confirmado (status: ${exitSwap.status})`;
+    console.error(`🚫 [SAÍDA NÃO CONFIRMADA] ${pos.symbol}: ${failReason} | Posição mantida, ATA preservada, nenhum PnL gravado.`);
+
+    // Registra a falha para telemetria/diagnóstico, sem alterar estado da posição.
+    latestState.recentAudits[0] = {
+      ...latestState.recentAudits[0],
+      swapFailReason: failReason
+    } as any;
+
+    journal.logDecision({
+      traceId: pos.traceId || randomUUID(),
+      decision: 'ABORTED_LATENCY',
+      token: {
+        mint: pos.mint,
+        tokenSymbol: pos.symbol,
+        priceUsd: pos.entryPriceUsd
+      },
+      market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
+      execution: { sizeSol: exitSolValue },
+      gateEvaluations: [],
+      rejectionReason: `EXIT_SWAP_FAILED: ${failReason}`,
+      metadata: { phase: 'EXIT', exitReason, tokenAmountToSell }
+    });
+
+    updateDashboardViews();
+    return { success: false, txSignature: '', error: failReason };
+  }
+
+  // 3. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido)
   if (shouldCloseAta) {
     try {
       await wallet.closeTokenAccount(pos.mint);
@@ -142,7 +183,7 @@ async function executeExitOrder(
     console.log(`🛡️ [Custódia Parcial] Conta ATA de ${pos.symbol} mantida aberta para os 50% restantes (Super Runner Mode).`);
   }
 
-  // 3. Quarentena Inteligente por Motivo de Saída
+  // 4. Quarentena Inteligente por Motivo de Saída
   if (!isPartial) {
     const QUARANTINE_MS: Record<string, number> = {
       STOP_LOSS:     3 * 60 * 60 * 1000,  // 3 horas
@@ -169,7 +210,7 @@ async function executeExitOrder(
     }
   }
 
-  // 4. Registra Trade Fechado
+  // 5. Registra Trade Fechado
   const pnlSol = pnlPct * (pos.entrySol || 0.015);
 
   // Registro do resultado no Drawdown Breaker para proteção de capital diária
@@ -190,7 +231,7 @@ async function executeExitOrder(
     txSignature: exitSwap.txSignature
   });
 
-  // 4.1 Registro assíncrono no Decision Journal (trade_outcomes) — ZERO bloqueio do loop de 1.5s
+  // 5.1 Registro assíncrono no Decision Journal (trade_outcomes) — ZERO bloqueio do loop de 1.5s
   const exitTypeMap: Record<string, DecisionType> = {
     STOP_LOSS: 'EXIT_SL',
     PARTIAL_TAKE_PROFIT_50: 'EXIT_PARTIAL',
@@ -241,7 +282,7 @@ async function executeExitOrder(
   }).catch(() => {});
 
   updateDashboardViews();
-  return { success: exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS', txSignature: exitSwap.txSignature, error: exitSwap.error };
+  return { success: true, txSignature: exitSwap.txSignature };
 }
 
 function updateDashboardViews() {
@@ -880,25 +921,68 @@ async function executeAutonomousCycle() {
         });
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
-        // Parâmetros de Banca: exatamente 0.05 SOL por trade respeitando reserva intocável de 0.05 SOL
+        // Dimensionamento adaptativo: o lote é escolhido pela profundidade real da pool.
         const currentBalance = latestState.balanceSol || (await wallet.getBalanceSol());
         const safeBalance = currentBalance - GAS_RESERVE_SOL;
-        if (safeBalance < TRADE_AMOUNT_SOL) {
-          console.log(`🛡️ [Reserva Intocável] Saldo livre (${safeBalance.toFixed(4)} SOL) insuficiente para alocar ${TRADE_AMOUNT_SOL} SOL mantendo ${GAS_RESERVE_SOL} SOL de reserva para taxas de saída.`);
+        if (safeBalance < MIN_TRADE_AMOUNT_SOL) {
+          console.log(`🛡️ [Reserva Intocável] Saldo livre (${safeBalance.toFixed(4)} SOL) insuficiente para alocar o lote mínimo ${MIN_TRADE_AMOUNT_SOL} SOL mantendo ${GAS_RESERVE_SOL} SOL de reserva para taxas de saída.`);
           return;
         }
-        const dynamicAllocSol = TRADE_AMOUNT_SOL; // Exatamente 0.05 SOL por trade
-        const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
 
-        console.log(`⚡ [3/3 Motor Jupiter V6] Cotando rota e executando compra com pré-voo ativo (${dynamicAllocSol} SOL | autoSlippage 750bps)...`);
+        const SOL_MINT = 'So11111111111111111111111111111111111111112';
+        const quoteParams = {
+          inputMint: SOL_MINT,
+          outputMint: topCandidate.mint,
+          slippageBps: 750,
+          autoSlippage: true,
+          autoSlippageCollisionUsdValue: 1000,
+          maxAutoSlippageBps: 750
+        };
+
+        console.log(`⚡ [3/3 Motor Jupiter V6] Dimensionando lote adaptativo (escada ${LADDER_SOL.join(' -> ')} SOL | autoSlippage 750bps)...`);
+        const sizing = await adaptiveSizer.findExecutableSize(quoteParams);
+
+        if (!sizing.success || !sizing.quote) {
+          const failReason = sizing.error || 'INSUFFICIENT_POOL_DEPTH';
+          console.log(`🚫 [Dimensionamento Abortado] ${topCandidate.symbol}: ${failReason}`);
+          journal.logDecision({
+            traceId: currentTraceId,
+            decision: 'ENTRY_REJECTED',
+            compositeScore: audit.score,
+            token: {
+              mint: topCandidate.mint,
+              tokenSymbol: topCandidate.symbol,
+              liquidityUsd: topCandidate.liquidityUsd,
+              priceUsd: topCandidate.priceUsd
+            },
+            market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
+            gateEvaluations: gates,
+            rejectionReason: `${sizing.abortReason}: ${failReason}`,
+            metadata: { phase: 'SIZING', attempts: sizing.attempts }
+          });
+          antiSpamMemory.recordVeto(topCandidate.mint, `Sizing abortado: ${failReason}`, 60 * 60 * 1000);
+          postgresRepo.saveQuarantine({
+            mint: topCandidate.mint,
+            symbol: topCandidate.symbol,
+            reason: `Sizing abortado: ${failReason}`,
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+          }).catch(() => {});
+          return;
+        }
+
+        const dynamicAllocSol = sizing.sizeSol;
+        const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
+        console.log(`📐 Lote dimensionado: ${dynamicAllocSol} SOL (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
+
+        console.log(`⚡ [3/3 Motor Jupiter V6] Executando compra com pré-voo fail-closed (${dynamicAllocSol} SOL | autoSlippage 750bps)...`);
         const swapSim = await jupiterEngine.executeSwap({
-          inputMint: 'So11111111111111111111111111111111111111112', // SOL
+          inputMint: SOL_MINT,
           outputMint: topCandidate.mint,
           amountLamports: tradeLamports,
           autoSlippage: true,
           autoSlippageCollisionUsdValue: 1000,
           maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
-          skipPreflight: false, // Ativa simulação pré-voo RPC para evitar gasto de taxas em erro 0x1789/6025
+          skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair()
         });

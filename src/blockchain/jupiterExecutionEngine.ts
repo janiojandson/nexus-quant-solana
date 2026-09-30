@@ -35,6 +35,8 @@ export interface JupiterEngineConfig {
   rpcUrl?: string;
   isDryRun?: boolean;
   dexAggregator?: DexAggregatorService;
+  /** Conexão injetável (testes). Em produção, derivada de rpcUrl. */
+  connection?: Connection;
 }
 
 export class JupiterExecutionEngine {
@@ -44,10 +46,14 @@ export class JupiterExecutionEngine {
   private swapUrl: string;
 
   constructor(config?: JupiterEngineConfig) {
-    this.connection = new Connection(config?.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
+    this.connection = config?.connection || new Connection(config?.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
     this.isDryRun = config?.isDryRun !== undefined ? config.isDryRun : (process.env.DRY_RUN_MODE !== 'false');
     this.dexAggregator = config?.dexAggregator || new DexAggregatorService();
     this.swapUrl = process.env.JUPITER_SWAP_URL || 'https://public.jupiterapi.com/swap';
+  }
+
+  public getAggregator(): DexAggregatorService {
+    return this.dexAggregator;
   }
 
   public async getQuote(inputMint: string, outputMint: string, amountLamports: number, slippageBps = 400) {
@@ -119,26 +125,31 @@ export class JupiterExecutionEngine {
       // 4. Assinar com a Chave Phantom do Agente
       transaction.sign([req.keypair]);
 
-      // 4.1 Simulação Pré-Voo Ativa (Zero Custo de Gas):
-      // Protege contra falha on-chain (ex: erro 0x1789 / 6025 - Slippage Exceeded)
-      // Evita o gasto desnecessário de taxas de prioridade e gás na rede em swaps fadados ao insucesso.
+      // 4.1 Simulação Pré-Voo Fail-Closed:
+      // Se a simulação indicar que a transação falharia on-chain (ex.: Custom 6014
+      // SlippageExceeded), a tx NÃO é transmitida — preserva taxa de rede.
+      // Falha do próprio RPC de simulação também aborta: enviar sem validação é
+      // exatamente o comportamento fail-open que gerou compras emriotadas.
       if (!req.skipPreflight) {
+        let simErr: unknown = null;
         try {
           const simRes = await this.connection.simulateTransaction(transaction);
-          if (simRes.value.err) {
-            const errStr = JSON.stringify(simRes.value.err);
-            console.warn(`🛑 [SIMULAÇÃO PRÉ-VOO BARRADA]: Swap falharia on-chain (${errStr}). Cancelado localmente para salvar taxa de rede!`);
-            return {
-              txSignature: '',
-              status: 'FAILED',
-              inAmount: req.amountLamports,
-              outAmount: 0,
-              isDryRun: false,
-              error: `Simulação pré-voo rejeitada pelo nó RPC: ${errStr}`
-            };
-          }
-        } catch (simErr: any) {
-          console.warn(`⚠️ [Aviso Pré-Voo] Falha na simulação local: ${simErr?.message || simErr}`);
+          if (simRes.value.err) simErr = simRes.value.err;
+        } catch (e: any) {
+          simErr = e;
+        }
+
+        if (simErr !== null) {
+          const errStr = typeof simErr === 'string' ? simErr : JSON.stringify(simErr);
+          console.warn(`🛑 [SIMULAÇÃO PRÉ-VOO BARRADA]: Swap falharia on-chain (${errStr}). Transmissão cancelada.`);
+          return {
+            txSignature: '',
+            status: 'FAILED',
+            inAmount: req.amountLamports,
+            outAmount: 0,
+            isDryRun: false,
+            error: `Simulação pré-voo rejeitada pelo nó RPC: ${errStr}`
+          };
         }
       }
 
