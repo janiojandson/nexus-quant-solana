@@ -77,17 +77,56 @@ export async function handleApiRoutes(
     const formattedPositions = (s.positions || []).map(p => ({
       mint: p.mint,
       symbol: p.symbol,
+      tokenAmount: p.tokenAmount,
       entryPriceUsd: p.entryPriceUsd,
       currentPriceUsd: p.currentPriceUsd,
       pnlPercent: Number((p.pnlPct * 100).toFixed(2)),
-      stopLossPercent: Number((p.stopLossPct * 100).toFixed(2)),
+      stopLossPct: Number((p.stopLossPct * 100).toFixed(2)),
+      takeProfitPct: Number(((p.takeProfitPct || 0) * 100).toFixed(2)),
+      // Estado real de proteção (antes vinha sempre false do backend)
       trailingStopActive: Boolean(p.trailingActive),
+      stopStatusText: p.stopStatusText,
+      trailingStopSolValue: p.trailingStopSolValue,
+      peakSolValue: p.peakSolValue,
+      solscanUrl: p.solscanUrl,
+      dexScreenerUrl: p.dexScreenerUrl,
       timeOpenSeconds: Math.floor((Date.now() - (p.entryTimestamp || Date.now())) / 1000)
     }));
 
-    const formattedLogs = (s.scannerLogs || []).map(l => 
+    const formattedLogs = (s.scannerLogs || []).map(l =>
       typeof l === 'string' ? l : `[${l.timestamp}] ${l.message}`
     );
+
+    // Histórico de trades encerrados, com assinatura da TX de saída para
+    // auditoria on-chain. Este dado já era populado em closedTrades mas não
+    // tinha superfície visual no painel.
+    const formattedClosedTrades = (s.closedTrades || []).map(t => ({
+      mint: t.mint,
+      symbol: t.symbol,
+      tokenAmount: t.tokenAmount,
+      entryPriceUsd: t.entryPriceUsd,
+      exitPriceUsd: t.exitPriceUsd,
+      realizedPnlSol: Number((t.pnlSolEst || 0).toFixed(6)),
+      pnlPct: Number((t.pnlPct * 100).toFixed(2)),
+      entryTimestamp: t.entryTimestamp,
+      exitReason: t.exitReason,
+      txSignature: t.txSignature || null,
+      txUrl: t.txSignature ? `https://solscan.io/tx/${t.txSignature}` : null,
+      closedAt: t.exitTimestamp,
+      dexScreenerUrl: t.dexScreenerUrl,
+      solscanUrl: t.solscanUrl
+    }));
+
+    // Auditorias recentes: probes, aprovações e falhas de swap.
+    const formattedAudits = (s.recentAudits || []).map(a => ({
+      mint: a.mint,
+      symbol: a.symbol,
+      isSafe: a.isSafe,
+      score: a.score,
+      reason: a.reason || null,
+      swapFailReason: a.swapFailReason || null,
+      timestamp: a.timestamp
+    }));
 
     const responsePayload = {
       // Formato exigido para clientes avançados / ordem de execução
@@ -108,6 +147,11 @@ export async function handleApiRoutes(
       },
       positions: formattedPositions,
       recentLogs: formattedLogs,
+      closedTrades: formattedClosedTrades,
+      recentAudits: formattedAudits,
+      walletHoldings: s.walletHoldings || [],
+      totalRealizedPnlSol: s.totalRealizedPnlSol,
+      totalNetworkFeesSolEst: s.totalNetworkFeesSolEst,
 
       // Campos legados mantidos para retrocompatibilidade
       agent: s.agent,
@@ -117,12 +161,9 @@ export async function handleApiRoutes(
       macroRegime: s.macroRegime,
       circuitBreakerActive: s.circuitBreakerActive,
       activeRpcUrl: s.activeRpcUrl,
-      totalRealizedPnlSol: s.totalRealizedPnlSol,
       quarantineCount: s.quarantineCount,
       lastUpdated: s.lastUpdated,
-      scannerLogs: s.scannerLogs,
-      closedTrades: s.closedTrades,
-      walletHoldings: s.walletHoldings
+      scannerLogs: s.scannerLogs
     };
 
     res.writeHead(200, { 'Content-Type': 'application/json' });

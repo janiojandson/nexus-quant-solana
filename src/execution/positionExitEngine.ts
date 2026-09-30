@@ -15,6 +15,11 @@ export interface PositionTracking {
   entryLiquidityUsd?: number;
   entryVolume5m?: number;
   traceId?: string;
+  // Estado de proteção propagado para o painel pelo monitor de 1.5s.
+  trailingActive?: boolean;
+  trailingStopSolValue?: number;
+  stopStatusText?: string;
+  peakSolValue?: number;
 }
 
 export interface PositionInput extends Omit<PositionTracking, 'stopLossPct' | 'takeProfitPct'> {

@@ -316,6 +316,13 @@ function updateDashboardViews() {
       stopLossPct: p.stopLossPct,
       takeProfitPct: p.takeProfitPct,
       entryTimestamp: p.entryTimestamp,
+      // O painel exibia "INATIVO" permanente porque estes campos nunca eram
+      // mapeados. O monitor calcula trailingActive/stopStatusText; aqui só
+      // propagamos o último valor conhecido.
+      trailingActive: p.trailingActive ?? false,
+      trailingStopSolValue: p.trailingStopSolValue,
+      stopStatusText: p.stopStatusText,
+      peakSolValue: p.peakSolValue,
       dexScreenerUrl: `https://dexscreener.com/solana/${p.mint}`,
       solscanUrl: `https://solscan.io/token/${p.mint}`
     };
@@ -534,6 +541,13 @@ async function runUltraFastExitMonitor() {
           : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
 
         console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
+
+        // Propaga o estado real de proteção para o painel. Sem isto a coluna
+        // "Trailing Stop" ficava em INATIVO mesmo com o trailing ativo.
+        pos.trailingActive = pos.partialTaken;
+        pos.stopStatusText = stopStatusText;
+        pos.peakSolValue = peakPnlPct * (pos.entrySol || 0.015);
+        pos.trailingStopSolValue = trailPnlPct * (pos.entrySol || 0.015);
 
         // 🧠 Ayla Sentinela de Saída Adaptativa:
         // Passa contexto atual da posição se disponível
@@ -1141,6 +1155,36 @@ async function executeAutonomousCycle() {
  * Se houver qualquer token SPL com saldo > 0 diferente de SOL/USDC,
  * reidrata-o automaticamente como posição ativa no PositionExitEngine.
  */
+/** Janela de reidratação: só recompramos_positions dentro deste prazo. */
+const REHYDRATE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 horas
+
+/**
+ * Mints que o AGENTE comprou: registrados como ENTRY_APPROVED no ledger dentro
+ * da janela de reidratação. Sem isso, qualquer token solto na carteira virava
+ * posição gerida com stop loss sintético.
+ */
+async function queryAgentOwnedMints(): Promise<Set<string>> {
+  const mints = new Set<string>();
+  const pool = postgresRepo.getPool();
+  if (!pool) {
+    console.warn('⚠️ [BOOT] Sem pool Postgres — reidratação pulada por segurança.');
+    return mints;
+  }
+  try {
+    const res = await pool.query(
+      `SELECT DISTINCT mint FROM decision_journal
+        WHERE decision = 'ENTRY_APPROVED'
+          AND created_at >= NOW() - ($1 || ' milliseconds')::interval
+          AND created_at <= NOW()`,
+      [String(REHYDRATE_WINDOW_MS)]
+    );
+    for (const row of res.rows) if (row.mint) mints.add(row.mint);
+  } catch (err: any) {
+    console.warn('⚠️ [BOOT] Falha ao consultar mints do agente:', err?.message || err);
+  }
+  return mints;
+}
+
 async function rehydratePositionsFromWalletOnBoot() {
   console.log('🔄 [BOOT: Reidratação On-Chain] Verificando contas SPL na carteira Phantom...');
   try {
@@ -1154,8 +1198,26 @@ async function rehydratePositionsFromWalletOnBoot() {
       'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
     ]);
 
+    // Só reidrata o que o AGENTE comprou. Adotar qualquer token da carteira
+    // criava posições com stop loss sintético (-20%) e PnL inventado sobre
+    // resíduos de dumps manuais — o painel passava a "gerir" ativos que o
+    // bot nunca comprou.
+    const ownedMints = await queryAgentOwnedMints();
+    if (ownedMints.size === 0) {
+      console.log('ℹ️  [BOOT] Nenhum approval recente no ledger — nenhuma posição a reidratar.');
+    } else {
+      console.log(`📜 [BOOT] Aprovados no ledger (${REHYDRATE_WINDOW_MS / 3_600_000}h): ${ownedMints.size}`);
+    }
+
+    const orphans: Array<{ mint: string; tokenAmount: number }> = [];
+
     for (const spl of splAccounts) {
-      if (BASE_MINTS.has(spl.mint)) continue;
+      if (BASE_MINTS.has(spl.mint) || spl.tokenAmount <= 0) continue;
+
+      if (!positionEngine.getPosition(spl.mint) && !ownedMints.has(spl.mint)) {
+        orphans.push({ mint: spl.mint, tokenAmount: spl.tokenAmount });
+        continue;
+      }
 
       if (!positionEngine.getPosition(spl.mint)) {
         const meta = await scanner.fetchTokenMetadata(spl.mint);
@@ -1168,8 +1230,8 @@ async function rehydratePositionsFromWalletOnBoot() {
           tokenAmount: spl.tokenAmount,
           entryPriceUsd: price,
           entryTimestamp: Date.now(),
-          stopLossPct: -0.20,
-          takeProfitPct: 1.0, // +100% para colheita parcial 50%
+          stopLossPct: -0.06,
+          takeProfitPct: 0.35,
           entrySol: 0.015,
           entrySolValue: 0.015,
           entryLiquidityUsd: 15000,
@@ -1178,6 +1240,25 @@ async function rehydratePositionsFromWalletOnBoot() {
 
         console.log(`🛡️ [BOOT: Posição Reidratada e Protegida] ${symbol} (${spl.mint}) | Quantidade: ${spl.tokenAmount.toLocaleString()} | Preço Base: $${price}`);
       }
+    }
+
+    if (orphans.length > 0) {
+      // Listados em bloco separado: visíveis para o operador, invisíveis para
+      // a mesa de operações do bot.
+      latestState.walletHoldings = orphans.map((o) => ({
+        mint: o.mint,
+        symbol: `${o.mint.slice(0, 4)}...${o.mint.slice(-4)}`,
+        tokenAmount: o.tokenAmount,
+        decimals: 0,
+        ataAddress: '',
+        solscanUrl: `https://solscan.io/token/${o.mint}`,
+        dexScreenerUrl: `https://dexscreener.com/solana/${o.mint}`
+      }));
+      console.log(`🚫 [BOOT] ${orphans.length} token(í) órfão(ós) IGNORADOS pela mesa de operações:`);
+      orphans.forEach((o) => console.log(`   • ${o.mint} (${o.tokenAmount})`));
+      console.log(`   Use "npm run token:purge-ci" (ajuste CANARY_MINT) para expurgar.`);
+    } else {
+      latestState.walletHoldings = [];
     }
 
     updateDashboardViews();

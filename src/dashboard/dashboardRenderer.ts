@@ -58,6 +58,8 @@ export interface DashboardState {
     solscanUrl: string;
     trailingActive?: boolean;
     stopStatusText?: string;
+    trailingStopSolValue?: number;
+    peakSolValue?: number;
   }>;
   walletHoldings?: WalletHoldingView[];
   closedTrades: ClosedTradeView[];
@@ -73,6 +75,95 @@ export interface DashboardState {
   quarantineCount: number;
   scannerLogs?: Array<{ timestamp: string; message: string; type?: 'info' | 'warn' | 'success' | 'fallback' }>;
   lastUpdated: string;
+}
+
+const EXIT_REASON_LABELS: Record<string, { label: string; cls: string }> = {
+  STOP_LOSS: { label: 'Stop Loss', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
+  PARTIAL_TAKE_PROFIT_50: { label: 'Colheita Parcial +35%', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  TRAILING_STOP: { label: 'Trailing Stop', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
+  TIME_STOP: { label: 'Time-Stop', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
+  TAKE_PROFIT: { label: 'Take Profit', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  MANUAL: { label: 'Manual / Pânico', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30' }
+};
+
+function renderClosedTradesSection(state: DashboardState): string {
+  const trades = state.closedTrades || [];
+  const realizedPnl = trades.reduce((acc, t) => acc + (t.pnlSolEst || 0), 0);
+  const wins = trades.filter(t => (t.pnlPct || 0) > 0).length;
+
+  const rows = trades.slice().reverse().map(t => {
+    const pnlPct = Number(t.pnlPct || 0) * 100;
+    const pnlSol = Number(t.pnlSolEst || 0);
+    const isProfit = pnlPct >= 0;
+    const reason = EXIT_REASON_LABELS[t.exitReason] || { label: t.exitReason, cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' };
+    const closedAt = new Date(t.exitTimestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    const txLink = t.txSignature
+      ? `<a href="https://solscan.io/tx/${t.txSignature}" target="_blank" class="text-cyan-400 hover:underline font-mono text-[11px]">${t.txSignature.slice(0, 10)}...↗</a>`
+      : '<span class="text-slate-600 text-[11px]">sem tx</span>';
+
+    return `
+      <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+        <td class="py-3 px-4 text-slate-400 text-xs font-mono whitespace-nowrap">${closedAt}</td>
+        <td class="py-3 px-4">
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-slate-200">${t.symbol}</span>
+            <a href="https://solscan.io/token/${t.mint}" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>
+          </div>
+          <div class="text-[11px] text-slate-500 font-mono">${t.mint.slice(0, 6)}...${t.mint.slice(-4)}</div>
+        </td>
+        <td class="py-3 px-4 text-slate-300 font-mono text-xs">$${Number(t.entryPriceUsd).toFixed(8)}</td>
+        <td class="py-3 px-4 text-slate-200 font-mono text-xs">$${Number(t.exitPriceUsd).toFixed(8)}</td>
+        <td class="py-3 px-4 font-mono text-xs ${isProfit ? 'text-emerald-400' : 'text-rose-400'}">
+          ${isProfit ? '+' : ''}${pnlSol.toFixed(6)} SOL
+          <div class="text-[10px] opacity-80">${isProfit ? '+' : ''}${pnlPct.toFixed(2)}%</div>
+        </td>
+        <td class="py-3 px-4">
+          <span class="inline-block px-2 py-0.5 rounded text-[10px] border ${reason.cls}">${reason.label}</span>
+        </td>
+        <td class="py-3 px-4">${txLink}</td>
+      </tr>
+    `;
+  }).join('');
+
+  const body = trades.length === 0
+    ? `<tr><td colspan="7" class="py-10 text-center text-slate-500 text-sm">Nenhum trade encerrado ainda. O histórico aparece após o primeiro fechamento confirmado on-chain.</td></tr>`
+    : rows;
+
+  return `
+    <section class="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 md:p-6 shadow-xl">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 class="text-sm md:text-base font-bold text-white flex items-center gap-2">
+          <span>📜 Histórico de Trades Fechados</span>
+          <span id="closed-trades-badge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">${trades.length} trade(s)</span>
+        </h2>
+        <div class="flex items-center gap-4 text-xs font-mono">
+          <span class="text-slate-400">PnL realizado:
+            <span id="closed-trades-pnl" class="${realizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-bold">${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(6)} SOL</span>
+          </span>
+          <span class="text-slate-400">Acerto: <span id="closed-trades-win" class="text-cyan-400 font-bold">${wins}/${trades.length}</span></span>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left">
+          <thead>
+            <tr class="border-b border-slate-700 text-[10px] uppercase tracking-wider text-slate-500">
+              <th class="py-2 px-4 font-semibold">Encerramento</th>
+              <th class="py-2 px-4 font-semibold">Token / Mint</th>
+              <th class="py-2 px-4 font-semibold">Preço Entrada</th>
+              <th class="py-2 px-4 font-semibold">Preço Saída</th>
+              <th class="py-2 px-4 font-semibold">PnL Realizado</th>
+              <th class="py-2 px-4 font-semibold">Motivo</th>
+              <th class="py-2 px-4 font-semibold">TX de Saída</th>
+            </tr>
+          </thead>
+          <tbody id="closed-trades-tbody">${body}</tbody>
+        </table>
+      </div>
+      <p class="text-[10px] text-slate-600 mt-3 font-mono">
+        Nota: o histórico vive em memória e é zerado a cada redeploy. Agregados persistidos ficam no Decision Journal.
+      </p>
+    </section>
+  `;
 }
 
 export function renderDashboardHtml(state: DashboardState): string {
@@ -289,6 +380,9 @@ export function renderDashboardHtml(state: DashboardState): string {
       </div>
     </section>
 
+    <!-- HISTÓRICO DE TRADES FECHADOS -->
+    ${renderClosedTradesSection(state)}
+
     <!-- DECISION JOURNAL & CALIBRAÇÃO DE EV v2.5.0 (4 CARDS) -->
     ${renderJournalSection()}
 
@@ -444,9 +538,11 @@ export function renderDashboardHtml(state: DashboardState): string {
                 '</td>' +
                 '<td class="py-4 px-4 text-xs text-slate-400">' + Number(stopLoss).toFixed(1) + '%</td>' +
                 '<td class="py-4 px-4 text-xs">' +
-                  '<span class="' + (p.trailingStopActive || p.trailingActive ? 'text-emerald-400 font-semibold' : 'text-slate-500') + '">' +
-                    (p.trailingStopActive || p.trailingActive ? 'ATIVO (-10% Topo)' : 'INATIVO (Aguardando +35%)') +
-                  '</span>' +
+                  (p.stopStatusText
+                    ? '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-400') + '">' + p.stopStatusText + '</span>'
+                    : '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-500') + '">' +
+                      ((p.trailingStopActive || p.trailingActive) ? 'ATIVO (-15% Topo)' : 'INATIVO (Aguardando +35%)') +
+                    '</span>') +
                 '</td>' +
                 '<td class="py-4 px-4 md:px-6 text-right font-sans">' +
                   '<button onclick="panicToken(\\'' + p.mint + '\\', \\'' + p.symbol + '\\')" class="bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg border border-rose-500/40 shadow-sm transition active:scale-95 cursor-pointer">' +
@@ -458,7 +554,65 @@ export function renderDashboardHtml(state: DashboardState): string {
           }
         }
 
-        // 5. Atualiza Logs
+        // 5. Atualiza Histórico de Trades Fechados
+        const closed = (data.closedTrades || []).slice().reverse();
+        const tradesTbody = document.getElementById('closed-trades-tbody');
+        const tradesBadge = document.getElementById('closed-trades-badge');
+        const tradesPnl = document.getElementById('closed-trades-pnl');
+        const tradesWin = document.getElementById('closed-trades-win');
+        if (tradesBadge) tradesBadge.textContent = closed.length + ' trade(s)';
+        if (closed.length > 0) {
+          const totalPnl = closed.reduce(function (a, t) { return a + Number(t.realizedPnlSol || 0); }, 0);
+          const wins = closed.filter(function (t) { return Number(t.pnlPct || 0) > 0; }).length;
+          if (tradesPnl) {
+            tradesPnl.textContent = (totalPnl >= 0 ? '+' : '') + totalPnl.toFixed(6) + ' SOL';
+            tradesPnl.className = (totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400') + ' font-bold';
+          }
+          if (tradesWin) tradesWin.textContent = wins + '/' + closed.length;
+        }
+        if (tradesTbody) {
+          if (closed.length === 0) {
+            tradesTbody.innerHTML = '<tr><td colspan="7" class="py-10 text-center text-slate-500 font-sans text-sm">Nenhum trade encerrado ainda. O histórico aparece após o primeiro fechamento confirmado on-chain.</td></tr>';
+          } else {
+            var reasonLabels = {
+              STOP_LOSS: ['Stop Loss', 'bg-rose-500/15 text-rose-300 border-rose-500/30'],
+              PARTIAL_TAKE_PROFIT_50: ['Colheita Parcial +35%', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],
+              TRAILING_STOP: ['Trailing Stop', 'bg-amber-500/15 text-amber-300 border-amber-500/30'],
+              TIME_STOP: ['Time-Stop', 'bg-slate-500/15 text-slate-300 border-slate-500/30'],
+              TAKE_PROFIT: ['Take Profit', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],
+              MANUAL: ['Manual / Pânico', 'bg-purple-500/15 text-purple-300 border-purple-500/30']
+            };
+            tradesTbody.innerHTML = closed.map(function (t) {
+              var pnlPct = Number(t.pnlPct || 0);
+              var pnlSol = Number(t.realizedPnlSol || 0);
+              var isProfit = pnlPct >= 0;
+              var r = reasonLabels[t.exitReason] || [t.exitReason, 'bg-slate-500/15 text-slate-300 border-slate-500/30'];
+              var tx = t.txSignature
+                ? '<a href="https://solscan.io/tx/' + t.txSignature + '" target="_blank" class="text-cyan-400 hover:underline font-mono text-[11px]">' + String(t.txSignature).slice(0, 10) + '...↗</a>'
+                : '<span class="text-slate-600 text-[11px]">sem tx</span>';
+              var d = new Date(t.closedAt || t.exitTimestamp);
+              var when = isNaN(d.getTime()) ? '-' : d.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+              return '<tr class="border-b border-slate-800/60 hover:bg-slate-800/30">' +
+                '<td class="py-3 px-4 text-slate-400 text-xs font-mono whitespace-nowrap">' + when + '</td>' +
+                '<td class="py-3 px-4">' +
+                  '<div class="flex items-center gap-2"><span class="font-semibold text-slate-200">' + t.symbol + '</span>' +
+                  '<a href="https://solscan.io/token/' + t.mint + '" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a></div>' +
+                  '<div class="text-[11px] text-slate-500 font-mono">' + String(t.mint).slice(0, 6) + '...' + String(t.mint).slice(-4) + '</div>' +
+                '</td>' +
+                '<td class="py-3 px-4 text-slate-300 font-mono text-xs">$' + Number(t.entryPriceUsd || 0).toFixed(8) + '</td>' +
+                '<td class="py-3 px-4 text-slate-200 font-mono text-xs">$' + Number(t.exitPriceUsd || 0).toFixed(8) + '</td>' +
+                '<td class="py-3 px-4 font-mono text-xs ' + (isProfit ? 'text-emerald-400' : 'text-rose-400') + '">' +
+                  (isProfit ? '+' : '') + pnlSol.toFixed(6) + ' SOL' +
+                  '<div class="text-[10px] opacity-80">' + (isProfit ? '+' : '') + pnlPct.toFixed(2) + '%</div>' +
+                '</td>' +
+                '<td class="py-3 px-4"><span class="inline-block px-2 py-0.5 rounded text-[10px] border ' + r[1] + '">' + r[0] + '</span></td>' +
+                '<td class="py-3 px-4">' + tx + '</td>' +
+              '</tr>';
+            }).join('');
+          }
+        }
+
+        // 6. Atualiza Logs
         const logs = data.recentLogs || (data.scannerLogs ? data.scannerLogs.map(l => typeof l === 'string' ? l : '[' + l.timestamp + '] ' + l.message) : []);
         const logsContainer = document.getElementById('logs-container');
         if (logsContainer && logs.length > 0) {
