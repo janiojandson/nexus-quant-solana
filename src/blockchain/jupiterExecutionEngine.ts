@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
-import { DexAggregatorService } from './dexAggregator.js';
+import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
 
 export interface SwapExecutionRequest {
   inputMint: string;
@@ -67,6 +67,93 @@ export class JupiterExecutionEngine {
     });
   }
 
+  /**
+   * Simulação pré-voo pura: monta a transação via Jupiter e a executa no RPC
+   * SEM assinar e SEM transmitir. Usada pelo sizer adaptativo para testar um
+   * lote antes de comprometer capital.
+   *
+   * Retorna `error` preenchido (string) quando o lote é inviável — 6014
+   * SlippageExceeded, 0x1789, profundidade insuficiente, etc.
+   */
+  public async simulateSwap(req: SwapExecutionRequest): Promise<{ success: boolean; error?: string; unitsConsumed?: number }> {
+    try {
+      const isBuy = req.inputMint === 'So11111111111111111111111111111111111111112';
+      const useAutoSlippage = req.autoSlippage !== undefined ? req.autoSlippage : isBuy;
+
+      const quote = await this.dexAggregator.getQuote({
+        inputMint: req.inputMint,
+        outputMint: req.outputMint,
+        amountLamports: req.amountLamports,
+        slippageBps: req.slippageBps ?? 400,
+        autoSlippage: useAutoSlippage,
+        autoSlippageCollisionUsdValue: req.autoSlippageCollisionUsdValue ?? 1000,
+        maxAutoSlippageBps: req.maxAutoSlippageBps ?? 750
+      });
+
+      const transaction = await this.buildSwapTransaction(quote, req, isBuy);
+
+      // Assina com a wallet quando ela é signer requerido, para que a
+      // simulação reflita a mesma falha de authority que ocorreria no envio.
+      if (req.keypair) {
+        try {
+          transaction.sign([req.keypair]);
+        } catch (signErr: any) {
+          if (!/non signer key/.test(signErr?.message || '')) throw signErr;
+        }
+      }
+
+      const simRes = await this.connection.simulateTransaction(transaction);
+      if (simRes.value.err) {
+        return {
+          success: false,
+          unitsConsumed: simRes.value.unitsConsumed,
+          error: `Simulação pré-voo rejeitada: ${JSON.stringify(simRes.value.err)}`
+        };
+      }
+      return { success: true, unitsConsumed: simRes.value.unitsConsumed };
+    } catch (err: any) {
+      const detail = err?.response?.data?.error || err?.message || String(err);
+      return {
+        success: false,
+        error: typeof detail === 'object' ? JSON.stringify(detail) : String(detail)
+      };
+    }
+  }
+
+  /** Monta (mas não assina) a transação de swap devolvida pela Jupiter. */
+  private async buildSwapTransaction(
+    quote: SwapQuoteResult,
+    req: SwapExecutionRequest,
+    isBuy: boolean
+  ): Promise<VersionedTransaction> {
+    const payloadQuote = quote.rawQuote || {
+      inputMint: quote.inputMint,
+      outputMint: quote.outputMint,
+      inAmount: String(quote.inAmount),
+      outAmount: String(quote.outAmount),
+      otherAmountThreshold: String(quote.outAmount),
+      swapMode: 'ExactIn',
+      slippageBps: quote.slippageBps,
+      priceImpactPct: String(quote.priceImpactPct)
+    };
+
+    const priorityLevel = req.priorityLevel || (isBuy ? 'medium' : 'high');
+    const swapRes = await axios.post(this.swapUrl, {
+      quoteResponse: payloadQuote,
+      userPublicKey: req.userPublicKey,
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: {
+        priorityLevelWithMaxLamports: {
+          maxLamports: priorityLevel === 'high' || priorityLevel === 'veryHigh' ? 5000000 : 2000000,
+          priorityLevel
+        }
+      }
+    }, { timeout: 8000 });
+
+    return VersionedTransaction.deserialize(Buffer.from(swapRes.data.swapTransaction, 'base64'));
+  }
+
   public async executeSwap(req: SwapExecutionRequest): Promise<SwapExecutionResponse> {
     try {
       // 1. Obter Cotação Oficial da Jupiter
@@ -96,33 +183,7 @@ export class JupiterExecutionEngine {
       }
 
       // 3. Montar a Transação Serializada V6 na Jupiter
-      const payloadQuote = quote.rawQuote || {
-        inputMint: quote.inputMint,
-        outputMint: quote.outputMint,
-        inAmount: String(quote.inAmount),
-        outAmount: String(quote.outAmount),
-        otherAmountThreshold: String(quote.outAmount),
-        swapMode: 'ExactIn',
-        slippageBps: quote.slippageBps,
-        priceImpactPct: String(quote.priceImpactPct)
-      };
-
-      const priorityLevel = req.priorityLevel || (isBuy ? 'medium' : 'high');
-      const swapRes = await axios.post(this.swapUrl, {
-        quoteResponse: payloadQuote,
-        userPublicKey: req.userPublicKey,
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: {
-          priorityLevelWithMaxLamports: {
-            maxLamports: priorityLevel === 'high' || priorityLevel === 'veryHigh' ? 5000000 : 2000000,
-            priorityLevel
-          }
-        }
-      }, { timeout: 8000 });
-
-      const swapTransactionBuf = Buffer.from(swapRes.data.swapTransaction, 'base64');
-      const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+      const transaction = await this.buildSwapTransaction(quote, req, isBuy);
 
       // 4. Assinar com a Chave do Agente. `VersionedTransaction.sign` lança
       // "Cannot sign with non signer key" quando a carteira não é um signer

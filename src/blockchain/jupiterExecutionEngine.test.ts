@@ -195,3 +195,69 @@ test('JupiterExecutionEngine: deve abortar sem outAmount ficticio quando a cota�
   assert.strictEqual(result.outAmount, 0, 'jamais pode haver outAmount inventado');
   assert.strictEqual(state.sendCalls, 0);
 });
+
+// ==========================================================================
+// SIMULATE SWAP — usado pelo sizer adaptativo para testar cada degrau da escada
+// ==========================================================================
+
+test('simulateSwap: deve reportar sucesso sem transmitir quando a simulação aprova', async () => {
+  mockSwapEndpoint(testSigner);
+  const { conn, state } = makeConnection({ err: null });
+  const engine = makeEngine(conn);
+
+  const sim = await engine.simulateSwap(baseRequest);
+
+  assert.strictEqual(sim.success, true);
+  assert.strictEqual(state.simulateCalls, 1);
+  assert.strictEqual(state.sendCalls, 0, 'simulateSwap jamais deve transmitir');
+});
+
+test('simulateSwap: deve reportar o erro 6014 para o sizer escalonar o lote', async () => {
+  mockSwapEndpoint(testSigner);
+  const { conn, state } = makeConnection({ err: { InstructionError: [6, { Custom: 6014 }] } });
+  const engine = makeEngine(conn);
+
+  const sim = await engine.simulateSwap(baseRequest);
+
+  assert.strictEqual(sim.success, false);
+  assert.match(sim.error || '', /6014/);
+  assert.strictEqual(state.sendCalls, 0);
+});
+
+test('simulateSwap: deve falhar fechado quando a própria simulação lança', async () => {
+  mockSwapEndpoint(testSigner);
+  const { conn, state } = makeConnection({ throwErr: new Error('RPC 502') });
+  const engine = makeEngine(conn);
+
+  const sim = await engine.simulateSwap(baseRequest);
+
+  assert.strictEqual(sim.success, false);
+  assert.match(sim.error || '', /502/);
+  assert.strictEqual(state.sendCalls, 0);
+});
+
+test('simulateSwap: deve falhar fechado quando a cotação está indisponível', async () => {
+  const { conn, state } = makeConnection({ err: null });
+
+  class FailingAggregator extends DexAggregatorService {
+    constructor() {
+      super('https://fake.invalid');
+    }
+    public async getQuote(): Promise<SwapQuoteResult> {
+      throw new Error('Falha na cotação Jupiter (429): rate limit');
+    }
+  }
+
+  const engine = new JupiterExecutionEngine({
+    connection: conn as Connection,
+    isDryRun: false,
+    dexAggregator: new FailingAggregator()
+  });
+
+  const sim = await engine.simulateSwap(baseRequest);
+
+  assert.strictEqual(sim.success, false);
+  assert.match(sim.error || '', /rate limit/);
+  assert.strictEqual(state.simulateCalls, 0, 'nem deve simular sem cotação válida');
+  assert.strictEqual(state.sendCalls, 0);
+});

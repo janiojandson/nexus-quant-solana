@@ -956,12 +956,40 @@ async function executeAutonomousCycle() {
           maxAutoSlippageBps: 750
         };
 
-        console.log(`⚡ [3/3 Motor Jupiter V6] Dimensionando lote adaptativo (escada ${LADDER_SOL.join(' -> ')} SOL | autoSlippage 750bps)...`);
-        const sizing = await adaptiveSizer.findExecutableSize(quoteParams);
+        console.log(`⚡ [3/3 Motor Jupiter V6] Dimensionando lote adaptativo com validação pré-voo (escada ${LADDER_SOL.join(' -> ')} SOL | autoSlippage 750bps)...`);
+
+        // O hook `validate` fecha o ciclo sizer -> execução: cada degrau da
+        // escada é testado contra a simulação real ANTES de comprometer capital.
+        // Sem ele, um lote aprovado só por Price Impact ainda podia ser barrado
+        // pelo 6014 no pré-voo interno do executeSwap, e o escalonamento só
+        // ocorreria no token seguinte (com 1h de quarentena no meio).
+        const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
+          validate: async (_quote, sizeSol) => {
+            try {
+              const sim = await jupiterEngine.simulateSwap({
+                inputMint: SOL_MINT,
+                outputMint: topCandidate.mint,
+                amountLamports: Math.floor(sizeSol * 1e9),
+                autoSlippage: true,
+                autoSlippageCollisionUsdValue: 1000,
+                maxAutoSlippageBps: 750,
+                skipPreflight: false,
+                userPublicKey: OFFICIAL_PHANTOM_WALLET,
+                keypair: wallet.getKeypair(),
+                priorityLevel: 'medium'
+              });
+              return sim.success ? null : (sim.error || 'pré-voo rejeitou o lote');
+            } catch (err: any) {
+              console.warn(`   [Sizing] Pré-voo do lote ${sizeSol} SOL lançou exceção: ${err?.message || err}`);
+              return err?.message || 'exceção na simulação pré-voo';
+            }
+          }
+        });
 
         if (!sizing.success || !sizing.quote) {
           const failReason = sizing.error || 'INSUFFICIENT_POOL_DEPTH';
           console.log(`🚫 [Dimensionamento Abortado] ${topCandidate.symbol}: ${failReason}`);
+          console.log(`   Degraus testados: ${sizing.attempts.map((a) => `${a.sizeSol}SOL(pi=${a.priceImpactPct.toFixed(2)}%${a.accepted ? ',ok' : ',rej'})`).join(' -> ')}`);
           journal.logDecision({
             traceId: currentTraceId,
             decision: 'ENTRY_REJECTED',
@@ -989,7 +1017,8 @@ async function executeAutonomousCycle() {
 
         const dynamicAllocSol = sizing.sizeSol;
         const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
-        console.log(`📐 Lote dimensionado: ${dynamicAllocSol} SOL (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
+        console.log(`📐 Lote dimensionado e validado no pré-voo: ${dynamicAllocSol} SOL (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
+        console.log(`   Escada percorrida: ${sizing.attempts.map((a) => `${a.sizeSol}SOL(${a.accepted ? 'ok' : 'rej'})`).join(' -> ')}`);
 
         console.log(`⚡ [3/3 Motor Jupiter V6] Executando compra com pré-voo fail-closed (${dynamicAllocSol} SOL | autoSlippage 750bps)...`);
         const swapSim = await jupiterEngine.executeSwap({
