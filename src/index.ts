@@ -40,7 +40,7 @@ const GAS_RESERVE_SOL = 0.05;       // Reserva mínima intocável em 0.05 SOL (g
 const MAX_TOTAL_ALLOCATION_SOL = 0.10; // Alocação máxima total de capital em 0.10 SOL (> 0.19 SOL livres)
 const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
-const LAYA_URL = process.env.LAYA_INTERNAL_URL || process.env.LAYA_PUBLIC_FALLBACK_URL || 'https://nexus-decisor-laya-production.up.railway.app';
+const LAYA_URL = process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8000';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
 let isRunningScanner = false;

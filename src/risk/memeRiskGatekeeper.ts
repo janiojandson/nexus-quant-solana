@@ -51,7 +51,7 @@ export class MemeRiskGatekeeper {
 
   constructor(config?: MemeGatekeeperConfig) {
     // Malha interna do Railway ou URL configurada
-    this.layaBaseUrl = config?.layaBaseUrl || process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8080';
+    this.layaBaseUrl = config?.layaBaseUrl || process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8000';
     this.macroSentinelUrl = config?.macroSentinelUrl || process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
     // Tolerância estendida de latência para a CPU da Ayla (padrão 4000ms para acomodar 800ms-1500ms com folga)
     this.timeoutMs = config?.timeoutMs || 4000;
