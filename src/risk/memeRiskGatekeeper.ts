@@ -157,36 +157,57 @@ export class MemeRiskGatekeeper {
     }
 
     // 3. Consulta à Ayla/Laya (Decisão Reflexiva com timeout tolerante de até 4000ms)
+    // Padrão: malha interna do Railway (sem custo de egressa, latência mínima).
+    // Fallback: URL pública via internet, apenas se a interna falhar por DNS/conexão.
+    const internalUrl = this.layaBaseUrl;
+    const publicUrl = process.env.LAYA_PUBLIC_FALLBACK_URL
+      || 'https://nexus-decisor-laya-production.up.railway.app';
+
+    const layaPayload = {
+      state: {
+        context: 'SOLANA_MEMECOIN_AUDIT',
+        targetMint: token.mint,
+        liquidityUsd: token.liquidityUsd,
+        holdersCount: token.holdersCount,
+        mintAuthority: token.mintAuthority,
+        freezeAuthority: token.freezeAuthority,
+        buyTaxPct: token.buyTaxPct,
+        sellTaxPct: token.sellTaxPct,
+        priceChangeM5: token.priceChangeM5,
+        buysM5: token.buysM5,
+        sellsM5: token.sellsM5,
+        volumeBuysM5: token.volumeBuysM5,
+        volumeSellsM5: token.volumeSellsM5,
+        priceUsd: token.priceUsd,
+        h1HighPriceUsd: token.h1HighPriceUsd
+      },
+      questions: {
+        context: 'SOLANA_MEMECOIN_AUDIT',
+        targetMint: token.mint
+      }
+    };
+
+    let response;
     try {
-      const response = await axios.post(
-        `${this.layaBaseUrl}/v1/systemone`,
-        {
-          state: {
-            context: 'SOLANA_MEMECOIN_AUDIT',
-            targetMint: token.mint,
-            liquidityUsd: token.liquidityUsd,
-            holdersCount: token.holdersCount,
-            mintAuthority: token.mintAuthority,
-            freezeAuthority: token.freezeAuthority,
-            buyTaxPct: token.buyTaxPct,
-            sellTaxPct: token.sellTaxPct,
-            priceChangeM5: token.priceChangeM5,
-            buysM5: token.buysM5,
-            sellsM5: token.sellsM5,
-            volumeBuysM5: token.volumeBuysM5,
-            volumeSellsM5: token.volumeSellsM5,
-            priceUsd: token.priceUsd,
-            h1HighPriceUsd: token.h1HighPriceUsd
-          },
-          questions: {
-            context: 'SOLANA_MEMECOIN_AUDIT',
-            targetMint: token.mint
-          }
-        },
-        {
-          timeout: this.timeoutMs
-        }
-      );
+      response = await axios.post(`${internalUrl}/v1/systemone`, layaPayload, { timeout: this.timeoutMs });
+    } catch (firstErr: any) {
+      // Timeout não tenta fallback: a Laya pode estar processando.
+      const isTimeout = firstErr?.code === 'ECONNABORTED' || firstErr?.message?.includes('timeout');
+      if (isTimeout) throw firstErr;
+
+      try {
+        console.warn(`[Ayla/Laya] Malha interna ${internalUrl} falhou (${firstErr?.message || firstErr}). Tentando fallback público...`);
+        response = await axios.post(`${publicUrl}/v1/systemone`, layaPayload, { timeout: this.timeoutMs });
+        console.warn(`[Ayla/Laya] Resposta via fallback público (${publicUrl})`);
+      } catch (publicErr: any) {
+        console.warn(`[Ayla/Laya] Fallback público também falhou (${publicErr?.message || publicErr}). Usando heurísticas locais.`);
+      }
+    }
+
+    try {
+      if (!response) {
+        throw new Error('Laya indisponível: ambas as rotas (interna e pública) falharam');
+      }
 
       const decision = response.data;
       const latencyMs = Date.now() - startTime;

@@ -51,11 +51,13 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       })
     };
 
+    // Ambas as URLs (interna e pública) inválidas para forçar o fallback local
     const gatekeeper = new MemeRiskGatekeeper({
-      layaBaseUrl: 'http://127.0.0.1:9999', // URL sem serviço ativo para acionar fallback seguro
+      layaBaseUrl: 'http://127.0.0.1:9999',
       timeoutMs: 500,
       rugCheckService: mockRugCheck as any
     });
+    process.env.LAYA_PUBLIC_FALLBACK_URL = 'http://127.0.0.1:9998';
 
     const token: TokenSecurityMetadata = {
       mint: 'Meme333333333333333333333333333333333333333',
@@ -69,6 +71,8 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     // Token possui metricas on-chain perfeitas, fallback defensivo permite se seguro
     assert.strictEqual(audit.safe, true);
     assert.strictEqual(audit.validatedBy, 'LOCAL_HEURISTICS_FALLBACK');
+
+    delete process.env.LAYA_PUBLIC_FALLBACK_URL;
   });
 
   it('deve rejeitar token com priceChangeM5 <= 0 (Ayla Veto: Preço em sangria/queda nos últimos 5m)', async () => {
