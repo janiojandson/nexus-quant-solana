@@ -159,12 +159,29 @@ export class MemeRiskGatekeeper {
     // 3. Consulta à Ayla/Laya (Decisão Reflexiva com timeout tolerante de até 4000ms)
     try {
       const response = await axios.post(
-        `${this.layaBaseUrl}/v1/systemone/evaluate`,
+        `${this.layaBaseUrl}/v1/systemone`,
         {
-          context: 'SOLANA_MEMECOIN_AUDIT',
-          targetMint: token.mint,
-          liquidityUsd: token.liquidityUsd,
-          holdersCount: token.holdersCount
+          state: {
+            context: 'SOLANA_MEMECOIN_AUDIT',
+            targetMint: token.mint,
+            liquidityUsd: token.liquidityUsd,
+            holdersCount: token.holdersCount,
+            mintAuthority: token.mintAuthority,
+            freezeAuthority: token.freezeAuthority,
+            buyTaxPct: token.buyTaxPct,
+            sellTaxPct: token.sellTaxPct,
+            priceChangeM5: token.priceChangeM5,
+            buysM5: token.buysM5,
+            sellsM5: token.sellsM5,
+            volumeBuysM5: token.volumeBuysM5,
+            volumeSellsM5: token.volumeSellsM5,
+            priceUsd: token.priceUsd,
+            h1HighPriceUsd: token.h1HighPriceUsd
+          },
+          questions: {
+            context: 'SOLANA_MEMECOIN_AUDIT',
+            targetMint: token.mint
+          }
         },
         {
           timeout: this.timeoutMs
@@ -174,10 +191,18 @@ export class MemeRiskGatekeeper {
       const decision = response.data;
       const latencyMs = Date.now() - startTime;
 
-      if (decision && decision.action === 'VETO') {
+      // O Laya retorna { success, answers: { action: { choice, verdict, rationale } }, verdict, rationale_code, routing }
+      // O VETO pode estar em `verdict` (top-level) ou em `answers.action.choice`
+      const vetoChoice = decision?.answers?.action?.choice ?? decision?.verdict;
+      const isVeto = vetoChoice === 'VETO';
+
+      if (isVeto) {
+        const reason = decision?.answers?.action?.rationale
+          || decision?.rationale_code
+          || 'Risco de fluxo detectado';
         return {
           safe: false,
-          reason: `Veto emitido pela Ayla/Laya: ${decision.reason || 'Risco de fluxo detectado'}`,
+          reason: `Veto emitido pela Ayla/Laya: ${reason}`,
           score: 15,
           validatedBy: 'AYLA_LAYA_ENGINE',
           latencyMs
