@@ -874,41 +874,41 @@ async function runUltraFastExitMonitor() {
 
     for (const pos of openPositions) {
       try {
-        // Sensor econômico primário: DexScreener. Se indisponível, entra em
-        // modo degradado usando Jupiter como sensor temporário. Só consideramos
-        // perda real de sinal se as duas fontes falharem.
+        // Verdade econômica de saída = valor executável Jupiter Token -> SOL.
+        // DexScreener permanece como referência de mercado, mas nunca decide PnL/stop
+        // quando diverge da rota efetivamente vendável.
         const entrySol = pos.entrySol || 0.015;
         if (!pos.entryPriceUsd || pos.entryPriceUsd <= 0) {
           throw new Error('Posição sem preço USD de entrada para monitor de saída');
         }
 
-        let sensorPriceUsd = await scanner.fetchCurrentTokenPriceUsd(pos.mint);
-        let currentSolValue: number;
-        let pnlPct: number;
-        let sensorSource = 'DEXSCREENER';
+        const dexPriceUsd = await scanner.fetchCurrentTokenPriceUsd(pos.mint);
+        const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
+        const executableQuote = await jupiterEngine.getQuote(
+          pos.mint,
+          'So11111111111111111111111111111111111111112',
+          tokenAtomicAmount,
+          500
+        );
+        const currentSolValue = (executableQuote.outAmount || 0) / 1e9;
+        if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
+          throw new Error('Jupiter sem valor executável válido para monitor de saída');
+        }
+        const pnlPct = (currentSolValue - entrySol) / entrySol;
+        const sensorSource = 'JUPITER_EXECUTABLE';
+        const sensorPriceUsd = dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0
+          ? dexPriceUsd
+          : pos.entryPriceUsd * (1 + pnlPct);
 
-        if (sensorPriceUsd && Number.isFinite(sensorPriceUsd) && sensorPriceUsd > 0) {
-          pnlPct = (sensorPriceUsd / pos.entryPriceUsd) - 1;
-          currentSolValue = entrySol * (1 + pnlPct);
-        } else {
-          sensorSource = 'JUPITER_DEGRADED';
-          const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
-          const fallbackQuote = await jupiterEngine.getQuote(
-            pos.mint,
-            'So11111111111111111111111111111111111111112',
-            tokenAtomicAmount,
-            500
-          );
-          currentSolValue = (fallbackQuote.outAmount || 0) / 1e9;
-          if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
-            throw new Error('DexScreener e Jupiter sem preço válido para monitor de saída');
+        if (dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0) {
+          const dexPnlPct = (dexPriceUsd / pos.entryPriceUsd) - 1;
+          const divergencePctPoints = Math.abs(dexPnlPct - pnlPct) * 100;
+          if (divergencePctPoints >= 15) {
+            console.warn(
+              `🚨 [PRICE_DIVERGENCE_CRITICAL] ${pos.symbol} | Dex PnL=${(dexPnlPct * 100).toFixed(2)}% ` +
+              `| Jupiter executável=${(pnlPct * 100).toFixed(2)}% | divergência=${divergencePctPoints.toFixed(2)}pp`
+            );
           }
-          pnlPct = (currentSolValue - entrySol) / entrySol;
-          sensorPriceUsd = pos.entryPriceUsd * (1 + pnlPct);
-          console.warn(
-            `⚠️ [ExitSensor Degradado] DexScreener indisponível para ${pos.symbol}; ` +
-            'Jupiter assumiu temporariamente o monitoramento.'
-          );
         }
         
         // Atualiza pico local antes de exibir proteção. O evaluateExitBySol persiste
@@ -982,47 +982,18 @@ async function runUltraFastExitMonitor() {
         }
 
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
-          // O sensor só arma a saída. A decisão financeira final usa uma cotação
-          // executável Jupiter imediatamente antes do swap.
-          const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
-          const executableQuote = await jupiterEngine.getQuote(
-            pos.mint,
-            'So11111111111111111111111111111111111111112',
-            tokenAtomicAmount,
-            500
-          );
-          const executableSolValue = (executableQuote.outAmount || 0) / 1e9;
-          const executablePnlPct = (executableSolValue - entrySol) / entrySol;
-          const confirmedSignal = positionEngine.evaluateExitBySol(
-            pos.mint,
-            executableSolValue,
-            Date.now(),
-            {
-              currentLiquidityUsd: pos.entryLiquidityUsd,
-              currentVolume5m: pos.entryVolume5m
-            }
-          );
-
-          // A cotação executável também foi concluída com sucesso. Só aqui
-          // consideramos o ciclo crítico de saída integralmente saudável.
+          // O próprio sinal já nasceu da cotação executável Jupiter deste ciclo.
+          // executeSwap() ainda obtém/valida a transação final imediatamente antes do envio.
           positionEngine.recordQuoteSuccess(pos.mint);
-
-          if (confirmedSignal.shouldExit && confirmedSignal.type !== 'HOLD') {
-            const detail = confirmedSignal.reasonDetail ? ` [${confirmedSignal.reasonDetail}]` : '';
-            console.log(
-              `🎯 [EXIT CONFIRMADO JUPITER${detail}] ${pos.symbol}: ${confirmedSignal.type} | ` +
-              `PnL executável: ${(executablePnlPct * 100).toFixed(2)}% | Valor: ${executableSolValue.toFixed(4)} SOL`
-            );
-            await executeExitOrder(pos.mint, confirmedSignal.type, executablePnlPct, executableSolValue, {
-              exitTokenAmount: confirmedSignal.exitTokenAmount,
-              shouldCloseAta: confirmedSignal.shouldCloseAta
-            });
-          } else {
-            console.log(
-              `🟢 [EXIT NÃO CONFIRMADO] ${pos.symbol}: DexScreener acionou ${exitSignal.type}, ` +
-              `mas a cotação executável Jupiter não confirmou o gatilho.`
-            );
-          }
+          const detail = exitSignal.reasonDetail ? ` [${exitSignal.reasonDetail}]` : '';
+          console.log(
+            `🎯 [EXIT CONFIRMADO JUPITER${detail}] ${pos.symbol}: ${exitSignal.type} | ` +
+            `PnL executável: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(9)} SOL`
+          );
+          await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue, {
+            exitTokenAmount: exitSignal.exitTokenAmount,
+            shouldCloseAta: exitSignal.shouldCloseAta
+          });
         }
       } catch (quoteErr: any) {
         const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);

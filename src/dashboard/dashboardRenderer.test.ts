@@ -44,7 +44,8 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /5-60 min/);
   assert.match(html, /Filtro \$15k/);
   assert.match(html, /Elegíveis para Auditoria/);
-  assert.match(html, /Sensor DexScreener 1\.5s/);
+  assert.match(html, /PnL\/Stop Jupiter executável 1\.5s/);
+  assert.match(html, /DexScreener referência/);
   assert.match(html, /SL inicial: -6%/);
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
   assert.match(html, /Stop Ativo: Trailing Momentum/);
