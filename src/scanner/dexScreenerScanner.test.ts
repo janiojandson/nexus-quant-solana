@@ -208,3 +208,45 @@ test('DexScreenerScanner: deve incubar tokens recém-nascidos da GeckoTerminal e
   assert.strictEqual(scanner.lastIncubatorStats.waiting, 1);
 });
 
+
+test('DexScreenerScanner: deve consumir mint maduro da incubadora uma única vez', async () => {
+  const now = Date.now();
+  let enrichmentCalls = 0;
+  const mockFetch = async (url: string) => {
+    if (url.includes('geckoterminal.com')) {
+      return { data: { data: [] } };
+    }
+    if (url.includes('/latest/dex/tokens/MintReleasedOnce')) {
+      enrichmentCalls++;
+      return {
+        data: {
+          pairs: [{
+            chainId: 'solana',
+            dexId: 'raydium',
+            baseToken: { address: 'MintReleasedOnce', symbol: 'RELEASED', name: 'Released Once' },
+            priceUsd: '0.01',
+            liquidity: { usd: 30000 },
+            volume: { h24: 50000, m5: 2500 },
+            pairCreatedAt: now - (8 * 60 * 1000)
+          }]
+        }
+      };
+    }
+    return { data: { pairs: [] } };
+  };
+
+  const scanner = new DexScreenerScanner({ fetchClient: mockFetch as any });
+  scanner.incubator.add({
+    mint: 'MintReleasedOnce',
+    poolAddress: 'PoolReleasedOnce',
+    symbol: 'RELEASED',
+    pairCreatedAt: now - (8 * 60 * 1000)
+  }, now);
+
+  const first = await scanner.scanSolanaTrends(15000);
+  assert.strictEqual(first.some(token => token.mint === 'MintReleasedOnce'), true);
+  assert.strictEqual(scanner.incubator.size(), 0, 'mint maduro deve sair da fila depois de liberado');
+
+  await scanner.scanSolanaTrends(15000);
+  assert.strictEqual(enrichmentCalls, 1, 'mint já liberado não deve ocupar novamente o lote de enriquecimento');
+});

@@ -173,6 +173,9 @@ export class DexScreenerScanner {
       };
 
       for (const matureToken of incubatorSweep.mature) {
+        // A incubadora é uma fila de espera, não um backlog permanente:
+        // ao atingir maturidade, o mint é liberado uma única vez para avaliação.
+        this.incubator.remove(matureToken.mint);
         if (this.cooldownCache.shouldProcess(matureToken.mint)) {
           discoveredMints.add(matureToken.mint);
         }
