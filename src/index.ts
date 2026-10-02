@@ -77,6 +77,8 @@ const gatekeeper = new MemeRiskGatekeeper({
 const solanaLayaAdapter = new SolanaLayaAdapter();
 const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
+/** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
+const exitOrderInFlight = new Set<string>();
 
 const jupiterEngine = new JupiterExecutionEngine({
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
@@ -123,13 +125,35 @@ const latestState: DashboardState = {
  * 3. Quarentena severa de 24 horas no AntiSpamMemory se for STOP_LOSS ou MANUAL
  * 4. Registro no histórico de trades fechados e atualização no Dashboard
  */
+type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT';
+type ExitOrderOptions = { exitTokenAmount?: number; shouldCloseAta?: boolean };
+type ExitOrderResult = { success: boolean; txSignature?: string; error?: string };
+
 async function executeExitOrder(
   mint: string,
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT',
+  exitReason: ExitOrderReason,
   pnlPct: number,
   exitSolValue: number,
-  options?: { exitTokenAmount?: number; shouldCloseAta?: boolean }
-): Promise<{ success: boolean; txSignature?: string; error?: string }> {
+  options?: ExitOrderOptions
+): Promise<ExitOrderResult> {
+  if (exitOrderInFlight.has(mint)) {
+    return { success: false, error: `EXIT_ALREADY_IN_FLIGHT:${mint}` };
+  }
+  exitOrderInFlight.add(mint);
+  try {
+    return await executeExitOrderUnlocked(mint, exitReason, pnlPct, exitSolValue, options);
+  } finally {
+    exitOrderInFlight.delete(mint);
+  }
+}
+
+async function executeExitOrderUnlocked(
+  mint: string,
+  exitReason: ExitOrderReason,
+  pnlPct: number,
+  exitSolValue: number,
+  options?: ExitOrderOptions
+): Promise<ExitOrderResult> {
   const pos = positionEngine.getPosition(mint);
   if (!pos) {
     return { success: false, error: 'Posição não encontrada no Gestor' };
