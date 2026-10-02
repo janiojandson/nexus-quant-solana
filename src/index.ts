@@ -945,7 +945,7 @@ async function executeAutonomousCycle() {
       eligibleCandidates.push(token);
     }
 
-    const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (15-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Ayla: ${eligibleCandidates.length}]`;
+    const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (5-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Laya: ${eligibleCandidates.length}]`;
     console.log(logMsg);
 
     latestState.incubator = {

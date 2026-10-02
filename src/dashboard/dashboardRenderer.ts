@@ -247,10 +247,10 @@ export function renderDashboardHtml(state: DashboardState): string {
           </div>
         </div>
 
-        <!-- Botão de Ação Rápida: PÂNICO GERAL -->
-        <button onclick="panicAll()" class="bg-gradient-to-r from-rose-600 to-red-700 hover:from-rose-500 hover:to-red-600 text-white font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl shadow-lg shadow-rose-950/60 border border-rose-500/50 flex items-center gap-2 transition-all active:scale-95 cursor-pointer">
-          <span class="text-base">🚨</span>
-          <span>PÂNICO GERAL / ZERAR TUDO</span>
+        <!-- Ações administrativas exigem autenticação segura no servidor. -->
+        <button disabled title="Ação administrativa protegida por NEXUS_ADMIN_TOKEN. Use API/CLI autenticada até existir sessão web segura." class="bg-slate-800 text-slate-500 font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl border border-slate-700 flex items-center gap-2 cursor-not-allowed">
+          <span class="text-base">🔒</span>
+          <span>AÇÕES ADMIN PROTEGIDAS</span>
         </button>
       </div>
     </header>
@@ -261,19 +261,19 @@ export function renderDashboardHtml(state: DashboardState): string {
       <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
         <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
           <span>🕒 Incubadora (Aguardando)</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">&lt; 15 min</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400">&lt; 5 min</span>
         </div>
         <div id="metric-incubator-waiting" class="text-2xl md:text-3xl font-black font-mono text-cyan-400 mt-2">
           ${waitingCount}
         </div>
-        <div class="text-[11px] text-slate-500 mt-1">Tokens marinando pós-dump inicial</div>
+        <div class="text-[11px] text-slate-500 mt-1">Pools com menos de 5 min aguardando maturidade</div>
       </div>
 
       <!-- Card 2: Maturos -->
       <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
         <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
-          <span>🎯 Maturos (Prontos)</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">15-60 min</span>
+          <span>🎯 Maturos para análise</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">5-60 min</span>
         </div>
         <div id="metric-incubator-mature" class="text-2xl md:text-3xl font-black font-mono text-amber-400 mt-2">
           ${matureCount}
@@ -285,7 +285,7 @@ export function renderDashboardHtml(state: DashboardState): string {
       <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
         <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
           <span>🛡️ Descartes Técnicos</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/10 text-slate-400">Filtro $20k</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-500/10 text-slate-400">Filtro $15k</span>
         </div>
         <div id="metric-technical-discards" class="text-2xl md:text-3xl font-black font-mono text-rose-400 mt-2">
           ${discardsCount}
@@ -296,13 +296,13 @@ export function renderDashboardHtml(state: DashboardState): string {
       <!-- Card 4: Elegíveis Ayla -->
       <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
         <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
-          <span>🧠 Elegíveis para Ayla</span>
-          <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">Gatilho +EV</span>
+          <span>🧠 Elegíveis para Laya</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">Pré-filtro técnico</span>
         </div>
         <div id="metric-ayla-eligible" class="text-2xl md:text-3xl font-black font-mono text-emerald-400 mt-2">
           ${aylaCount}
         </div>
-        <div class="text-[11px] text-slate-500 mt-1">Candidatos aprovados para entrada</div>
+        <div class="text-[11px] text-slate-500 mt-1">Candidatos técnicos aguardando auditoria de risco/decisão</div>
       </div>
     </section>
 
@@ -316,11 +316,11 @@ export function renderDashboardHtml(state: DashboardState): string {
               ${state.positions.length} / 2
             </span>
           </h2>
-          <p class="text-xs text-slate-400 mt-0.5">Ultra-Fast 1.5s quote loop · Stop Loss: -8% · Trailing Stop: -10% Topo · Slippage: 5%</p>
+          <p class="text-xs text-slate-400 mt-0.5">Sensor DexScreener 1.5s · SL inicial: -6% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
         </div>
-        <button onclick="sweepRentManual()" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 flex items-center gap-1.5 transition">
-          <span>🧹</span>
-          <span>Varrer Aluguel ATAs</span>
+        <button disabled title="Requer autenticação administrativa via API/CLI." class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
+          <span>🔒</span>
+          <span>Varrer ATAs via API autenticada</span>
         </button>
       </div>
 
@@ -330,8 +330,8 @@ export function renderDashboardHtml(state: DashboardState): string {
             <tr>
               <th class="py-3 px-4 md:px-6">Token / Mint</th>
               <th class="py-3 px-4">Preço Entrada</th>
-              <th class="py-3 px-4">Cotação Atual</th>
-              <th class="py-3 px-4">PnL Flutuante</th>
+              <th class="py-3 px-4">Preço Sensor</th>
+              <th class="py-3 px-4">PnL Sensor</th>
               <th class="py-3 px-4">Stop Loss</th>
               <th class="py-3 px-4">Trailing Stop</th>
               <th class="py-3 px-4 md:px-6 text-right">Ação</th>
@@ -341,7 +341,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             ${state.positions.length === 0 ? `
               <tr>
                 <td colspan="7" class="py-8 text-center text-slate-500 font-sans">
-                  Varredura ativa. Aguardando breakout validado pela Ayla...
+                  Varredura ativa. Aguardando candidato validado por risco, Laya e momentum...
                 </td>
               </tr>
             ` : state.positions.map(p => {
@@ -364,12 +364,12 @@ export function renderDashboardHtml(state: DashboardState): string {
                 <td class="py-4 px-4 text-xs text-slate-400">${(Number(p.stopLossPct) * 100).toFixed(1)}%</td>
                 <td class="py-4 px-4 text-xs">
                   <span class="${p.trailingActive ? 'text-emerald-400 font-semibold' : 'text-slate-500'}">
-                    ${p.trailingActive ? 'ATIVO (-10% Topo)' : 'INATIVO (Aguardando +35%)'}
+                    ${p.stopStatusText || (p.trailingActive ? 'ATIVO (proteção dinâmica)' : 'INATIVO (ativa a partir de +8%)')}
                   </span>
                 </td>
                 <td class="py-4 px-4 md:px-6 text-right font-sans">
-                  <button onclick="panicToken('${p.mint}', '${p.symbol}')" class="bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg border border-rose-500/40 shadow-sm transition active:scale-95 cursor-pointer">
-                    VENDER AGORA (PÂNICO)
+                  <button disabled title="Venda manual exige API/CLI autenticada." class="bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">
+                    VENDA MANUAL PROTEGIDA
                   </button>
                 </td>
               </tr>
@@ -398,7 +398,7 @@ export function renderDashboardHtml(state: DashboardState): string {
       <div id="logs-container" class="bg-black/90 border border-slate-800/80 rounded-xl p-4 font-mono text-xs text-slate-300 h-64 overflow-y-auto space-y-1.5">
         ${(state.scannerLogs || []).map(l => {
           const text = typeof l === 'string' ? l : `[${l.timestamp}] ${l.message}`;
-          const colorClass = text.includes('Elegíveis para Ayla: 1') || text.includes('APROVADO')
+          const colorClass = (text.includes('Elegíveis para Laya: 1') || text.includes('Elegíveis para Ayla: 1')) || text.includes('APROVADO')
             ? 'text-emerald-400'
             : text.includes('⚠️') || text.includes('VETADO')
             ? 'text-amber-400'
@@ -517,12 +517,12 @@ export function renderDashboardHtml(state: DashboardState): string {
 
         if (posTbody) {
           if (positions.length === 0) {
-            posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando breakout validado pela Ayla...</td></tr>';
+            posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando candidato validado por risco, Laya e momentum...</td></tr>';
           } else {
             posTbody.innerHTML = positions.map(p => {
               const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
               const isProfit = pnlPct >= 0;
-              const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct ? p.stopLossPct * 100 : -8);
+              const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
               return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +
                 '<td class="py-4 px-4 md:px-6 font-sans">' +
                   '<div class="font-bold text-white flex items-center gap-2">' +
@@ -541,12 +541,12 @@ export function renderDashboardHtml(state: DashboardState): string {
                   (p.stopStatusText
                     ? '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-400') + '">' + p.stopStatusText + '</span>'
                     : '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-500') + '">' +
-                      ((p.trailingStopActive || p.trailingActive) ? 'ATIVO (-15% Topo)' : 'INATIVO (Aguardando +35%)') +
+                      ((p.trailingStopActive || p.trailingActive) ? 'ATIVO (proteção dinâmica)' : 'INATIVO (ativa a partir de +8%)') +
                     '</span>') +
                 '</td>' +
                 '<td class="py-4 px-4 md:px-6 text-right font-sans">' +
-                  '<button onclick="panicToken(\\'' + p.mint + '\\', \\'' + p.symbol + '\\')" class="bg-rose-600/90 hover:bg-rose-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg border border-rose-500/40 shadow-sm transition active:scale-95 cursor-pointer">' +
-                    'VENDER AGORA (PÂNICO)' +
+                  '<button disabled title="Venda manual exige API/CLI autenticada." class="bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">' +
+                    'VENDA MANUAL PROTEGIDA' +
                   '</button>' +
                 '</td>' +
               '</tr>';
@@ -617,7 +617,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         const logsContainer = document.getElementById('logs-container');
         if (logsContainer && logs.length > 0) {
           logsContainer.innerHTML = logs.map(text => {
-            const colorClass = text.includes('Elegíveis para Ayla: 1') || text.includes('APROVADO')
+            const colorClass = (text.includes('Elegíveis para Laya: 1') || text.includes('Elegíveis para Ayla: 1')) || text.includes('APROVADO')
               ? 'text-emerald-400'
               : text.includes('⚠️') || text.includes('VETADO')
               ? 'text-amber-400'
