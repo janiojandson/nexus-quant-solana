@@ -189,7 +189,7 @@ test('SolanaLayaAdapter usa proxy privado sem bearer do cliente', async () => {
     delete process.env.SOLANA_LAYA_API_KEY;
     let seenHeaders: any = null;
     const adapter = new SolanaLayaAdapter({
-      baseUrl: 'http://nexus-decisor-laya-next.railway.internal:8001',
+      baseUrl: 'http://nexus-decisor-laya.railway.internal:8001',
       httpClient: { post: async (_url: string, _payload: any, config: any) => {
         seenHeaders = config.headers;
         return { data: { answers: { route: {
