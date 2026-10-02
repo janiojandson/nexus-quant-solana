@@ -3,12 +3,9 @@ import assert from 'node:assert';
 import axios from 'axios';
 import { MemeRiskGatekeeper, TokenSecurityMetadata } from './memeRiskGatekeeper.js';
 
-describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', () => {
+describe('MemeRiskGatekeeper - Auditoria determinística de Memecoins + Laya shadow', () => {
   it('deve rejeitar localmente token se mintAuthority ainda estiver ativo (risco de mint infinito)', async () => {
-    const gatekeeper = new MemeRiskGatekeeper({
-      layaBaseUrl: 'http://localhost:8080',
-      timeoutMs: 4000
-    });
+    const gatekeeper = new MemeRiskGatekeeper();
 
     const token: TokenSecurityMetadata = {
       mint: 'Meme111111111111111111111111111111111111111',
@@ -39,8 +36,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     assert.match(audit.reason || '', /Liquidez insuficiente/);
   });
 
-  it('deve respeitar timeout estendido de até 4000ms para a Ayla/Laya sem quebrar o fluxo', async () => {
-    // Simula uma chamada onde o gatekeeper aguarda até 4000ms confortavelmente
+  it('deve bloquear quando o Sentinel estiver indisponível, independente da Laya shadow', async () => {
     const mockRugCheck = {
       auditToken: async () => ({
         mint: 'Meme333333333333333333333333333333333333333',
@@ -58,13 +54,10 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
       })
     };
 
-    // Ambas as URLs (interna e pública) inválidas para forçar o fallback local
     const gatekeeper = new MemeRiskGatekeeper({
-      layaBaseUrl: 'http://127.0.0.1:9999',
-      timeoutMs: 500,
+      macroSentinelUrl: 'http://127.0.0.1:9997',
       rugCheckService: mockRugCheck as any
     });
-    process.env.LAYA_PUBLIC_FALLBACK_URL = 'http://127.0.0.1:9998';
 
     const token: TokenSecurityMetadata = {
       mint: 'Meme333333333333333333333333333333333333333',
@@ -75,15 +68,13 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     };
 
     const audit = await gatekeeper.auditToken(token);
-    // Indisponibilidade da Ayla deve bloquear novas entradas (fail-closed).
     assert.strictEqual(audit.safe, false);
     assert.strictEqual(audit.validatedBy, 'MACRO_CIRCUIT_BREAKER');
     assert.match(audit.reason || '', /SENTINEL_UNAVAILABLE/);
 
-    delete process.env.LAYA_PUBLIC_FALLBACK_URL;
   });
 
-  it('deve rejeitar token com priceChangeM5 <= 0 (Ayla Veto: Preço em sangria/queda nos últimos 5m)', async () => {
+  it('deve rejeitar token com priceChangeM5 <= 0 (Filtro Solana: Preço em sangria/queda nos últimos 5m)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeQueda5m',
@@ -96,10 +87,10 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Preço em sangria\/queda nos últimos 5m/);
+    assert.match(audit.reason || '', /Filtro Solana: Preço em sangria\/queda nos últimos 5m/);
   });
 
-  it('deve rejeitar token com priceChangeM5 > 85 (Ayla Veto: Preço esticado demais, risco de topo)', async () => {
+  it('deve rejeitar token com priceChangeM5 > 85 (Filtro Solana: Preço esticado demais, risco de topo)', async () => {
     const gatekeeper = new MemeRiskGatekeeper();
     const token: TokenSecurityMetadata = {
       mint: 'MemeEsticado5m',
@@ -112,7 +103,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Preço esticado demais, risco de topo/);
+    assert.match(audit.reason || '', /Filtro Solana: Preço esticado demais, risco de topo/);
   });
 
   it('deve rejeitar token com order flow insuficiente (buys < sells)', async () => {
@@ -130,7 +121,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Pressão vendedora dominante/);
+    assert.match(audit.reason || '', /Filtro Solana: Pressão vendedora dominante/);
   });
 
   it('deve rejeitar token se volume comprador for menor que 45% do total', async () => {
@@ -150,7 +141,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Volume comprador insuficiente/);
+    assert.match(audit.reason || '', /Filtro Solana: Volume comprador insuficiente/);
   });
 
   it('deve rejeitar token se preço atual estiver a menos de 65% da máxima h1 (queda pós-topo)', async () => {
@@ -170,7 +161,7 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 
     const audit = await gatekeeper.auditToken(token);
     assert.strictEqual(audit.safe, false);
-    assert.match(audit.reason || '', /Ayla Veto: Ativo em distribuição pós-topo/);
+    assert.match(audit.reason || '', /Filtro Solana: Ativo em distribuição pós-topo/);
   });
 
   it('deve aprovar e formatar validação quando momentum e order flow estiverem dentro da janela perfeita', () => {
@@ -193,70 +184,78 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
 });
 
 
-it('envia LAYA_API_KEY via x-laya-key sem alterar o payload de decisão', async () => {
-  const originalGet = axios.get;
-  const originalPost = axios.post;
-  let seenHeader: string | undefined;
 
+it('Laya nativa em shadow pode falhar sem bloquear entrada já aprovada pelos gates determinísticos', async () => {
+  const originalGet = axios.get;
   try {
     axios.get = (async () => ({
       data: { is_circuit_breaker_active: false, regime: 'NEUTRAL_RANGING' }
     })) as any;
 
-    axios.post = (async (_url: string, _payload: any, config: any) => {
-      seenHeader = config?.headers?.['x-laya-key'];
-      return {
-        data: {
-          success: true,
-          answers: { action: { choice: 'ALLOW', rationale: 'test' } }
-        }
-      };
-    }) as any;
-
     const mockRugCheck = {
       auditToken: async () => ({
-        mint: 'MemeAuth111111111111111111111111111111111111',
-        score: 0,
-        risks: [],
-        isRugged: false,
-        isSafe: true,
-        verified: true,
-        mintAuthority: null,
-        freezeAuthority: null,
-        holdersCount: 320,
-        factsComplete: true,
-        lpLockedPct: 95,
-        topHoldersPct: 12
+        mint: 'ShadowFail11111111111111111111111111111111111',
+        score: 120, risks: [], isRugged: false, isSafe: true, verified: true,
+        mintAuthority: null, freezeAuthority: null, holdersCount: 420,
+        factsComplete: true, lpLockedPct: 95, topHoldersPct: 11
       })
     };
 
     const gatekeeper = new MemeRiskGatekeeper({
-      layaBaseUrl: 'http://laya.internal',
-      layaApiKey: 'test-laya-key',
-      macroSentinelUrl: 'http://sentinel.internal',
-      rugCheckService: mockRugCheck as any
+      rugCheckService: mockRugCheck as any,
+      layaNativeShadowEnabled: true,
+      solanaLayaAdapter: { evaluate: async () => { throw new Error('shadow offline'); } } as any
     });
 
     const audit = await gatekeeper.auditToken({
-      mint: 'MemeAuth111111111111111111111111111111111111',
-      liquidityUsd: 25_000,
-      mintAuthority: null,
-      freezeAuthority: null,
-      holdersCount: 250,
-      priceChangeM5: 10,
-      buysM5: 30,
-      sellsM5: 10,
-      volumeBuysM5: 15_000,
-      volumeSellsM5: 5_000,
-      priceUsd: 0.001,
-      h1HighPriceUsd: 0.0011
+      mint: 'ShadowFail11111111111111111111111111111111111',
+      liquidityUsd: 50_000, priceChangeM5: 8, buysM5: 40, sellsM5: 20,
+      volumeBuysM5: 12_000, volumeSellsM5: 6_000, priceUsd: 0.001, h1HighPriceUsd: 0.0011
     });
 
-    assert.strictEqual(seenHeader, 'test-laya-key');
     assert.strictEqual(audit.safe, true);
-    assert.strictEqual(audit.validatedBy, 'AYLA_LAYA_ENGINE');
-  } finally {
-    axios.get = originalGet;
-    axios.post = originalPost;
-  }
+    assert.strictEqual(audit.validatedBy, 'DETERMINISTIC_SOLANA_PIPELINE');
+    assert.strictEqual(audit.layaNativeShadow, undefined);
+  } finally { axios.get = originalGet; }
+});
+
+it('ABSTAIN de baixa confiança da Laya shadow não substitui os gates determinísticos', async () => {
+  const originalGet = axios.get;
+  try {
+    axios.get = (async () => ({
+      data: { is_circuit_breaker_active: false, regime: 'NEUTRAL_RANGING' }
+    })) as any;
+
+    const mockRugCheck = {
+      auditToken: async () => ({
+        mint: 'ShadowAbstain1111111111111111111111111111111',
+        score: 100, risks: [], isRugged: false, isSafe: true, verified: true,
+        mintAuthority: null, freezeAuthority: null, holdersCount: 500,
+        factsComplete: true, lpLockedPct: 100, topHoldersPct: 10
+      })
+    };
+    const shadowDecision = {
+      route: 'ABSTAIN', routeConfidence: 0.55,
+      residualRiskScore: 1.4, residualRiskConfidence: 0.61,
+      needsLlm: 0.99, needsLlmConfidence: 0.99,
+      routingModel: 'multilingual', latencyMs: 20
+    };
+
+    const gatekeeper = new MemeRiskGatekeeper({
+      rugCheckService: mockRugCheck as any,
+      layaNativeShadowEnabled: true,
+      solanaLayaAdapter: { evaluate: async () => shadowDecision } as any
+    });
+
+    const audit = await gatekeeper.auditToken({
+      mint: 'ShadowAbstain1111111111111111111111111111111',
+      liquidityUsd: 60_000, priceChangeM5: 9, buysM5: 50, sellsM5: 20,
+      volumeBuysM5: 18_000, volumeSellsM5: 7_000, priceUsd: 0.001, h1HighPriceUsd: 0.0011
+    });
+
+    assert.strictEqual(audit.safe, true);
+    assert.strictEqual(audit.validatedBy, 'DETERMINISTIC_SOLANA_PIPELINE');
+    assert.strictEqual(audit.layaNativeShadow?.route, 'ABSTAIN');
+    assert.strictEqual(audit.layaNativeShadow?.routeConfidence, 0.55);
+  } finally { axios.get = originalGet; }
 });

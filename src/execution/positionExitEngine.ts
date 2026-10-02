@@ -352,7 +352,7 @@ export class PositionExitEngine {
           shouldCloseAta: true,
           peakSolValue: newPeak,
           trailingStopSolValue,
-          reasonDetail: `AYLA_LIQUIDITY_DRAIN: Liquidez despencou ${(liquidityDropPct * 100).toFixed(1)}% vs entrada`
+          reasonDetail: `SOLANA_LIQUIDITY_DRAIN: Liquidez despencou ${(liquidityDropPct * 100).toFixed(1)}% vs entrada`
         };
       }
     }
@@ -368,7 +368,7 @@ export class PositionExitEngine {
         shouldCloseAta: true,
         peakSolValue: newPeak,
         trailingStopSolValue,
-        reasonDetail: `AYLA_SOL_DRAIN: Queda súbita de ${(Math.abs(pnlPct) * 100).toFixed(1)}% em SOL`
+        reasonDetail: `SOLANA_SOL_DRAIN: Queda súbita de ${(Math.abs(pnlPct) * 100).toFixed(1)}% em SOL`
       };
     }
 
@@ -390,7 +390,7 @@ export class PositionExitEngine {
           shouldCloseAta: true,
           peakSolValue: newPeak,
           trailingStopSolValue,
-          reasonDetail: `AYLA_DYNAMIC_TIME_STOP: 5min decorridos com PnL negativo (${(pnlPct * 100).toFixed(1)}%) e volume estagnado`
+          reasonDetail: `SOLANA_DYNAMIC_TIME_STOP: 5min decorridos com PnL negativo (${(pnlPct * 100).toFixed(1)}%) e volume estagnado`
         };
       }
     }

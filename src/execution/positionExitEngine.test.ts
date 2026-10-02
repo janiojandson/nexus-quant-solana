@@ -166,7 +166,7 @@ test('PositionExitEngine: deve manter HOLD dentro da margem de oscilacao normal'
   assert.strictEqual(evalHold.type, 'HOLD');
 });
 
-test('PositionExitEngine (Ayla Sentinela): deve disparar saida de emergencia por Alerta de Drenagem de Liquidez (> 30%)', () => {
+test('PositionExitEngine (Sentinela Solana): deve disparar saida de emergencia por Alerta de Drenagem de Liquidez (> 30%)', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestDrainToken';
   engine.addPosition({
@@ -191,10 +191,10 @@ test('PositionExitEngine (Ayla Sentinela): deve disparar saida de emergencia por
   assert.strictEqual(evalDrain.shouldExit, true);
   assert.strictEqual(evalDrain.type, 'STOP_LOSS');
   assert.strictEqual(evalDrain.shouldCloseAta, true);
-  assert.ok(evalDrain.reasonDetail?.includes('AYLA_LIQUIDITY_DRAIN'));
+  assert.ok(evalDrain.reasonDetail?.includes('SOLANA_LIQUIDITY_DRAIN'));
 });
 
-test('PositionExitEngine (Ayla Sentinela): deve disparar TIME_STOP Dinamico apos 5min com volume estagnado e PnL entre -5% e -10%', () => {
+test('PositionExitEngine (Sentinela Solana): deve disparar TIME_STOP Dinamico apos 5min com volume estagnado e PnL entre -5% e -10%', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestAylaDynamicTimeStop';
   const now = Date.now();
@@ -220,7 +220,7 @@ test('PositionExitEngine (Ayla Sentinela): deve disparar TIME_STOP Dinamico apos
   assert.strictEqual(evalDynamic.shouldExit, true);
   assert.strictEqual(evalDynamic.type, 'TIME_STOP');
   assert.strictEqual(evalDynamic.shouldCloseAta, true);
-  assert.ok(evalDynamic.reasonDetail?.includes('AYLA_DYNAMIC_TIME_STOP'));
+  assert.ok(evalDynamic.reasonDetail?.includes('SOLANA_DYNAMIC_TIME_STOP'));
 });
 
 test('PositionExitEngine: deve exibir explicitamente SL Fixo e Trailing INATIVO antes da parcial', () => {

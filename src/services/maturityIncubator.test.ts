@@ -2,7 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert';
 import { MaturityIncubator } from './maturityIncubator.js';
 
-describe('MaturityIncubator - Pipeline de Maturação Ayla (5-60 min)', () => {
+describe('MaturityIncubator - Pipeline de Maturação Solana (5-60 min)', () => {
   test('deve reter tokens com menos de 5 minutos na fila de incubação', () => {
     const incubator = new MaturityIncubator({ minMaturityMinutes: 5, maxMaturityMinutes: 60 });
     const now = Date.now();

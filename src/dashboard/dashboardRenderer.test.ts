@@ -14,7 +14,7 @@ const state: DashboardState = {
   activeRpcUrl: 'https://mainnet.helius-rpc.com/',
   totalRealizedPnlSol: 0,
   totalNetworkFeesSolEst: 0,
-  incubator: { waiting: 0, mature: 19, technicalDiscards: 3, aylaEligible: 1 },
+  incubator: { waiting: 0, mature: 19, technicalDiscards: 3, entryEligible: 1 },
   positions: [{
     mint: 'Mint111111111111111111111111111111111111111',
     symbol: 'TEST',
@@ -43,7 +43,7 @@ test('Dashboard reflete a estratégia operacional atual e permanece read-only pa
   assert.match(html, /EXECUÇÃO REAL ON-CHAIN/);
   assert.match(html, /5-60 min/);
   assert.match(html, /Filtro \$15k/);
-  assert.match(html, /Elegíveis para Laya/);
+  assert.match(html, /Elegíveis para Auditoria/);
   assert.match(html, /Sensor DexScreener 1\.5s/);
   assert.match(html, /SL inicial: -6%/);
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);

@@ -42,7 +42,7 @@ export interface DashboardState {
     waiting: number;
     mature: number;
     technicalDiscards: number;
-    aylaEligible: number;
+    entryEligible: number;
   };
   positions: Array<{
     mint: string;
@@ -170,7 +170,7 @@ export function renderDashboardHtml(state: DashboardState): string {
   const waitingCount = state.incubator?.waiting ?? 0;
   const matureCount = state.incubator?.mature ?? 0;
   const discardsCount = state.incubator?.technicalDiscards ?? 0;
-  const aylaCount = state.incubator?.aylaEligible ?? 0;
+  const entryEligibleCount = state.incubator?.entryEligible ?? 0;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR" class="dark">
@@ -293,14 +293,14 @@ export function renderDashboardHtml(state: DashboardState): string {
         <div class="text-[11px] text-slate-500 mt-1">Barrados por liquidez ou momentum</div>
       </div>
 
-      <!-- Card 4: Elegíveis Ayla -->
+      <!-- Card 4: Elegíveis para Auditoria -->
       <div class="bg-slate-900/60 border border-slate-800/90 rounded-2xl p-4 shadow-lg flex flex-col justify-between hover:border-slate-700 transition">
         <div class="flex items-center justify-between text-slate-400 text-xs font-medium">
-          <span>🧠 Elegíveis para Laya</span>
+          <span>🧠 Elegíveis para Auditoria</span>
           <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400">Pré-filtro técnico</span>
         </div>
-        <div id="metric-ayla-eligible" class="text-2xl md:text-3xl font-black font-mono text-emerald-400 mt-2">
-          ${aylaCount}
+        <div id="metric-entry-eligible" class="text-2xl md:text-3xl font-black font-mono text-emerald-400 mt-2">
+          ${entryEligibleCount}
         </div>
         <div class="text-[11px] text-slate-500 mt-1">Candidatos técnicos aguardando auditoria de risco/decisão</div>
       </div>
@@ -341,7 +341,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             ${state.positions.length === 0 ? `
               <tr>
                 <td colspan="7" class="py-8 text-center text-slate-500 font-sans">
-                  Varredura ativa. Aguardando candidato validado por risco, Laya e momentum...
+                  Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos e momentum...
                 </td>
               </tr>
             ` : state.positions.map(p => {
@@ -398,7 +398,7 @@ export function renderDashboardHtml(state: DashboardState): string {
       <div id="logs-container" class="bg-black/90 border border-slate-800/80 rounded-xl p-4 font-mono text-xs text-slate-300 h-64 overflow-y-auto space-y-1.5">
         ${(state.scannerLogs || []).map(l => {
           const text = typeof l === 'string' ? l : `[${l.timestamp}] ${l.message}`;
-          const colorClass = (text.includes('Elegíveis para Laya: 1') || text.includes('Elegíveis para Ayla: 1')) || text.includes('APROVADO')
+          const colorClass = (text.includes('Elegíveis para Auditoria: 1') || text.includes('Elegíveis para Auditoria: 1')) || text.includes('APROVADO')
             ? 'text-emerald-400'
             : text.includes('⚠️') || text.includes('VETADO')
             ? 'text-amber-400'
@@ -502,12 +502,12 @@ export function renderDashboardHtml(state: DashboardState): string {
         const elWaiting = document.getElementById('metric-incubator-waiting');
         const elMature = document.getElementById('metric-incubator-mature');
         const elDiscards = document.getElementById('metric-technical-discards');
-        const elAyla = document.getElementById('metric-ayla-eligible');
+        const elAyla = document.getElementById('metric-entry-eligible');
 
         if (elWaiting && incubator.waiting !== undefined) elWaiting.textContent = incubator.waiting;
         if (elMature && incubator.mature !== undefined) elMature.textContent = incubator.mature;
         if (elDiscards && incubator.technicalDiscards !== undefined) elDiscards.textContent = incubator.technicalDiscards;
-        if (elAyla && incubator.aylaEligible !== undefined) elAyla.textContent = incubator.aylaEligible;
+        if (elAyla && incubator.entryEligible !== undefined) elAyla.textContent = incubator.entryEligible;
 
         // 4. Atualiza Tabela de Posições
         const positions = data.positions || [];
@@ -517,7 +517,7 @@ export function renderDashboardHtml(state: DashboardState): string {
 
         if (posTbody) {
           if (positions.length === 0) {
-            posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando candidato validado por risco, Laya e momentum...</td></tr>';
+            posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos e momentum...</td></tr>';
           } else {
             posTbody.innerHTML = positions.map(p => {
               const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
@@ -617,7 +617,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         const logsContainer = document.getElementById('logs-container');
         if (logsContainer && logs.length > 0) {
           logsContainer.innerHTML = logs.map(text => {
-            const colorClass = (text.includes('Elegíveis para Laya: 1') || text.includes('Elegíveis para Ayla: 1')) || text.includes('APROVADO')
+            const colorClass = (text.includes('Elegíveis para Auditoria: 1') || text.includes('Elegíveis para Auditoria: 1')) || text.includes('APROVADO')
               ? 'text-emerald-400'
               : text.includes('⚠️') || text.includes('VETADO')
               ? 'text-amber-400'

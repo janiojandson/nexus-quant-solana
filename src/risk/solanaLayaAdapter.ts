@@ -49,13 +49,13 @@ export class SolanaLayaAdapter {
     this.baseUrl = options.baseUrl
       || process.env.SOLANA_LAYA_NATIVE_URL
       || 'http://nexus-decisor-laya-next.railway.internal:8080';
-    this.apiKey = options.apiKey || process.env.LAYA_API_KEY;
+    this.apiKey = options.apiKey || process.env.SOLANA_LAYA_API_KEY || process.env.LAYA_API_KEY;
     this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 4000);
     this.httpClient = options.httpClient || axios;
   }
 
   public async evaluate(facts: SolanaLayaFacts): Promise<SolanaLayaDecision> {
-    if (!this.apiKey) throw new Error('LAYA_API_KEY ausente para contrato nativo');
+    if (!this.apiKey) throw new Error('SOLANA_LAYA_API_KEY/LAYA_API_KEY ausente para contrato nativo');
 
     const body = [
       'Pré-entrada de memecoin Solana após todos os filtros determinísticos obrigatórios terem sido aprovados.',

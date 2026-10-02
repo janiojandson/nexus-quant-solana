@@ -41,7 +41,6 @@ const GAS_RESERVE_SOL = 0.05;       // Reserva mínima intocável em 0.05 SOL (g
 const MAX_TOTAL_ALLOCATION_SOL = 0.10; // Alocação máxima total de capital em 0.10 SOL (> 0.19 SOL livres)
 const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
-const LAYA_URL = process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8000';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const ENTRY_MOMENTUM_GATE_ENABLED = process.env.ENTRY_MOMENTUM_GATE_ENABLED === 'true';
 const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
@@ -65,9 +64,7 @@ const rentRecovery = new RentRecoveryService(wallet.getConnection(), wallet.getK
 
 const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
-  layaBaseUrl: LAYA_URL,
-  macroSentinelUrl: MACRO_SENTINEL_URL,
-  timeoutMs: 4000
+  macroSentinelUrl: MACRO_SENTINEL_URL
 });
 
 const jupiterEngine = new JupiterExecutionEngine({
@@ -104,7 +101,7 @@ const latestState: DashboardState = {
   closedTrades: [],
   recentAudits: [],
   quarantineCount: 0,
-  incubator: { waiting: 0, mature: 0, technicalDiscards: 0, aylaEligible: 0 },
+  incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   lastUpdated: new Date().toISOString()
 };
 
@@ -653,7 +650,7 @@ async function runUltraFastExitMonitor() {
         pos.peakSolValue = peakSolValue;
         pos.trailingStopSolValue = trailingStopSolValue;
 
-        // 🧠 Ayla Sentinela de Saída Adaptativa:
+        // 🧠 Sentinela Solana de Saída Adaptativa:
         // Passa contexto atual da posição se disponível
         const exitSignal = positionEngine.evaluateExitBySol(
           pos.mint,
@@ -768,7 +765,7 @@ async function runUltraFastExitMonitor() {
 
 /**
  * 🔍 SCANNER AUTÔNOMO 24/7 (Ciclo Independente de 30s)
- * Varredura DexScreener, Análise RugCheck/Laya e Execução Sniper
+ * Varredura DexScreener, Análise RugCheck + filtros determinísticos + Laya shadow e Execução Sniper
  */
 async function executeAutonomousCycle() {
   if (isRunningScanner) {
@@ -945,14 +942,14 @@ async function executeAutonomousCycle() {
       eligibleCandidates.push(token);
     }
 
-    const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (5-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Laya: ${eligibleCandidates.length}]`;
+    const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (5-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Auditoria: ${eligibleCandidates.length}]`;
     console.log(logMsg);
 
     latestState.incubator = {
       waiting,
       mature,
       technicalDiscards: technicalDiscardCount,
-      aylaEligible: eligibleCandidates.length
+      entryEligible: eligibleCandidates.length
     };
 
     // Registra no buffer de scannerLogs para exposição na API e Dashboard
@@ -998,7 +995,7 @@ async function executeAutonomousCycle() {
         const m5Pct = topCandidate.priceChangeM5 !== undefined ? topCandidate.priceChangeM5.toFixed(1) : '0.0';
         const buys = topCandidate.buysM5 ?? 0;
         const sells = topCandidate.sellsM5 ?? 0;
-        console.log(`🛡️ [Ayla Aprovado]: Contrato Seguro (80+) | Momentum m5: +${m5Pct}% | Buys/Sells: ${buys}/${sells} | Vol Comprador > Vendedor`);
+        console.log(`🛡️ [Filtros Solana aprovados]: Contrato Seguro (80+) | Momentum m5: +${m5Pct}% | Buys/Sells: ${buys}/${sells} | Vol Comprador > Vendedor`);
       }
 
       let txSignature: string | null = null;
@@ -1033,7 +1030,7 @@ async function executeAutonomousCycle() {
 
         if (!audit.safe) {
           console.log(`   Motivo do Veto: ${audit.reason}`);
-          const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Ayla)';
+          const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Filtros Solana)';
           antiSpamMemory.recordVeto(topCandidate.mint, vetoReasonText, 24 * 60 * 60 * 1000);
           // Persistência ativa no banco por 24 horas
           postgresRepo.saveQuarantine({

@@ -221,7 +221,7 @@ export async function handleApiRoutes(
         waiting: s.incubator?.waiting ?? 0,
         mature: s.incubator?.mature ?? 0,
         technicalDiscards: s.incubator?.technicalDiscards ?? 0,
-        aylaEligible: s.incubator?.aylaEligible ?? 0
+        entryEligible: s.incubator?.entryEligible ?? 0
       },
       positions: formattedPositions,
       recentLogs: formattedLogs,
