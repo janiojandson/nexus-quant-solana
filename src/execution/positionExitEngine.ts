@@ -72,6 +72,9 @@ export class PositionExitEngine {
   public static readonly DEFAULT_STOP_LOSS_PCT = -0.06;         // -6% Stop Loss Lógico (efetivo ~-8% a -9% com slippage)
   public static readonly BREAKEVEN_TRIGGER_PCT = 0.12;          // +12% ativa Breakeven (+1%)
   public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
+  /** Proteção de momentum antes da parcial: ativa a partir de +8%. */
+  public static readonly EARLY_TRAILING_TRIGGER_PCT = 0.08;
+  public static readonly EARLY_TRAILING_DISTANCE = 0.06;        // aceita recuo de 6% do pico
   /** Trailing pós-parcial: SL dinâmico = pico * (1 - TRAILING_DISTANCE) */
   public static readonly TRAILING_DISTANCE = 0.10;              // -10% do pico máximo
   /** Time-Stop estendido para posições com PnL positivo após 10min */
@@ -93,10 +96,18 @@ export class PositionExitEngine {
       const trailPct = ((trailSol - entrySol) / entrySol) * 100;
       return `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%)`;
     }
-    if (pos.stopLossPct >= 0.01) {
-      return `Stop Ativo: Breakeven (+${(pos.stopLossPct * 100).toFixed(1)}%) | Trailing: INATIVO (Aguardando Parcial)`;
+    const peak = this.peakSolValues.get(mint) || pos.entrySol || 0.015;
+    const entrySol = pos.entrySol || 0.015;
+    const peakPnlPct = (peak - entrySol) / entrySol;
+    if (peakPnlPct >= PositionExitEngine.EARLY_TRAILING_TRIGGER_PCT) {
+      const trailSol = peak * (1 - PositionExitEngine.EARLY_TRAILING_DISTANCE);
+      const trailPct = ((trailSol - entrySol) / entrySol) * 100;
+      return `Stop Ativo: Trailing Momentum (-6% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%)`;
     }
-    return `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
+    if (pos.stopLossPct >= 0.01) {
+      return `Stop Ativo: Breakeven (+${(pos.stopLossPct * 100).toFixed(1)}%) | Trailing: INATIVO`;
+    }
+    return `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: aguardando +8%`;
   }
 
   public addPosition(position: PositionInput): void {
@@ -131,6 +142,30 @@ export class PositionExitEngine {
   public recordClosedTrade(trade: ClosedTrade): void {
     this.closedPositions.unshift(trade);
     if (this.closedPositions.length > 50) this.closedPositions.pop();
+  }
+
+  /**
+   * Aplica a mutação local da parcial SOMENTE depois que o swap foi confirmado.
+   * Evita marcar 50% como vendidos quando a transação falha ou fica sem confirmação.
+   */
+  public commitPartialExit(mint: string, tokensSold: number, currentSolValue: number): boolean {
+    const position = this.activePositions.get(mint);
+    if (!position || position.partialTaken) return false;
+    const sold = Math.floor(tokensSold);
+    if (!Number.isFinite(sold) || sold <= 0 || sold >= position.tokenAmount) return false;
+
+    const tokenAmountBefore = position.tokenAmount;
+    const remaining = tokenAmountBefore - sold;
+    const remainingRatio = remaining / tokenAmountBefore;
+
+    position.partialTaken = true;
+    position.tokenAmount = remaining;
+    // O runner restante precisa carregar apenas o custo-base proporcional.
+    // Sem isto, 50% dos tokens eram comparados contra 100% do SOL investido.
+    position.entrySol = (position.entrySol || 0.015) * remainingRatio;
+    position.stopLossPct = 0.01;
+    this.peakSolValues.set(mint, currentSolValue * remainingRatio);
+    return true;
   }
 
   public removePosition(mint: string): void {
@@ -234,11 +269,6 @@ export class PositionExitEngine {
     // ==========================================
     if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
       const tokensToSell = Math.floor(position.tokenAmount / 2);
-      position.partialTaken = true;
-      position.tokenAmount = position.tokenAmount - tokensToSell;
-      position.stopLossPct = 0.01; // Puxa para Breakeven (+1%)
-      // Reinicia pico com o valor atual para trailing preciso
-      this.peakSolValues.set(mint, currentSolValue);
 
       return {
         shouldExit: true,
@@ -252,11 +282,32 @@ export class PositionExitEngine {
       };
     }
 
+    // Proteção de momentum pré-parcial: depois de atingir +8%, acompanha o topo
+    // com folga de 6%. Se a alta perder força antes da parcial de +35%, encerra
+    // 100% preservando o ganho em vez de devolver todo o movimento.
+    if (!position.partialTaken && peakPnlPct >= PositionExitEngine.EARLY_TRAILING_TRIGGER_PCT) {
+      const earlyTrailingStopSolValue = newPeak * (1 - PositionExitEngine.EARLY_TRAILING_DISTANCE);
+      if (earlyTrailingStopSolValue > entrySol && currentSolValue <= earlyTrailingStopSolValue) {
+        return {
+          shouldExit: true,
+          type: 'TRAILING_STOP',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue: earlyTrailingStopSolValue,
+          trailingActive: true,
+          reasonDetail: 'EARLY_MOMENTUM_TRAILING'
+        };
+      }
+    }
+
     // ==========================================
-    // FASE 2: Super Runner com Trailing Stop 15%
+    // FASE 2: Super Runner com Trailing Stop 10%
     // ==========================================
     if (position.partialTaken) {
-      // Disparo de Trailing Stop se recuar 15% em relação ao topo máximo
+      // Disparo de Trailing Stop se recuar 10% em relação ao topo máximo
       if (currentSolValue <= trailingStopSolValue) {
         return {
           shouldExit: true,

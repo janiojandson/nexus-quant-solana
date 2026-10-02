@@ -130,3 +130,22 @@ describe('AdaptivePositionSizer - dimensionamento por profundidade de pool', () 
     assert.strictEqual(res.abortReason, 'SIMULATION_REJECTED');
   });
 });
+
+it('AdaptivePositionSizer: modo econômico respeita escada de no máximo duas tentativas', async () => {
+  const agg = new FakeAggregator({ 0.02: 4.0, 0.015: 1.5 });
+  const sizer = new AdaptivePositionSizer(agg);
+
+  const res = await sizer.findExecutableSize({
+    inputMint: SOL_MINT,
+    outputMint: TOKEN_MINT,
+    autoSlippage: true,
+    maxAutoSlippageBps: 750
+  }, {
+    ladderSol: [0.02, 0.015]
+  });
+
+  assert.strictEqual(res.success, true);
+  assert.strictEqual(res.sizeSol, 0.015);
+  assert.deepStrictEqual(agg.calls, [0.02, 0.015]);
+  assert.strictEqual(res.attempts.length, 2);
+});

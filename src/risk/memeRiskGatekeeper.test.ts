@@ -68,9 +68,10 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
     };
 
     const audit = await gatekeeper.auditToken(token);
-    // Token possui metricas on-chain perfeitas, fallback defensivo permite se seguro
-    assert.strictEqual(audit.safe, true);
-    assert.strictEqual(audit.validatedBy, 'LOCAL_HEURISTICS_FALLBACK');
+    // Indisponibilidade da Ayla deve bloquear novas entradas (fail-closed).
+    assert.strictEqual(audit.safe, false);
+    assert.strictEqual(audit.validatedBy, 'MACRO_CIRCUIT_BREAKER');
+    assert.match(audit.reason || '', /SENTINEL_UNAVAILABLE/);
 
     delete process.env.LAYA_PUBLIC_FALLBACK_URL;
   });

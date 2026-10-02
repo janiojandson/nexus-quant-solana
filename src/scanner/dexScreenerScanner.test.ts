@@ -107,13 +107,13 @@ test('DexScreenerScanner: deve sanitizar e descartar tokens com mint vazio ou sy
 test('DexScreenerScanner: deve descartar tokens mais velhos que 60 minutos e mais novos que 5 minutos', () => {
   const scanner = new DexScreenerScanner();
   const now = Date.now();
-  assert.strictEqual(scanner.isMaturityValid(now - (90 * 60 * 1000)), false, '90 min deve ser descartado (> 60m)');
-  assert.strictEqual(scanner.isMaturityValid(now - (2 * 60 * 1000)), false, '2 min deve ser descartado (< 5m)');
-  assert.strictEqual(scanner.isMaturityValid(now - (5 * 60 * 1000)), true, '5 min deve ser aceito');
-  assert.strictEqual(scanner.isMaturityValid(now - (8 * 60 * 1000)), true, '8 min deve ser aceito');
-  assert.strictEqual(scanner.isMaturityValid(now - (10 * 60 * 1000)), true, '10 min deve ser aceito');
-  assert.strictEqual(scanner.isMaturityValid(now - (35 * 60 * 1000)), true, '35 min deve ser aceito');
-  assert.strictEqual(scanner.isMaturityValid(now - (60 * 60 * 1000)), true, '60 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (90 * 60 * 1000), now), false, '90 min deve ser descartado (> 60m)');
+  assert.strictEqual(scanner.isMaturityValid(now - (2 * 60 * 1000), now), false, '2 min deve ser descartado (< 5m)');
+  assert.strictEqual(scanner.isMaturityValid(now - (5 * 60 * 1000), now), true, '5 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (8 * 60 * 1000), now), true, '8 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (10 * 60 * 1000), now), true, '10 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (35 * 60 * 1000), now), true, '35 min deve ser aceito');
+  assert.strictEqual(scanner.isMaturityValid(now - (60 * 60 * 1000), now), true, '60 min deve ser aceito');
 });
 
 test('DexScreenerScanner: deve calcular ratio de agressão compradora e exigir >= 50%', () => {

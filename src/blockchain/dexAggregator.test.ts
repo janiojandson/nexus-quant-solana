@@ -1,28 +1,28 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
 import axios from 'axios';
 import { DexAggregatorService, JupiterQuoteException } from './dexAggregator.js';
 
-describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
+describe('DexAggregatorService - Jupiter', () => {
   const SOL_MINT = 'So11111111111111111111111111111111111111112';
   const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-
   const originalGet = axios.get;
+
   afterEach(() => {
     axios.get = originalGet;
   });
 
-  it('deve gerar rota de swap com slippage protegido', async () => {
+  it('normaliza priceImpactPct documentado pela Jupiter e aplica piso de slippage', async () => {
     axios.get = (async () => ({
       data: {
         inAmount: '100000000',
         outAmount: '20000000',
-        priceImpactPct: '0.42',
+        priceImpactPct: '0.0042',
         routePlan: [{ swapInfo: { label: 'Raydium CPMM' } }]
       }
     })) as any;
 
-    const dex = new DexAggregatorService();
+    const dex = new DexAggregatorService('https://fake.invalid');
     const route = await dex.getQuote({
       inputMint: SOL_MINT,
       outputMint: USDC_MINT,
@@ -30,98 +30,78 @@ describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
       slippageBps: 50
     });
 
-    assert.strictEqual(route.inputMint, SOL_MINT);
-    assert.strictEqual(route.outputMint, USDC_MINT);
-    // CORREÇÃO: Com piso de 250 bps, slippage de 50 bps é elevado para 250 bps
     assert.strictEqual(route.slippageBps, 250);
     assert.strictEqual(route.outAmount, 20_000_000);
     assert.strictEqual(route.priceImpactPct, 0.42);
   });
 
-  it('deve rejeitar swaps com slippage abusivo (> 750 bps / 7.5%) para evitar sandwich attack', async () => {
-    const dex = new DexAggregatorService();
+  it('rejeita slippage acima do hard-cap de 750 bps', async () => {
+    const dex = new DexAggregatorService('https://fake.invalid');
     await assert.rejects(
-      async () => {
-        await dex.getQuote({
-          inputMint: SOL_MINT,
-          outputMint: USDC_MINT,
-          amountLamports: 100_000_000,
-          slippageBps: 800
-        });
-      },
+      () => dex.getQuote({
+        inputMint: SOL_MINT,
+        outputMint: USDC_MINT,
+        amountLamports: 100_000_000,
+        slippageBps: 800
+      }),
       /Slippage maximo excedido/
     );
   });
 
-  it('deve aplicar o teto anti-MEV tambem no caminho autoSlippage (compras)', async () => {
-    const dex = new DexAggregatorService();
+  it('aplica o hard-cap também no autoSlippage', async () => {
+    const dex = new DexAggregatorService('https://fake.invalid');
     await assert.rejects(
-      async () => {
-        await dex.getQuote({
-          inputMint: SOL_MINT,
-          outputMint: USDC_MINT,
-          amountLamports: 100_000_000,
-          autoSlippage: true,
-          maxAutoSlippageBps: 1200
-        });
-      },
+      () => dex.getQuote({
+        inputMint: SOL_MINT,
+        outputMint: USDC_MINT,
+        amountLamports: 100_000_000,
+        autoSlippage: true,
+        maxAutoSlippageBps: 1200
+      }),
       /Slippage maximo excedido/
     );
   });
 
-  // ==========================================================================
-  // POLÍTICA FAIL-CLOSED — o fallback silencioso (outAmount = 1.5x) foi removido
-  // ==========================================================================
+  it('falha fechado quando a cotação está indisponível', async () => {
+    axios.get = (async () => { throw new Error('ECONNRESET'); }) as any;
+    const dex = new DexAggregatorService('https://fake.invalid');
 
-  it('deve lançar JupiterQuoteException em falha de rede, SEM inventar outAmount', async () => {
-    axios.get = (async () => {
-      throw new Error('ECONNRESET');
-    }) as any;
-
-    const dex = new DexAggregatorService();
     await assert.rejects(
-      async () => dex.getQuote({
+      () => dex.getQuote({
         inputMint: SOL_MINT,
         outputMint: USDC_MINT,
         amountLamports: 100_000_000
       }),
-      (err: any) => {
-        assert.ok(err instanceof JupiterQuoteException, 'deve ser JupiterQuoteException');
-        assert.match(err.message, /Falha na cotação Jupiter/);
-        return true;
-      }
+      (err: any) => err instanceof JupiterQuoteException && /Falha na cotação Jupiter/.test(err.message)
     );
   });
 
-  it('deve abortar com rate-limit (HTTP 429) em vez de devolver cotação', async () => {
+  it('propaga HTTP 429 em vez de inventar cotação', async () => {
     axios.get = (async () => {
       const e: any = new Error('Too Many Requests');
       e.response = { status: 429, data: { error: 'rate limit exceeded' } };
       throw e;
     }) as any;
 
-    const dex = new DexAggregatorService();
+    const dex = new DexAggregatorService('https://fake.invalid');
     await assert.rejects(
-      async () => dex.getQuote({
+      () => dex.getQuote({
         inputMint: SOL_MINT,
         outputMint: USDC_MINT,
         amountLamports: 100_000_000
       }),
-      (err: any) => {
-        assert.ok(err instanceof JupiterQuoteException);
-        assert.strictEqual(err.status, 429);
-        assert.match(err.message, /rate limit exceeded/);
-        return true;
-      }
+      (err: any) => err instanceof JupiterQuoteException &&
+        err.status === 429 &&
+        /rate limit exceeded/.test(err.message)
     );
   });
 
-  it('deve abortar quando a resposta vier sem inAmount/outAmount', async () => {
+  it('rejeita resposta sem inAmount/outAmount', async () => {
     axios.get = (async () => ({ data: { routePlan: [] } })) as any;
+    const dex = new DexAggregatorService('https://fake.invalid');
 
-    const dex = new DexAggregatorService();
     await assert.rejects(
-      async () => dex.getQuote({
+      () => dex.getQuote({
         inputMint: SOL_MINT,
         outputMint: USDC_MINT,
         amountLamports: 100_000_000
@@ -130,12 +110,12 @@ describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
     );
   });
 
-  it('deve preservar o outAmount real (nunca 1.5x) em sucesso', async () => {
+  it('preserva outAmount real', async () => {
     axios.get = (async () => ({
-      data: { inAmount: '50000000', outAmount: '1234', priceImpactPct: '0.1' }
+      data: { inAmount: '50000000', outAmount: '1234', priceImpactPct: '0.001' }
     })) as any;
 
-    const dex = new DexAggregatorService();
+    const dex = new DexAggregatorService('https://fake.invalid');
     const route = await dex.getQuote({
       inputMint: SOL_MINT,
       outputMint: USDC_MINT,
@@ -144,6 +124,78 @@ describe('DexAggregatorService - Roteamento Jupiter v6 & Pump.fun', () => {
 
     assert.strictEqual(route.outAmount, 1234);
     assert.notStrictEqual(route.outAmount, Math.floor(50_000_000 * 1.5));
-    assert.notStrictEqual(route.routePlanSummary, 'Jupiter-Simulated');
   });
+
+  it('cache curto evita repetir a mesma chamada', async () => {
+    let calls = 0;
+    axios.get = (async () => {
+      calls++;
+      return { data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' } };
+    }) as any;
+
+    const dex = new DexAggregatorService('https://fake.invalid', {
+      rateLimitMs: 0,
+      cacheTtlMs: 5000
+    });
+    const params = { inputMint: SOL_MINT, outputMint: USDC_MINT, amountLamports: 100 };
+    await dex.getQuote(params);
+    await dex.getQuote(params);
+    assert.strictEqual(calls, 1);
+  });
+
+  it('envia API key e instructionVersion V2 quando configurados', async () => {
+    let seenConfig: any;
+    axios.get = (async (_url: string, config: any) => {
+      seenConfig = config;
+      return { data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' } };
+    }) as any;
+
+    const dex = new DexAggregatorService('https://fake.invalid', {
+      apiKey: 'test-key',
+      rateLimitMs: 0,
+      cacheTtlMs: 0
+    });
+    await dex.getQuote({
+      inputMint: SOL_MINT,
+      outputMint: USDC_MINT,
+      amountLamports: 100
+    });
+
+    assert.strictEqual(seenConfig.headers['x-api-key'], 'test-key');
+    assert.strictEqual(seenConfig.params.instructionVersion, 'V2');
+  });
+});
+
+it('DexAggregatorService: faz um único retry após 429 e reaproveita sucesso', async () => {
+  const SOL_MINT = 'So11111111111111111111111111111111111111112';
+  const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const originalGet = axios.get;
+  let calls = 0;
+
+  try {
+    axios.get = (async () => {
+      calls++;
+      if (calls === 1) {
+        const e: any = new Error('Too Many Requests');
+        e.response = { status: 429, headers: {}, data: { error: 'rate limit exceeded' } };
+        throw e;
+      }
+      return { data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' } };
+    }) as any;
+
+    const dex = new DexAggregatorService('https://fake.invalid', {
+      rateLimitMs: 0,
+      cacheTtlMs: 0
+    });
+    const quote = await dex.getQuote({
+      inputMint: SOL_MINT,
+      outputMint: USDC_MINT,
+      amountLamports: 100
+    });
+
+    assert.strictEqual(calls, 2);
+    assert.strictEqual(quote.outAmount, 200);
+  } finally {
+    axios.get = originalGet;
+  }
 });

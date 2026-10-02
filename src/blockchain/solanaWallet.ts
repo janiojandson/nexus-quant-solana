@@ -24,26 +24,32 @@ export class SolanaWalletService {
   }
 
   private parseKeypair(raw: string): Keypair {
-    try {
-      const trimmed = (raw || '').trim();
-      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-        const secretBytes = Uint8Array.from(JSON.parse(trimmed));
-        return Keypair.fromSecretKey(secretBytes);
-      }
-      if (trimmed.length > 0) {
-        // Tenta decodificar Base58 (formato padrão Phantom)
-        try {
-          const decoded = bs58.decode(trimmed);
-          return Keypair.fromSecretKey(decoded);
-        } catch {
-          // Fallback para buffer hex se aplicável
-          return Keypair.fromSecretKey(Buffer.from(trimmed, 'hex'));
+    const trimmed = (raw || '').trim();
+    if (!trimmed || trimmed === '[]') {
+      throw new Error('Chave privada Solana ausente. Inicializa??o abortada por seguran?a.');
+    }
+
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (!Array.isArray(parsed) || parsed.some((v: unknown) => !Number.isInteger(v) || Number(v) < 0 || Number(v) > 255)) {
+          throw new Error('Array de chave secreta inv?lido.');
         }
+        return Keypair.fromSecretKey(Uint8Array.from(parsed));
+      } catch (err: any) {
+        throw new Error(`Chave privada Solana inv?lida: ${err?.message || err}`);
       }
-      return Keypair.generate();
+    }
+
+    try {
+      return Keypair.fromSecretKey(bs58.decode(trimmed));
     } catch {
-      // Fallback para geracao segura em mock/test se nao parsear
-      return Keypair.generate();
+      try {
+        if (!/^(?:[0-9a-fA-F]{2})+$/.test(trimmed)) throw new Error('Formato n?o reconhecido.');
+        return Keypair.fromSecretKey(Buffer.from(trimmed, 'hex'));
+      } catch (err: any) {
+        throw new Error(`Chave privada Solana inv?lida: ${err?.message || err}`);
+      }
     }
   }
 
@@ -68,7 +74,7 @@ export class SolanaWalletService {
     }
   }
 
-  public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number; decimals: number; ataAddress: string }>> {
+  public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number; atomicAmount: string; decimals: number; ataAddress: string }>> {
     try {
       const { PublicKey } = await import('@solana/web3.js');
       const response = await this.connection.getParsedTokenAccountsByOwner(
@@ -81,11 +87,12 @@ export class SolanaWalletService {
           return {
             mint: info.mint as string,
             tokenAmount: Number(info.tokenAmount.uiAmount || 0),
+            atomicAmount: String(info.tokenAmount.amount || '0'),
             decimals: Number(info.tokenAmount.decimals || 0),
             ataAddress: a.pubkey.toBase58()
           };
         })
-        .filter(t => t.tokenAmount > 0);
+        .filter(t => /^\d+$/.test(t.atomicAmount) && BigInt(t.atomicAmount) > 0n);
     } catch {
       return [];
     }

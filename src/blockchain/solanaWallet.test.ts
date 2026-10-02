@@ -20,6 +20,11 @@ describe('SolanaWalletService - Blindagem e Custódia Segura', () => {
     assert.strictEqual(jsonStr.includes(dummySecretKeyString), false);
   });
 
+  it('deve abortar inicializa??o quando a chave estiver ausente ou inv?lida', () => {
+    assert.throws(() => new SolanaWalletService({ secretKeyRaw: '[]' }), /Chave privada Solana ausente/);
+    assert.throws(() => new SolanaWalletService({ secretKeyRaw: 'not-a-valid-key' }), /Chave privada Solana/);
+  });
+
   it('deve validar teto maximo de risco por trade em 10% do saldo total', () => {
     const wallet = new SolanaWalletService({
       secretKeyRaw: dummySecretKeyString,

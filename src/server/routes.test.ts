@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { handleApiRoutes } from './routes.js';
 
+const TEST_ADMIN_TOKEN = 'unit-test-admin-token';
+
 test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   const mockReq = { url: '/api/status', method: 'GET', headers: {} } as any;
   let statusCode = 0;
@@ -19,6 +21,7 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   } as any;
 
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {
       agent: 'NexusQuant-Solana-01',
       balanceSol: 0.15,
@@ -44,6 +47,7 @@ test('handleApiRoutes: deve responder 200 OK na rota /health', async () => {
   } as any;
 
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {
       agent: 'NexusQuant-Solana-01',
       wallet: 'PhantomTestWallet',
@@ -69,6 +73,7 @@ test('handleApiRoutes: rota /api/holdings deve sanitizar e filtrar tokens com s�
   } as any;
 
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {
       walletHoldings: [
         { mint: 'MintValido111', symbol: 'GOOD', tokenAmount: 1000, decimals: 6 },
@@ -88,7 +93,7 @@ test('handleApiRoutes: rota /api/holdings deve sanitizar e filtrar tokens com s�
 });
 
 test('handleApiRoutes: deve executar venda manual da posição via POST /api/positions/:mint/exit', async () => {
-  const mockReq = { url: '/api/positions/TestMint123/exit', method: 'POST', headers: {} } as any;
+  const mockReq = { url: '/api/positions/TestMint123/exit', method: 'POST', headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` } } as any;
   let statusCode = 0;
   let responseData = '';
 
@@ -99,6 +104,7 @@ test('handleApiRoutes: deve executar venda manual da posição via POST /api/pos
 
   let exitCalledWith = '';
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: { positions: [] },
     executeExitOrder: async (mint: string) => {
       exitCalledWith = mint;
@@ -116,7 +122,7 @@ test('handleApiRoutes: deve executar venda manual da posição via POST /api/pos
 });
 
 test('handleApiRoutes: deve executar liquidação global via POST /api/positions/liquidate-all (Panic Button)', async () => {
-  const mockReq = { url: '/api/positions/liquidate-all', method: 'POST', headers: {} } as any;
+  const mockReq = { url: '/api/positions/liquidate-all', method: 'POST', headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` } } as any;
   let statusCode = 0;
   let responseData = '';
 
@@ -127,6 +133,7 @@ test('handleApiRoutes: deve executar liquidação global via POST /api/positions
 
   const liquidatedMints: string[] = [];
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: { positions: [] },
     getAllOpenPositions: () => [
       { mint: 'MintA111', symbol: 'TOKEN_A' },
@@ -159,7 +166,7 @@ test('handleApiRoutes: deve executar liquidação avulsa de holding via POST /ap
   const mockReq = new EventEmitter() as any;
   mockReq.url = '/api/wallet/liquidate-holding';
   mockReq.method = 'POST';
-  mockReq.headers = {};
+  mockReq.headers = { authorization: `Bearer ${TEST_ADMIN_TOKEN}` };
 
   let statusCode = 0;
   let responseData = '';
@@ -170,6 +177,7 @@ test('handleApiRoutes: deve executar liquidação avulsa de holding via POST /ap
 
   let receivedPayload: any = null;
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {},
     liquidateHolding: async (data: any) => {
       receivedPayload = data;
@@ -195,7 +203,7 @@ test('handleApiRoutes: deve executar liquidação avulsa de holding via POST /ap
 });
 
 test('handleApiRoutes: deve acionar rota POST /api/wallet/sweep-rent com sucesso', async () => {
-  const mockReq = { url: '/api/wallet/sweep-rent', method: 'POST', headers: {} } as any;
+  const mockReq = { url: '/api/wallet/sweep-rent', method: 'POST', headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` } } as any;
   let statusCode = 0;
   let responseData = '';
   const mockRes = {
@@ -205,6 +213,7 @@ test('handleApiRoutes: deve acionar rota POST /api/wallet/sweep-rent com sucesso
 
   let sweepCalled = false;
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {},
     sweepRent: async () => {
       sweepCalled = true;
@@ -223,7 +232,7 @@ test('handleApiRoutes: deve acionar rota POST /api/wallet/sweep-rent com sucesso
 });
 
 test('handleApiRoutes: deve executar POST /api/panic/:mint com sucesso', async () => {
-  const mockReq = { url: '/api/panic/PanicMint777', method: 'POST', headers: {} } as any;
+  const mockReq = { url: '/api/panic/PanicMint777', method: 'POST', headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` } } as any;
   let statusCode = 0;
   let responseData = '';
   const mockRes = {
@@ -234,6 +243,8 @@ test('handleApiRoutes: deve executar POST /api/panic/:mint com sucesso', async (
 
   let panicCalledWith = '';
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
+    enableLegacyPanicApi: true,
     latestState: { positions: [] },
     panicToken: async (mint: string) => {
       panicCalledWith = mint;
@@ -252,7 +263,7 @@ test('handleApiRoutes: deve executar POST /api/panic/:mint com sucesso', async (
 });
 
 test('handleApiRoutes: deve executar POST /api/panic/all desarmando e liquidando tudo', async () => {
-  const mockReq = { url: '/api/panic/all', method: 'POST', headers: {} } as any;
+  const mockReq = { url: '/api/panic/all', method: 'POST', headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` } } as any;
   let statusCode = 0;
   let responseData = '';
   const mockRes = {
@@ -263,6 +274,8 @@ test('handleApiRoutes: deve executar POST /api/panic/all desarmando e liquidando
 
   let panicAllCalled = false;
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
+    enableLegacyPanicApi: true,
     latestState: { circuitBreakerActive: false },
     panicAll: async () => {
       panicAllCalled = true;
@@ -281,7 +294,7 @@ test('handleApiRoutes: deve executar POST /api/panic/all desarmando e liquidando
 });
 
 test('handleApiRoutes: deve acionar rota POST /api/calibration/run com sucesso', async () => {
-  const mockReq = { url: '/api/calibration/run', method: 'POST', headers: {} } as any;
+  const mockReq = { url: '/api/calibration/run', method: 'POST', headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` } } as any;
   let statusCode = 0;
   let responseData = '';
   const mockRes = {
@@ -292,6 +305,7 @@ test('handleApiRoutes: deve acionar rota POST /api/calibration/run com sucesso',
 
   let calibrationCalled = false;
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {},
     runCalibration: async () => {
       calibrationCalled = true;
@@ -329,6 +343,7 @@ test('handleApiRoutes: deve responder snapshots na rota GET /api/calibration/sna
   } as any;
 
   const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
     latestState: {},
     getSnapshots: async (limit: number) => {
       assert.strictEqual(limit, 10);
@@ -346,3 +361,157 @@ test('handleApiRoutes: deve responder snapshots na rota GET /api/calibration/sna
 
 
 
+
+test('handleApiRoutes: deve rejeitar mutação sem bearer token antes de chamar executor', async () => {
+  const mockReq = { url: '/api/panic/BlockedMint', method: 'POST', headers: {} } as any;
+  let statusCode = 0;
+  let responseData = '';
+  let executorCalled = false;
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: (data: string) => { responseData = data; }
+  } as any;
+  const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
+    latestState: {},
+    panicToken: async () => {
+      executorCalled = true;
+      return { success: true };
+    }
+  } as any;
+
+  const handled = await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(handled, true);
+  assert.strictEqual(statusCode, 401);
+  assert.strictEqual(executorCalled, false);
+  assert.strictEqual(JSON.parse(responseData).success, false);
+});
+
+test('handleApiRoutes: deve falhar fechado quando admin token não está configurado', async () => {
+  const mockReq = {
+    url: '/api/wallet/sweep-rent',
+    method: 'POST',
+    headers: { authorization: 'Bearer qualquer-token' }
+  } as any;
+  let statusCode = 0;
+  let sweepCalled = false;
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: () => {}
+  } as any;
+  const mockContext = {
+    adminToken: '',
+    latestState: {},
+    sweepRent: async () => {
+      sweepCalled = true;
+      return {};
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(statusCode, 503);
+  assert.strictEqual(sweepCalled, false);
+});
+
+test('handleApiRoutes: CORS deve refletir somente origem explicitamente permitida', async () => {
+  const headers: Record<string, string> = {};
+  const mockReq = {
+    url: '/health',
+    method: 'GET',
+    headers: { origin: 'https://ops.example' }
+  } as any;
+  const mockRes = {
+    setHeader: (name: string, value: string) => { headers[name] = value; },
+    writeHead: () => {},
+    end: () => {}
+  } as any;
+  const mockContext = {
+    latestState: { agent: 'test', wallet: 'wallet', balanceSol: 0, positions: [] },
+    allowedCorsOrigins: ['https://ops.example', '*']
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(headers['Access-Control-Allow-Origin'], 'https://ops.example');
+  assert.strictEqual(headers['Vary'], 'Origin');
+});
+
+test('handleApiRoutes: legacy panic deve ficar desabilitado por padrão', async () => {
+  const mockReq = {
+    url: '/api/panic/LegacyMint',
+    method: 'POST',
+    headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` }
+  } as any;
+  let statusCode = 0;
+  let panicCalled = false;
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: () => {}
+  } as any;
+  const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
+    latestState: {},
+    panicToken: async () => {
+      panicCalled = true;
+      return { success: true };
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(statusCode, 503);
+  assert.strictEqual(panicCalled, false);
+});
+
+test('handleApiRoutes: /api/positions/:mint/exit deve preferir executor seguro mesmo se panicToken existir', async () => {
+  const mockReq = {
+    url: '/api/positions/SafeMint/exit',
+    method: 'POST',
+    headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` }
+  } as any;
+  let panicCalled = false;
+  let exitCalled = false;
+  const mockRes = { writeHead: () => {}, end: () => {} } as any;
+  const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
+    latestState: {},
+    panicToken: async () => {
+      panicCalled = true;
+      return { success: true };
+    },
+    executeExitOrder: async () => {
+      exitCalled = true;
+      return { success: true, txSignature: 'safe-exit-tx' };
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(exitCalled, true);
+  assert.strictEqual(panicCalled, false);
+});
+
+test('handleApiRoutes: /api/positions/liquidate-all não deve chamar panicAll legado', async () => {
+  const mockReq = {
+    url: '/api/positions/liquidate-all',
+    method: 'POST',
+    headers: { authorization: `Bearer ${TEST_ADMIN_TOKEN}` }
+  } as any;
+  let panicAllCalled = false;
+  const exited: string[] = [];
+  const mockRes = { writeHead: () => {}, end: () => {} } as any;
+  const mockContext = {
+    adminToken: TEST_ADMIN_TOKEN,
+    latestState: { circuitBreakerActive: false },
+    panicAll: async () => {
+      panicAllCalled = true;
+      return { success: true, liquidationsCount: 99 };
+    },
+    getAllOpenPositions: () => [{ mint: 'SafeA', symbol: 'A' }],
+    executeExitOrder: async (mint: string) => {
+      exited.push(mint);
+      return { success: true, txSignature: 'safe-all-tx' };
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(panicAllCalled, false);
+  assert.deepStrictEqual(exited, ['SafeA']);
+});

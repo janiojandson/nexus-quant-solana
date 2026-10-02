@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
 import { DashboardState, renderDashboardHtml } from '../dashboard/dashboardRenderer.js';
 import type { DecisionLogger } from '../database/decisionJournal.js';
@@ -19,6 +20,79 @@ export interface RouteContext {
   getSnapshots?: (limit: number) => Promise<any[]>;
   pgPool?: Pool | null;
   journal?: DecisionLogger | null;
+  adminToken?: string;
+  allowedCorsOrigins?: string[];
+  enableLegacyPanicApi?: boolean;
+}
+
+function isProtectedMutation(pathname: string, method: string): boolean {
+  if (method !== 'POST' && method !== 'PUT' && method !== 'PATCH' && method !== 'DELETE') {
+    return false;
+  }
+
+  return (
+    pathname.startsWith('/api/panic/') ||
+    pathname.startsWith('/api/positions/') ||
+    pathname === '/api/wallet/liquidate-holding' ||
+    pathname === '/api/wallet/sweep-rent' ||
+    pathname === '/api/calibration/run'
+  );
+}
+
+function secureTokenEquals(received: string, expected: string): boolean {
+  const receivedBuffer = Buffer.from(received);
+  const expectedBuffer = Buffer.from(expected);
+  return receivedBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+
+function authorizeMutation(req: IncomingMessage, res: ServerResponse, adminToken?: string): boolean {
+  const expectedToken = (adminToken || '').trim();
+  if (!expectedToken) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, error: 'Admin API authentication is not configured.' }));
+    return false;
+  }
+
+  const rawHeader = req.headers.authorization;
+  const authHeader = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  const prefix = 'Bearer ';
+  const receivedToken = authHeader?.startsWith(prefix) ? authHeader.slice(prefix.length).trim() : '';
+
+  if (!receivedToken || !secureTokenEquals(receivedToken, expectedToken)) {
+    res.writeHead(401, {
+      'Content-Type': 'application/json',
+      'WWW-Authenticate': 'Bearer'
+    });
+    res.end(JSON.stringify({ success: false, error: 'Unauthorized.' }));
+    return false;
+  }
+
+  return true;
+}
+
+function applyCorsHeaders(
+  req: IncomingMessage,
+  res: ServerResponse,
+  allowedCorsOrigins: string[]
+): void {
+  if (typeof res.setHeader !== 'function') return;
+
+  const originHeader = req.headers.origin;
+  const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
+  const allowed = new Set(
+    allowedCorsOrigins
+      .map(value => value.trim())
+      .filter(value => value.length > 0 && value !== '*')
+  );
+
+  if (origin && allowed.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
 /**
@@ -34,17 +108,21 @@ export async function handleApiRoutes(
   const pathname = parsedUrl.pathname;
   const method = req.method || 'GET';
 
-  // Middlewares: Cabeçalhos CORS Irrestritos Universais
-  if (typeof res.setHeader === 'function') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  }
+  const allowedCorsOrigins = ctx.allowedCorsOrigins ??
+    (process.env.NEXUS_CORS_ORIGINS || '').split(',');
+  applyCorsHeaders(req, res, allowedCorsOrigins);
 
   if (method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
     return true;
+  }
+
+  if (isProtectedMutation(pathname, method)) {
+    const adminToken = ctx.adminToken ?? process.env.NEXUS_ADMIN_TOKEN;
+    if (!authorizeMutation(req, res, adminToken)) {
+      return true;
+    }
   }
 
   // 0. Rotas Especializadas do Decision Journal, Auditoria do Ledger & Calibração
@@ -184,6 +262,17 @@ export async function handleApiRoutes(
   // 4. PÂNICO INDIVIDUAL: POST /api/panic/:mint (ou POST /api/positions/:mint/exit)
   const isPanicMint = pathname.startsWith('/api/panic/') && pathname !== '/api/panic/all';
   const isPositionExit = pathname.startsWith('/api/positions/') && pathname.endsWith('/exit');
+  const legacyPanicEnabled = ctx.enableLegacyPanicApi ??
+    (process.env.NEXUS_ENABLE_LEGACY_PANIC_API === 'true');
+
+  if (isPanicMint && method === 'POST' && !legacyPanicEnabled) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: false,
+      error: 'Legacy panic API disabled. Use the authenticated /api/positions/:mint/exit path.'
+    }));
+    return true;
+  }
 
   if ((isPanicMint || isPositionExit) && method === 'POST') {
     const segments = pathname.split('/');
@@ -194,7 +283,7 @@ export async function handleApiRoutes(
       return true;
     }
 
-    if (ctx.panicToken) {
+    if (isPanicMint && ctx.panicToken) {
       try {
         const result = await ctx.panicToken(mint);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -212,9 +301,11 @@ export async function handleApiRoutes(
       res.end(JSON.stringify({
         ...result,
         success: result?.success !== false,
-        txSignature: result?.txSignature || 'SIMULATED_PANIC',
-        txid: result?.txSignature || 'SIMULATED_PANIC',
-        message: 'Moeda liquidada e aluguel de ~0.00204 SOL recuperado.'
+        txSignature: result?.txSignature || null,
+        txid: result?.txSignature || null,
+        message: result?.success === false
+          ? 'Saída manual não confirmada; posição preservada.'
+          : 'Saída manual processada pelo executor de posições.'
       }));
       return true;
     }
@@ -224,9 +315,21 @@ export async function handleApiRoutes(
     return true;
   }
 
-  // 5. PÂNICO GERAL: POST /api/panic/all (ou POST /api/positions/liquidate-all)
-  if ((pathname === '/api/panic/all' || pathname === '/api/positions/liquidate-all') && method === 'POST') {
-    if (ctx.panicAll) {
+  // 5. PÂNICO GERAL: legado /api/panic/all e caminho seguro /api/positions/liquidate-all
+  const isLegacyPanicAll = pathname === '/api/panic/all';
+  const isPositionLiquidateAll = pathname === '/api/positions/liquidate-all';
+
+  if (isLegacyPanicAll && method === 'POST' && !legacyPanicEnabled) {
+    res.writeHead(503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: false,
+      error: 'Legacy panic API disabled. Use the authenticated /api/positions/liquidate-all path.'
+    }));
+    return true;
+  }
+
+  if ((isLegacyPanicAll || isPositionLiquidateAll) && method === 'POST') {
+    if (isLegacyPanicAll && ctx.panicAll) {
       try {
         const result = await ctx.panicAll();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -250,12 +353,18 @@ export async function handleApiRoutes(
         await ctx.sweepRent().catch(() => {});
       }
 
+      const failures = results.filter((result: any) =>
+        result?.success === false || result?.status === 'FAILED'
+      );
+      const liquidationsCount = results.length - failures.length;
+
       ctx.latestState.circuitBreakerActive = true;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(failures.length === 0 ? 200 : 207, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        success: true,
-        liquidationsCount: results.length,
-        message: `${results.length} posições liquidadas a mercado.`,
+        success: failures.length === 0,
+        liquidationsCount,
+        failureCount: failures.length,
+        message: `${liquidationsCount} posições liquidadas; ${failures.length} falha(s).`,
         results
       }));
       return true;

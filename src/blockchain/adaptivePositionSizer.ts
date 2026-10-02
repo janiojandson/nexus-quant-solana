@@ -73,6 +73,8 @@ export class AdaptivePositionSizer {
     options?: {
       maxPriceImpactPct?: number;
       targetPriceImpactPct?: number;
+      /** Escada específica da operação. Útil para reduzir chamadas no modo econômico. */
+      ladderSol?: number[];
       /** Simulação adicional (pré-voo). Retorne string de erro para rejeitar o lote. */
       validate?: (quote: SwapQuoteResult, sizeSol: number) => Promise<string | null>;
     }
@@ -81,8 +83,11 @@ export class AdaptivePositionSizer {
     const targetImpact = options?.targetPriceImpactPct ?? TARGET_PRICE_IMPACT_PCT;
     const attempts: SizingAttempt[] = [];
     const rejectionsBySimulation: string[] = [];
+    const activeLadder = (options?.ladderSol?.length ? options.ladderSol : this.ladderSol)
+      .filter(size => Number.isFinite(size) && size > 0)
+      .sort((a, b) => b - a);
 
-    for (const sizeSol of this.ladderSol) {
+    for (const sizeSol of activeLadder) {
       const amountLamports = Math.floor(sizeSol * 1e9);
 
       let quote: SwapQuoteResult;
@@ -140,7 +145,7 @@ export class AdaptivePositionSizer {
     // Todas as tentativas falharam. A mensagem precisa refletir a causa REAL:
     // blaming no Price Impact quando a simulação reprovou mandava o operador
     // procurar no lugar errado.
-    const error = this.buildAbortMessage(targetImpact, maxImpact, attempts, rejectionsBySimulation);
+    const error = this.buildAbortMessage(targetImpact, maxImpact, attempts, rejectionsBySimulation, activeLadder);
     console.warn(`[AdaptiveSizing] ${error}`);
 
     return {
@@ -157,9 +162,12 @@ export class AdaptivePositionSizer {
     targetImpact: number,
     maxImpact: number,
     attempts: SizingAttempt[],
-    simulationRejections: string[]
+    simulationRejections: string[],
+    ladderSol: number[]
   ): string {
-    const ladder = `${this.ladderSol[this.ladderSol.length - 1]} a ${this.ladderSol[0]} SOL`;
+    const ladder = ladderSol.length
+      ? `${ladderSol[ladderSol.length - 1]} a ${ladderSol[0]} SOL`
+      : 'escada vazia';
     const trace = attempts
       .map((a) => `${a.sizeSol}SOL[pi=${a.priceImpactPct.toFixed(3)}%${a.accepted ? ',aprovado' : `,${a.rejectedBy}`}]`)
       .join(' -> ');

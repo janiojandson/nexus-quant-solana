@@ -66,30 +66,21 @@ export class MemeRiskGatekeeper {
       const res = await axios.get(`${this.macroSentinelUrl}/v1/sentinel/regime`, {
         timeout: 2500
       });
+      if (typeof res.data?.is_circuit_breaker_active !== 'boolean') {
+        return { isBreakerActive: true, regime: 'INVALID_SENTINEL_RESPONSE' };
+      }
       return {
-        isBreakerActive: Boolean(res.data?.is_circuit_breaker_active),
-        regime: res.data?.regime
+        isBreakerActive: res.data.is_circuit_breaker_active,
+        regime: typeof res.data?.regime === 'string' ? res.data.regime : 'UNKNOWN'
       };
     } catch {
-      // Se o macro estiver indisponível temporariamente, opera gracioso
-      return { isBreakerActive: false };
+      // Fail-closed: sem estado confi?vel do Sentinel, nenhuma nova entrada ? permitida.
+      return { isBreakerActive: true, regime: 'SENTINEL_UNAVAILABLE' };
     }
   }
 
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
     const startTime = Date.now();
-
-    // 0. Consulta ao Disjuntor Macro Institucional (nexus-macro-sentinel :4005)
-    const macroCheck = await this.checkMacroCircuitBreaker();
-    if (macroCheck.isBreakerActive) {
-      return {
-        safe: false,
-        reason: `Disjuntor Macro Ativado pelo Nexus Sentinel: Mercado em colapso/sangria (${macroCheck.regime || 'BEARISH_DUMP'}). Compras suspensas.`,
-        score: 0,
-        validatedBy: 'MACRO_CIRCUIT_BREAKER',
-        latencyMs: Date.now() - startTime
-      };
-    }
 
     // 1. Pré-Filtro Local Imediato (0ms): Honeypot e Risco de Rug Pull
     if (token.mintAuthority !== null) {
@@ -140,6 +131,18 @@ export class MemeRiskGatekeeper {
         reason: momentumCheck.reason || 'Ayla Veto: Momentum ou Order Flow reprovado',
         score: 15,
         validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
+        latencyMs: Date.now() - startTime
+      };
+    }
+
+    // 0. Consulta ao Disjuntor Macro Institucional (nexus-macro-sentinel :4005)
+    const macroCheck = await this.checkMacroCircuitBreaker();
+    if (macroCheck.isBreakerActive) {
+      return {
+        safe: false,
+        reason: `Disjuntor Macro Ativado pelo Nexus Sentinel: Mercado em colapso/sangria (${macroCheck.regime || 'BEARISH_DUMP'}). Compras suspensas.`,
+        score: 0,
+        validatedBy: 'MACRO_CIRCUIT_BREAKER',
         latencyMs: Date.now() - startTime
       };
     }
@@ -215,7 +218,8 @@ export class MemeRiskGatekeeper {
       // O Laya retorna { success, answers: { action: { choice, verdict, rationale } }, verdict, rationale_code, routing }
       // O VETO pode estar em `verdict` (top-level) ou em `answers.action.choice`
       const vetoChoice = decision?.answers?.action?.choice ?? decision?.verdict;
-      const isVeto = vetoChoice === 'VETO';
+      const normalizedChoice = typeof vetoChoice === 'string' ? vetoChoice.trim().toUpperCase() : '';
+      const isVeto = normalizedChoice === 'VETO';
 
       if (isVeto) {
         const reason = decision?.answers?.action?.rationale
@@ -230,18 +234,29 @@ export class MemeRiskGatekeeper {
         };
       }
 
+      const explicitApproval = ['ALLOW', 'APPROVE', 'BUY', 'PROCEED', 'SAFE', 'ACCEPT'].includes(normalizedChoice);
+      if (!explicitApproval) {
+        return {
+          safe: false,
+          reason: `Resposta da Ayla/Laya sem aprova??o expl?cita (${normalizedChoice || 'ausente'}). Entrada bloqueada por fail-closed.`,
+          score: 0,
+          validatedBy: 'AYLA_LAYA_ENGINE',
+          latencyMs
+        };
+      }
+
       return {
         safe: true,
         score: 95,
         validatedBy: 'AYLA_LAYA_ENGINE',
         latencyMs
       };
-    } catch {
-      // 3. Fallback Gracioso: Se a Ayla demorar mais que o timeout ou estiver reiniciando,
-      // as heurísticas locais robustas já garantiram que não é honeypot, mint ativo ou liquidez baixa.
+    } catch (err: any) {
+      // Fail-closed: falha, timeout ou resposta inv?lida da Ayla n?o autorizam compra.
       return {
-        safe: true,
-        score: 80,
+        safe: false,
+        reason: `Ayla/Laya indispon?vel ou resposta inv?lida: ${err?.message || 'erro desconhecido'}. Entrada bloqueada.`,
+        score: 0,
         validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
         latencyMs: Date.now() - startTime
       };

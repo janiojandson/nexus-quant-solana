@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { PositionExitEngine } from './positionExitEngine.js';
 
-test('PositionExitEngine: deve disparar PARTIAL_TAKE_PROFIT_50 a +35% e mover SL para Breakeven', () => {
+test('PositionExitEngine: parcial só altera estado depois da confirmação do swap', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestMint1111111111111111111111111111111111';
   engine.addPosition({
@@ -20,10 +20,16 @@ test('PositionExitEngine: deve disparar PARTIAL_TAKE_PROFIT_50 a +35% e mover SL
   assert.strictEqual(eval1.exitTokenAmount, 500);
   assert.strictEqual(eval1.shouldCloseAta, false);
 
-  const pos = engine.getPosition(mint);
+  let pos = engine.getPosition(mint);
+  assert.notStrictEqual(pos?.partialTaken, true, 'sinal não pode fingir venda antes da confirmação');
+  assert.strictEqual(pos?.tokenAmount, 1000);
+
+  assert.strictEqual(engine.commitPartialExit(mint, 500, 0.02025), true);
+  pos = engine.getPosition(mint);
   assert.strictEqual(pos?.partialTaken, true);
   assert.strictEqual(pos?.tokenAmount, 500);
-  assert.strictEqual(pos?.stopLossPct, 0.01); // Breakeven (+1%)
+  assert.strictEqual(pos?.entrySol, 0.0075);
+  assert.strictEqual(pos?.stopLossPct, 0.01);
 });
 
 test('PositionExitEngine: deve mover SL para Breakeven (+1%) ao atingir +12% de pico pré-parcial', () => {
@@ -43,10 +49,10 @@ test('PositionExitEngine: deve mover SL para Breakeven (+1%) ao atingir +12% de 
   const pos = engine.getPosition(mint);
   assert.strictEqual(pos?.stopLossPct, 0.01, 'Stop deve subir para +1% ao atingir +12%');
 
-  // Recua para +0.5% (abaixo de +1%), deve acionar stop loss de breakeven
+  // Depois de +12%, o trailing de momentum é mais protetor que o breakeven.
   const evalRecuo = engine.evaluateExitBySol(mint, 0.01507);
   assert.strictEqual(evalRecuo.shouldExit, true);
-  assert.strictEqual(evalRecuo.type, 'STOP_LOSS');
+  assert.strictEqual(evalRecuo.type, 'TRAILING_STOP');
   assert.strictEqual(evalRecuo.shouldCloseAta, true);
 });
 
@@ -62,7 +68,8 @@ test('PositionExitEngine: pos-parcial, deve encerrar TRAILING_STOP se recuar 10%
     entrySol: 0.015
   });
 
-  engine.evaluateExitBySol(mint, 0.02025); // Aciona parcial de +35%
+  const partial = engine.evaluateExitBySol(mint, 0.02025); // Sinaliza parcial de +35%
+  engine.commitPartialExit(mint, partial.exitTokenAmount || 500, 0.02025);
   engine.evaluateExitBySol(mint, 0.030);   // Pico sobe para 0.030 SOL
   // Stop trailing a -10% de 0.030 = 0.027
   const evalTrailing = engine.evaluateExitBySol(mint, 0.0269);
@@ -232,10 +239,11 @@ test('PositionExitEngine: deve exibir explicitamente SL Fixo e Trailing INATIVO 
 
   // Antes da parcial
   const statusPre = engine.getStopStatusText(mint);
-  assert.strictEqual(statusPre, 'Stop Ativo: SL Fixo (-20.00%) | Trailing: INATIVO (Aguardando Parcial)');
+  assert.strictEqual(statusPre, 'Stop Ativo: SL Fixo (-20.00%) | Trailing: aguardando +8%');
 
-  // Aciona parcial em +100%
-  engine.evaluateExitBySol(mint, 0.030);
+  // Sinaliza e confirma parcial em +100%
+  const partial = engine.evaluateExitBySol(mint, 0.030);
+  engine.commitPartialExit(mint, partial.exitTokenAmount || 500, 0.030);
 
   // Pós-parcial
   const statusPost = engine.getStopStatusText(mint);
@@ -282,3 +290,25 @@ test('PositionExitEngine (Watchdog): deve emitir aviso em 5 falhas e disparar co
   assert.strictEqual(engine.getQuoteFailures(mint), 0);
 });
 
+
+test('PositionExitEngine: trailing de momentum protege ganho antes da parcial', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'EarlyMomentumTrailing';
+  engine.addPosition({
+    mint,
+    symbol: 'MOMO',
+    tokenAmount: 1000,
+    entryPriceUsd: 1,
+    entryTimestamp: Date.now(),
+    entrySol: 0.015
+  });
+
+  const peak = engine.evaluateExitBySol(mint, 0.0165); // +10%
+  assert.strictEqual(peak.shouldExit, false);
+
+  const reversal = engine.evaluateExitBySol(mint, 0.01545); // +3%, abaixo do trailing de 6% do topo
+  assert.strictEqual(reversal.shouldExit, true);
+  assert.strictEqual(reversal.type, 'TRAILING_STOP');
+  assert.strictEqual(reversal.shouldCloseAta, true);
+  assert.strictEqual(reversal.reasonDetail, 'EARLY_MOMENTUM_TRAILING');
+});

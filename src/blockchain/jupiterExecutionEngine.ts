@@ -22,11 +22,13 @@ export interface SwapExecutionRequest {
   poolLiquidityUsd?: number | null;
   /** Se true, pula simulação local prévia da compra para envio ultra-rápido aos validadores */
   skipPreflight?: boolean;
+  /** Teto absoluto da priority fee desta transação, em lamports. */
+  maxPriorityFeeLamports?: number;
 }
 
 export interface SwapExecutionResponse {
   txSignature: string;
-  status: 'SUCCESS' | 'DRY_RUN_SUCCESS' | 'FAILED';
+  status: 'SUCCESS' | 'DRY_RUN_SUCCESS' | 'FAILED' | 'SUBMITTED_UNCONFIRMED';
   inAmount: number;
   outAmount: number;
   isDryRun: boolean;
@@ -41,6 +43,11 @@ export interface JupiterEngineConfig {
   dexAggregator?: DexAggregatorService;
   /** Conexão injetável (testes). Em produção, derivada de rpcUrl. */
   connection?: Connection;
+  /** Tempo máximo aguardando confirmação após transmissão. */
+  confirmationTimeoutMs?: number;
+  apiKey?: string;
+  buyMaxPriorityFeeLamports?: number;
+  sellMaxPriorityFeeLamports?: number;
 }
 
 export class JupiterExecutionEngine {
@@ -48,12 +55,22 @@ export class JupiterExecutionEngine {
   private isDryRun: boolean;
   private dexAggregator: DexAggregatorService;
   private swapUrl: string;
+  private confirmationTimeoutMs: number;
+  private apiKey?: string;
+  private buyMaxPriorityFeeLamports: number;
+  private sellMaxPriorityFeeLamports: number;
 
   constructor(config?: JupiterEngineConfig) {
     this.connection = config?.connection || new Connection(config?.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
     this.isDryRun = config?.isDryRun !== undefined ? config.isDryRun : (process.env.DRY_RUN_MODE !== 'false');
     this.dexAggregator = config?.dexAggregator || new DexAggregatorService();
-    this.swapUrl = process.env.JUPITER_SWAP_URL || 'https://public.jupiterapi.com/swap';
+    this.apiKey = config?.apiKey ?? process.env.JUPITER_API_KEY;
+    this.swapUrl = process.env.JUPITER_SWAP_URL || 'https://api.jup.ag/swap/v1/swap';
+    this.confirmationTimeoutMs = config?.confirmationTimeoutMs ?? 15_000;
+    this.buyMaxPriorityFeeLamports = config?.buyMaxPriorityFeeLamports ??
+      Number(process.env.JUPITER_BUY_MAX_PRIORITY_FEE_LAMPORTS || 150_000);
+    this.sellMaxPriorityFeeLamports = config?.sellMaxPriorityFeeLamports ??
+      Number(process.env.JUPITER_SELL_MAX_PRIORITY_FEE_LAMPORTS || 500_000);
   }
 
   public getAggregator(): DexAggregatorService {
@@ -77,12 +94,12 @@ export class JupiterExecutionEngine {
    * Retorna `error` preenchido (string) quando o lote é inviável — 6014
    * SlippageExceeded, 0x1789, profundidade insuficiente, etc.
    */
-  public async simulateSwap(req: SwapExecutionRequest): Promise<{ success: boolean; error?: string; unitsConsumed?: number }> {
+  public async simulateSwap(req: SwapExecutionRequest, quoteOverride?: SwapQuoteResult): Promise<{ success: boolean; error?: string; unitsConsumed?: number }> {
     try {
       const isBuy = req.inputMint === 'So11111111111111111111111111111111111111112';
       const useAutoSlippage = req.autoSlippage !== undefined ? req.autoSlippage : isBuy;
 
-      const quote = await this.dexAggregator.getQuote({
+      const quote = quoteOverride ?? await this.dexAggregator.getQuote({
         inputMint: req.inputMint,
         outputMint: req.outputMint,
         amountLamports: req.amountLamports,
@@ -137,10 +154,18 @@ export class JupiterExecutionEngine {
       otherAmountThreshold: String(quote.outAmount),
       swapMode: 'ExactIn',
       slippageBps: quote.slippageBps,
-      priceImpactPct: String(quote.priceImpactPct)
+      priceImpactPct: String(quote.priceImpactPct / 100)
     };
 
     const priorityLevel = req.priorityLevel || (isBuy ? 'medium' : 'high');
+    const configuredCap = isBuy ? this.buyMaxPriorityFeeLamports : this.sellMaxPriorityFeeLamports;
+    const maxPriorityFeeLamports = Math.max(
+      0,
+      Math.floor(req.maxPriorityFeeLamports ?? configuredCap)
+    );
+
+    await this.dexAggregator.waitForRateSlot();
+
     const swapRes = await axios.post(this.swapUrl, {
       quoteResponse: payloadQuote,
       userPublicKey: req.userPublicKey,
@@ -148,11 +173,14 @@ export class JupiterExecutionEngine {
       dynamicComputeUnitLimit: true,
       prioritizationFeeLamports: {
         priorityLevelWithMaxLamports: {
-          maxLamports: priorityLevel === 'high' || priorityLevel === 'veryHigh' ? 5000000 : 2000000,
+          maxLamports: maxPriorityFeeLamports,
           priorityLevel
         }
       }
-    }, { timeout: 8000 });
+    }, {
+      timeout: 8000,
+      headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
+    });
 
     return VersionedTransaction.deserialize(Buffer.from(swapRes.data.swapTransaction, 'base64'));
   }
@@ -230,11 +258,51 @@ export class JupiterExecutionEngine {
         }
       }
 
-      // 5. Transmitir para a Blockchain Solana apenas se a simulação foi aprovada
+      // 5. Transmitir somente após a simulação. A assinatura retornada pelo RPC
+      // significa "submetida", não "confirmada". A posição só pode ser criada após
+      // confirmação on-chain.
       const txid = await this.connection.sendRawTransaction(transaction.serialize(), {
-        skipPreflight: true, // Já validado com segurança na simulação acima
+        skipPreflight: true,
         maxRetries: 3
       });
+
+      let confirmation: any;
+      let confirmationTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        confirmation = await Promise.race([
+          this.connection.confirmTransaction(txid, 'confirmed'),
+          new Promise((_, reject) => {
+            confirmationTimer = setTimeout(
+              () => reject(new Error('CONFIRMATION_TIMEOUT')),
+              this.confirmationTimeoutMs
+            );
+          })
+        ]);
+      } catch (confirmErr: any) {
+        return {
+          txSignature: txid,
+          status: 'SUBMITTED_UNCONFIRMED',
+          inAmount: req.amountLamports,
+          outAmount: 0,
+          isDryRun: false,
+          unitsConsumed,
+          error: `Transação submetida, mas confirmação não foi obtida: ${confirmErr?.message || confirmErr}`
+        };
+      } finally {
+        if (confirmationTimer) clearTimeout(confirmationTimer);
+      }
+
+      if (confirmation?.value?.err) {
+        return {
+          txSignature: txid,
+          status: 'FAILED',
+          inAmount: req.amountLamports,
+          outAmount: 0,
+          isDryRun: false,
+          unitsConsumed,
+          error: `Transação incluída, porém falhou on-chain: ${JSON.stringify(confirmation.value.err)}`
+        };
+      }
 
       return {
         txSignature: txid,

@@ -28,6 +28,12 @@ export interface SwapQuoteResult {
   rawQuote?: any;
 }
 
+export interface DexAggregatorConfig {
+  apiKey?: string;
+  rateLimitMs?: number;
+  cacheTtlMs?: number;
+}
+
 /**
  * Erro explícito de falha na camada de cotação (política Fail-Closed).
  *
@@ -49,11 +55,46 @@ export class JupiterQuoteException extends Error {
 
 export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
+  private apiKey?: string;
+  private rateLimitMs: number;
+  private cacheTtlMs: number;
+  private lastRequestStartedAt = 0;
+  private requestQueue: Promise<void> = Promise.resolve();
+  private quoteCache = new Map<string, { expiresAt: number; result: SwapQuoteResult }>();
   public static readonly MAX_ALLOWED_SLIPPAGE_BPS = HARD_CAP_SLIPPAGE_BPS; // 750 bps (7.5%)
   public static readonly MIN_SLIPPAGE_FLOOR_BPS = 250; // 250 bps (2.5%) - Piso para memecoins de alta velocidade
 
-  constructor(jupiterApiBaseUrl = process.env.JUPITER_API_URL || 'https://public.jupiterapi.com') {
-    this.jupiterApiBaseUrl = jupiterApiBaseUrl;
+  constructor(
+    jupiterApiBaseUrl = process.env.JUPITER_API_URL || 'https://api.jup.ag/swap/v1',
+    config: DexAggregatorConfig = {}
+  ) {
+    this.jupiterApiBaseUrl = jupiterApiBaseUrl.replace(/\/$/, '');
+    this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+    const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
+    const configuredRateLimitMs = config.rateLimitMs ??
+      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 1050 : 2100)));
+    // Keyless Jupiter opera em ~0,5 RPS. Mesmo que uma variável antiga tenha
+    // 1050ms, nunca excedemos esse teto quando não há API key.
+    this.rateLimitMs = isTestEndpoint
+      ? configuredRateLimitMs
+      : (this.apiKey ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
+    this.cacheTtlMs = config.cacheTtlMs ??
+      (isTestEndpoint ? 0 : Number(process.env.JUPITER_QUOTE_CACHE_TTL_MS || 750));
+  }
+
+  public async waitForRateSlot(): Promise<void> {
+    let release!: () => void;
+    const previous = this.requestQueue;
+    this.requestQueue = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      const elapsed = Date.now() - this.lastRequestStartedAt;
+      const waitMs = Math.max(0, this.rateLimitMs - elapsed);
+      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+      this.lastRequestStartedAt = Date.now();
+    } finally {
+      release();
+    }
   }
 
   public async getQuote(params: SwapQuoteParams): Promise<SwapQuoteResult> {
@@ -85,7 +126,8 @@ export class DexAggregatorService {
     const queryParams: Record<string, any> = {
       inputMint: params.inputMint,
       outputMint: params.outputMint,
-      amount: params.amountLamports
+      amount: params.amountLamports,
+      instructionVersion: 'V2'
     };
 
     if (params.autoSlippage) {
@@ -109,24 +151,56 @@ export class DexAggregatorService {
       queryParams.slippageBps = effectiveSlippageBps; // Usa o valor após aplicar piso
     }
 
+    const cacheKey = JSON.stringify(queryParams);
+    const cached = this.quoteCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.result;
+    }
+    if (cached) this.quoteCache.delete(cacheKey);
+
     let response;
-    try {
-      response = await axios.get(`${this.jupiterApiBaseUrl}/quote`, {
-        params: queryParams,
-        timeout: 5000
-      });
-    } catch (err: any) {
-      // Fail-Closed: NAO existe mais caminho de fallback. Uma falha de cotação
-      // aborta o trade; jamais e convertida em preco ficticio.
-      const status = err?.response?.status;
-      const detail = err?.response?.data?.error || err?.message || String(err);
+    let lastError: any;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await this.waitForRateSlot();
+      try {
+        response = await axios.get(`${this.jupiterApiBaseUrl}/quote`, {
+          params: queryParams,
+          timeout: 5000,
+          headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
+        });
+        break;
+      } catch (err: any) {
+        lastError = err;
+        const status = err?.response?.status;
+
+        if (status === 429 && attempt === 0) {
+          const retryAfterHeader = Number(err?.response?.headers?.['retry-after'] || 0);
+          const configuredBackoff = /fake\.invalid/i.test(this.jupiterApiBaseUrl)
+            ? 0
+            : Number(process.env.JUPITER_429_BACKOFF_MS || 1200);
+          const waitMs = retryAfterHeader > 0
+            ? retryAfterHeader * 1000
+            : configuredBackoff;
+          console.warn(`[Jupiter 429] Rate limit atingido; retry único em ${waitMs}ms.`);
+          if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+          continue;
+        }
+
+        break;
+      }
+    }
+
+    if (!response) {
+      // Fail-Closed: após no máximo um retry em 429, a operação é abortada.
+      const status = lastError?.response?.status;
+      const detail = lastError?.response?.data?.error || lastError?.message || String(lastError);
       console.error(
         `[JupiterQuoteException] Falha ao cotar ${params.inputMint} -> ${params.outputMint} (${params.amountLamports} lamports): ${detail}`
       );
       throw new JupiterQuoteException(
         `Falha na cotação Jupiter (${status ?? 'sem status'}): ${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`,
         status,
-        err
+        lastError
       );
     }
 
@@ -143,7 +217,8 @@ export class DexAggregatorService {
       outputMint: params.outputMint,
       inAmount: Number(data.inAmount),
       outAmount: Number(data.outAmount),
-      priceImpactPct: Number(data.priceImpactPct || 0),
+      // Jupiter documenta priceImpactPct como fração decimal (0.01 = 1%).
+      priceImpactPct: Number(data.priceImpactPct || 0) * 100,
       slippageBps: params.autoSlippage ? effectiveSlippageBps : effectiveSlippageBps,
       routePlanSummary:
         data.routePlan?.map((r: { swapInfo: { label: string } }) => r.swapInfo?.label).join(' -> ') || 'Direct',
@@ -154,6 +229,13 @@ export class DexAggregatorService {
     console.log(
       `📊 [JupiterQuote] Slippage configurado: ${result.slippageBps} bps | Price Impact: ${result.priceImpactPct.toFixed(3)}% | Rota: ${result.routePlanSummary}`
     );
+
+    if (this.cacheTtlMs > 0) {
+      this.quoteCache.set(cacheKey, {
+        expiresAt: Date.now() + this.cacheTtlMs,
+        result
+      });
+    }
 
     return result;
   }

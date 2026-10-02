@@ -52,8 +52,11 @@ class OkAggregator extends DexAggregatorService {
 }
 
 /** Conexão falsa: controla o resultado da simulação e conta transmissões. */
-function makeConnection(simResult: { err: any } | { throwErr: any }) {
-  const state = { simulateCalls: 0, sendCalls: 0 };
+function makeConnection(
+  simResult: { err: any } | { throwErr: any },
+  confirmResult: { err?: any; throwErr?: any } = { err: null }
+) {
+  const state = { simulateCalls: 0, sendCalls: 0, confirmCalls: 0 };
   const conn: any = {
     async simulateTransaction() {
       state.simulateCalls++;
@@ -63,6 +66,11 @@ function makeConnection(simResult: { err: any } | { throwErr: any }) {
     async sendRawTransaction() {
       state.sendCalls++;
       return 'fake_tx_signature';
+    },
+    async confirmTransaction() {
+      state.confirmCalls++;
+      if (confirmResult.throwErr) throw confirmResult.throwErr;
+      return { value: { err: confirmResult.err ?? null } };
     }
   };
   return { conn: conn as unknown as Connection, state };
@@ -166,6 +174,8 @@ test('JupiterExecutionEngine: deve transmitir quando a simulação aprova', asyn
 
   assert.strictEqual(state.simulateCalls, 1);
   assert.strictEqual(state.sendCalls, 1);
+  assert.strictEqual(state.confirmCalls, 1);
+  assert.strictEqual(result.status, 'SUCCESS');
   assert.strictEqual(result.txSignature, 'fake_tx_signature');
   assert.strictEqual(result.outAmount, 987_654);
 });
@@ -260,4 +270,60 @@ test('simulateSwap: deve falhar fechado quando a cotação está indisponível',
   assert.match(sim.error || '', /rate limit/);
   assert.strictEqual(state.simulateCalls, 0, 'nem deve simular sem cotação válida');
   assert.strictEqual(state.sendCalls, 0);
+});
+
+test('JupiterExecutionEngine: deve marcar FAILED quando a tx for incluída com erro on-chain', async () => {
+  mockSwapEndpoint(testSigner);
+  const { conn, state } = makeConnection(
+    { err: null },
+    { err: { InstructionError: [2, 'CustomFailure'] } }
+  );
+  const engine = makeEngine(conn);
+
+  const result = await engine.executeSwap(baseRequest);
+
+  assert.strictEqual(state.sendCalls, 1);
+  assert.strictEqual(state.confirmCalls, 1);
+  assert.strictEqual(result.status, 'FAILED');
+  assert.strictEqual(result.txSignature, 'fake_tx_signature');
+  assert.strictEqual(result.outAmount, 0);
+  assert.match(result.error || '', /falhou on-chain/);
+});
+
+test('JupiterExecutionEngine: não deve chamar sucesso quando submissão não confirma', async () => {
+  mockSwapEndpoint(testSigner);
+  const { conn, state } = makeConnection(
+    { err: null },
+    { throwErr: new Error('RPC confirmation unavailable') }
+  );
+  const engine = makeEngine(conn);
+
+  const result = await engine.executeSwap(baseRequest);
+
+  assert.strictEqual(state.sendCalls, 1);
+  assert.strictEqual(state.confirmCalls, 1);
+  assert.strictEqual(result.status, 'SUBMITTED_UNCONFIRMED');
+  assert.strictEqual(result.txSignature, 'fake_tx_signature');
+  assert.strictEqual(result.outAmount, 0);
+  assert.match(result.error || '', /confirmação não foi obtida/);
+});
+
+test('JupiterExecutionEngine: limita priority fee de compra ao teto configurado', async () => {
+  let maxLamportsSeen: number | undefined;
+  axios.post = (async (_url: string, body: any) => {
+    maxLamportsSeen = body?.prioritizationFeeLamports?.priorityLevelWithMaxLamports?.maxLamports;
+    return { data: { swapTransaction: buildSwapTransactionB64(testSigner) } };
+  }) as any;
+
+  const { conn } = makeConnection({ err: null });
+  const engine = new JupiterExecutionEngine({
+    connection: conn,
+    isDryRun: false,
+    dexAggregator: new OkAggregator(),
+    buyMaxPriorityFeeLamports: 123_456
+  });
+
+  const result = await engine.executeSwap(baseRequest);
+  assert.strictEqual(result.status, 'SUCCESS');
+  assert.strictEqual(maxLamportsSeen, 123_456);
 });

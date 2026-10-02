@@ -6,7 +6,6 @@ import { SolanaWalletService } from './blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
 import {
   AdaptivePositionSizer,
-  LADDER_SOL,
   MAX_TRADE_AMOUNT_SOL,
   MIN_TRADE_AMOUNT_SOL
 } from './blockchain/adaptivePositionSizer.js';
@@ -26,6 +25,8 @@ import { startCalibrationCron, runCalibrationNow } from './calibration/calibrati
 import { runMaintenance } from './database/maintenanceJob.js';
 import { DrawdownBreaker } from './risk/drawdownBreaker.js';
 import { assertAtomicAmountToNumber } from './execution/atomicAmount.js';
+import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
+
 
 dotenv.config();
 
@@ -42,6 +43,12 @@ const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const LAYA_URL = process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8000';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+const ENTRY_MOMENTUM_GATE_ENABLED = process.env.ENTRY_MOMENTUM_GATE_ENABLED === 'true';
+const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
+const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS || DEFAULT_ENTRY_MOMENTUM_CONFIG.intervalMs));
+const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.minRisePct);
+const ENTRY_MOMENTUM_MAX_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxRisePct);
+const ENTRY_MOMENTUM_MAX_PULLBACK_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_PULLBACK_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxPullbackPct);
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
@@ -154,45 +161,25 @@ async function executeExitOrder(
     priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
   });
 
-  // CORREÇÃO: Mecanismo de liquidação de emergência com 3 tentativas
+  // Segunda tentativa ainda fail-closed: amplia até o hard-cap de 7,5%,
+  // mas continua simulando antes de transmitir. Não existe mais envio cego com
+  // skipPreflight, evitando pagar taxa por uma falha que a simulação detectaria.
   if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
-    console.warn(`⚠️ [TENTATIVA 1 FALHOU] ${pos.symbol}: ${exitSwap.error} | Tentando slippage 1000bps...`);
-    
-    // Tentativa 2: Slippage aberto a 1000 bps (10%)
+    console.warn(`⚠️ [TENTATIVA 1 FALHOU] ${pos.symbol}: ${exitSwap.error} | Tentando slippage 750bps...`);
+
     exitSwap = await jupiterEngine.executeSwap({
       inputMint: pos.mint,
       outputMint: 'So11111111111111111111111111111111111111112',
       amountLamports: exitAmountAtomic,
       userPublicKey: OFFICIAL_PHANTOM_WALLET,
       keypair: wallet.getKeypair(),
-      slippageBps: 1000,     // 10.0% — Slippage de emergência
-      priorityLevel: 'veryHigh'
+      slippageBps: 750,
+      priorityLevel: 'veryHigh',
+      skipPreflight: false
     });
-    
-    if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
-      console.error(`🚨 [TENTATIVA 2 FALHOU] ${pos.symbol}: ${exitSwap.error} | Tentando pânico com skipPreflight...`);
-      
-      // Tentativa 3: Pânico com skipPreflight (liquidação a qualquer preço)
-      exitSwap = await jupiterEngine.executeSwap({
-        inputMint: pos.mint,
-        outputMint: 'So11111111111111111111111111111111111111112',
-        amountLamports: exitAmountAtomic,
-        userPublicKey: OFFICIAL_PHANTOM_WALLET,
-        keypair: wallet.getKeypair(),
-        slippageBps: 2000,     // 20.0% — Pânico total
-        priorityLevel: 'veryHigh',
-        skipPreflight: true    // PULA simulação — liquida a qualquer custo
-      });
-      
-      if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
-        console.error(`❌ [TENTATIVA 3 FALHOU] ${pos.symbol}: ${exitSwap.error} | POSIÇÃO PRESA EM EMERGÊNCIA!`);
-        // Não remove a posição - mantém para retry manual
-        return { success: false, txSignature: '', error: `Todas as 3 tentativas falharam: ${exitSwap.error}` };
-      }
-      
-      console.log(`✅ [TENTATIVA 3 SUCESSO] ${pos.symbol}: Liquidação de emergência executada com skipPreflight`);
-    } else {
-      console.log(`✅ [TENTATIVA 2 SUCESSO] ${pos.symbol}: Liquidação com slippage 1000bps`);
+
+    if (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') {
+      console.log(`✅ [TENTATIVA 2 SUCESSO] ${pos.symbol}: Liquidação confirmada com slippage 750bps`);
     }
   }
 
@@ -228,6 +215,13 @@ async function executeExitOrder(
 
     updateDashboardViews();
     return { success: false, txSignature: '', error: failReason };
+  }
+
+  if (isPartial) {
+    const committed = positionEngine.commitPartialExit(pos.mint, exitAmountAtomic, exitSolValue);
+    if (!committed) {
+      console.error(`❌ [CONSISTÊNCIA] Swap parcial confirmou, mas o estado local não conseguiu aplicar a redução de ${exitAmountAtomic} unidades em ${pos.symbol}.`);
+    }
   }
 
   // 3. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido)
@@ -408,14 +402,20 @@ const server = http.createServer(async (req, res) => {
     executeExitOrder: (mint, reason, pnlPct, exitSolValue) =>
       executeExitOrder(mint, reason as any, pnlPct, exitSolValue),
     liquidateHolding: async (payload: { mint: string; symbol: string; amount: number; decimals: number }) => {
-      const { mint, symbol, amount, decimals } = payload;
-      console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint}) | Qtd: ${amount}`);
-      const rawLamports = Math.floor(amount * Math.pow(10, decimals));
+      const { mint, symbol } = payload;
+      console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint})`);
 
-      // 1. Swap na Jupiter V6 com slippage estrito de 500 bps e prioridade HIGH
+      // Nunca confiar no amount/decimals enviados pelo browser para construir a ordem.
+      const splAccounts = await wallet.getSplTokenAccounts();
+      const holding = splAccounts.find(t => t.mint === mint);
+      if (!holding) {
+        return { success: false, error: 'Holding SPL positivo não encontrado na carteira.' };
+      }
+      const rawLamports = assertAtomicAmountToNumber(holding.atomicAmount);
+
       const exitSwap = await jupiterEngine.executeSwap({
         inputMint: mint,
-        outputMint: 'So11111111111111111111111111111111111111112', // SOL
+        outputMint: 'So11111111111111111111111111111111111111112',
         amountLamports: rawLamports,
         userPublicKey: OFFICIAL_PHANTOM_WALLET,
         keypair: wallet.getKeypair(),
@@ -423,17 +423,29 @@ const server = http.createServer(async (req, res) => {
         priorityLevel: 'high'
       });
 
-      // 2. Fechamento da ATA para resgatar ~0.00204 SOL de caução
-      await new Promise(r => setTimeout(r, 2000));
-      await wallet.closeTokenAccount(mint);
+      if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
+        return {
+          success: false,
+          error: exitSwap.error || 'Swap de liquidação falhou; posição e ATA foram preservadas.'
+        };
+      }
 
-      // 3. Aplica quarentena de 24h
+      if (exitSwap.status === 'DRY_RUN_SUCCESS') {
+        return { success: true, simulated: true, txSignature: exitSwap.txSignature };
+      }
+
+      positionEngine.removePosition(mint);
       antiSpamMemory.recordVeto(mint, 'Quarentena Pós-Liquidação Manual On-Chain', 24 * 60 * 60 * 1000);
 
-      // Remove do gerenciador se estivesse lá
-      positionEngine.removePosition(mint);
+      await new Promise(r => setTimeout(r, 2000));
+      const closeResult = await wallet.closeTokenAccount(mint);
 
-      return { success: true, txSignature: exitSwap.txSignature };
+      return {
+        success: true,
+        txSignature: exitSwap.txSignature,
+        rentRecovered: closeResult.success,
+        warning: closeResult.success ? undefined : 'Swap concluído, mas a ATA não pôde ser fechada.'
+      };
     },
     getAllOpenPositions: () => positionEngine.getAllPositions(),
     sweepRent: () => rentRecovery.sweepOrphanAccounts(),
@@ -559,35 +571,65 @@ async function runUltraFastExitMonitor() {
 
     for (const pos of openPositions) {
       try {
-        // Cotação direta na Jupiter V6: Token -> SOL
-        const tokenLamports = Math.floor(pos.tokenAmount);
-        const quote = await jupiterEngine.getQuote(
-          pos.mint,
-          'So11111111111111111111111111111111111111112', // SOL
-          tokenLamports,
-          400 // 4.0% — reflete preço real de liquidação em memecoins voláteis
+        // Sensor econômico primário: DexScreener. Se indisponível, entra em
+        // modo degradado usando Jupiter como sensor temporário. Só consideramos
+        // perda real de sinal se as duas fontes falharem.
+        const entrySol = pos.entrySol || 0.015;
+        if (!pos.entryPriceUsd || pos.entryPriceUsd <= 0) {
+          throw new Error('Posição sem preço USD de entrada para monitor de saída');
+        }
+
+        let sensorPriceUsd = await scanner.fetchCurrentTokenPriceUsd(pos.mint);
+        let currentSolValue: number;
+        let pnlPct: number;
+        let sensorSource = 'DEXSCREENER';
+
+        if (sensorPriceUsd && Number.isFinite(sensorPriceUsd) && sensorPriceUsd > 0) {
+          pnlPct = (sensorPriceUsd / pos.entryPriceUsd) - 1;
+          currentSolValue = entrySol * (1 + pnlPct);
+        } else {
+          sensorSource = 'JUPITER_DEGRADED';
+          const tokenAtomicAmount = assertAtomicAmountToNumber(pos.tokenAmount);
+          const fallbackQuote = await jupiterEngine.getQuote(
+            pos.mint,
+            'So11111111111111111111111111111111111111112',
+            tokenAtomicAmount,
+            500
+          );
+          currentSolValue = (fallbackQuote.outAmount || 0) / 1e9;
+          if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
+            throw new Error('DexScreener e Jupiter sem preço válido para monitor de saída');
+          }
+          pnlPct = (currentSolValue - entrySol) / entrySol;
+          sensorPriceUsd = pos.entryPriceUsd * (1 + pnlPct);
+          console.warn(
+            `⚠️ [ExitSensor Degradado] DexScreener indisponível para ${pos.symbol}; ` +
+            'Jupiter assumiu temporariamente o monitoramento.'
+          );
+        }
+        
+        // Atualiza pico local antes de exibir proteção. O evaluateExitBySol persiste
+        // o mesmo pico logo abaixo; aqui evitamos uma defasagem visual de um ciclo.
+        const peakSolValue = Math.max(positionEngine.getPeakSolValue(pos.mint), currentSolValue, entrySol);
+        const peakPnlPct = (peakSolValue - entrySol) / entrySol;
+        const earlyTrailingActive = !pos.partialTaken &&
+          peakPnlPct >= PositionExitEngine.EARLY_TRAILING_TRIGGER_PCT;
+        const activeTrailingDistance = pos.partialTaken
+          ? PositionExitEngine.TRAILING_DISTANCE
+          : PositionExitEngine.EARLY_TRAILING_DISTANCE;
+        const trailingStopSolValue = peakSolValue * (1 - activeTrailingDistance);
+        const trailPnlPct = (trailingStopSolValue - entrySol) / entrySol;
+        const trailingStatus = (pos.partialTaken || earlyTrailingActive) ? 'ATIVO' : 'INATIVO';
+        console.log(
+          `[ExitSensor] Token: ${pos.symbol} | Fonte: ${sensorSource} | PnL: ${(pnlPct * 100).toFixed(2)}% | ` +
+          `SL: ${((pos.stopLossPct || -0.06) * 100).toFixed(0)}% | Trailing: ${trailingStatus}`
         );
 
-        const currentSolValue = (quote.outAmount || 0) / 1e9;
-        const entrySol = pos.entrySol || 0.015;
-        const pnlPct = (currentSolValue - entrySol) / entrySol;
-        
-        // CORREÇÃO: Log de debug a cada ciclo de cotação
-        const trailingStatus = pos.partialTaken ? 'ATIVO' : 'INATIVO';
-        const shouldExit = pnlPct <= (pos.stopLossPct || -0.06);
-        console.log(`[ExitMonitor] Token: ${pos.symbol} | PnL: ${(pnlPct * 100).toFixed(2)}% | SL: ${((pos.stopLossPct || -0.06) * 100).toFixed(0)}% | Trailing: ${trailingStatus} | Disparando Saída: ${shouldExit ? 'SIM' : 'NÃO'}`);
-
-        // Atualiza PnL flutuante e pico no estado do Dashboard
-        const peakSolValue = positionEngine.getPeakSolValue(pos.mint);
-        const trailingStopSolValue = peakSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE);
-        const peakPnlPct = (peakSolValue - (pos.entrySol || 0.015)) / (pos.entrySol || 0.015);
-        const trailPnlPct = (trailingStopSolValue - (pos.entrySol || 0.015)) / (pos.entrySol || 0.015);
         const elapsedMin = Math.floor((Date.now() - pos.entryTimestamp) / 60000);
         const dashPos = latestState.positions.find(p => p.mint === pos.mint);
         if (dashPos) {
           dashPos.pnlPct = pnlPct;
-          // Preço atual alinhado exatamente à proporção de valorização/desvalorização do preço de compra:
-          dashPos.currentPriceUsd = pos.entryPriceUsd > 0 ? pos.entryPriceUsd * (1 + pnlPct) : (currentSolValue / pos.tokenAmount) * 130;
+          dashPos.currentPriceUsd = sensorPriceUsd;
         }
 
         // 📊 Log Sintético de Monitor de Posição (a cada ciclo de 1.5s)
@@ -595,19 +637,21 @@ async function runUltraFastExitMonitor() {
         const peakSign = peakPnlPct >= 0 ? '+' : '';
         const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
 
-        // Exibição clara e não ambígua do status de proteção:
+        // Exibição clara e não ambígua do status de proteção.
         const stopStatusText = pos.partialTaken
-          ? `Stop Ativo: Trailing Dinâmico (-15% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
-          : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO (Aguardando Parcial)`;
+          ? `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
+          : earlyTrailingActive
+            ? `Stop Ativo: Trailing Momentum (-6% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
+            : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: aguardando +8%`;
 
-        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
+        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | Sensor PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
 
         // Propaga o estado real de proteção para o painel. Sem isto a coluna
         // "Trailing Stop" ficava em INATIVO mesmo com o trailing ativo.
-        pos.trailingActive = pos.partialTaken;
+        pos.trailingActive = pos.partialTaken || earlyTrailingActive;
         pos.stopStatusText = stopStatusText;
-        pos.peakSolValue = peakPnlPct * (pos.entrySol || 0.015);
-        pos.trailingStopSolValue = trailPnlPct * (pos.entrySol || 0.015);
+        pos.peakSolValue = peakSolValue;
+        pos.trailingStopSolValue = trailingStopSolValue;
 
         // 🧠 Ayla Sentinela de Saída Adaptativa:
         // Passa contexto atual da posição se disponível
@@ -624,12 +668,43 @@ async function runUltraFastExitMonitor() {
         positionEngine.recordQuoteSuccess(pos.mint);
 
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
-          const detail = exitSignal.reasonDetail ? ` [${exitSignal.reasonDetail}]` : '';
-          console.log(`🎯 [EXIT ENGINE ACIONADO${detail}] ${pos.symbol}: ${exitSignal.type} | PnL: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
-          await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue, {
-            exitTokenAmount: exitSignal.exitTokenAmount,
-            shouldCloseAta: exitSignal.shouldCloseAta
-          });
+          // O sensor só arma a saída. A decisão financeira final usa uma cotação
+          // executável Jupiter imediatamente antes do swap.
+          const tokenAtomicAmount = assertAtomicAmountToNumber(pos.tokenAmount);
+          const executableQuote = await jupiterEngine.getQuote(
+            pos.mint,
+            'So11111111111111111111111111111111111111112',
+            tokenAtomicAmount,
+            500
+          );
+          const executableSolValue = (executableQuote.outAmount || 0) / 1e9;
+          const executablePnlPct = (executableSolValue - entrySol) / entrySol;
+          const confirmedSignal = positionEngine.evaluateExitBySol(
+            pos.mint,
+            executableSolValue,
+            Date.now(),
+            {
+              currentLiquidityUsd: pos.entryLiquidityUsd,
+              currentVolume5m: pos.entryVolume5m
+            }
+          );
+
+          if (confirmedSignal.shouldExit && confirmedSignal.type !== 'HOLD') {
+            const detail = confirmedSignal.reasonDetail ? ` [${confirmedSignal.reasonDetail}]` : '';
+            console.log(
+              `🎯 [EXIT CONFIRMADO JUPITER${detail}] ${pos.symbol}: ${confirmedSignal.type} | ` +
+              `PnL executável: ${(executablePnlPct * 100).toFixed(2)}% | Valor: ${executableSolValue.toFixed(4)} SOL`
+            );
+            await executeExitOrder(pos.mint, confirmedSignal.type, executablePnlPct, executableSolValue, {
+              exitTokenAmount: confirmedSignal.exitTokenAmount,
+              shouldCloseAta: confirmedSignal.shouldCloseAta
+            });
+          } else {
+            console.log(
+              `🟢 [EXIT NÃO CONFIRMADO] ${pos.symbol}: DexScreener acionou ${exitSignal.type}, ` +
+              `mas a cotação executável Jupiter não confirmou o gatilho.`
+            );
+          }
         }
       } catch (quoteErr: any) {
         const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);
@@ -638,7 +713,12 @@ async function runUltraFastExitMonitor() {
         } else if (shouldEmergencyExit) {
           console.error(`🚨 [WATCHDOG CONTINGÊNCIA] 8 falhas consecutivas de cotação (12s sem cotação). Disparando liquidação defensiva de emergência para ${pos.symbol} (${pos.mint})!`);
           try {
-            const rawLamports = Math.floor(pos.tokenAmount);
+            let rawLamports: number;
+            try {
+              rawLamports = assertAtomicAmountToNumber(pos.tokenAmount);
+            } catch (amountErr: any) {
+              throw new Error(`Watchdog recusou quantidade n?o at?mica: ${amountErr?.message || amountErr}`);
+            }
             const emergencySwap = await jupiterEngine.executeSwap({
               inputMint: pos.mint,
               outputMint: 'So11111111111111111111111111111111111111112',
@@ -648,7 +728,15 @@ async function runUltraFastExitMonitor() {
               slippageBps: 600, // 6.0% slippage defensivo
               priorityLevel: 'high'
             });
-            await rentRecovery.closeTokenAccount(pos.mint);
+            if (emergencySwap.status !== 'SUCCESS' && emergencySwap.status !== 'DRY_RUN_SUCCESS') {
+              throw new Error(`Swap do watchdog não confirmado (${emergencySwap.status}): ${emergencySwap.error || 'sem detalhe'}. Posição e ATA preservadas.`);
+            }
+            if (emergencySwap.status === 'SUCCESS') {
+              const closeResult = await rentRecovery.closeTokenAccount(pos.mint);
+              if (!closeResult.success) {
+                throw new Error('Swap confirmado, mas fechamento da ATA falhou; posição preservada para reconciliação.');
+              }
+            }
             antiSpamMemory.recordVeto(pos.mint, 'Watchdog de Perda de Sinal (12s sem cotação)', 24 * 60 * 60 * 1000);
             positionEngine.removePosition(pos.mint);
             positionEngine.recordClosedTrade({
@@ -737,17 +825,18 @@ async function executeAutonomousCycle() {
           const h = latestState.walletHoldings.find(x => x.mint === spl.mint);
           if (h && meta?.symbol) h.symbol = meta.symbol;
 
+          const atomicAmount = assertAtomicAmountToNumber(spl.atomicAmount);
           positionEngine.addPosition({
             mint: spl.mint,
             symbol,
-            tokenAmount: spl.tokenAmount,
+            tokenAmount: atomicAmount,
             entryPriceUsd: price,
             entryTimestamp: Date.now(),
             stopLossPct: -0.20,
             takeProfitPct: 0.50,
             entrySol: 0.015
           });
-          console.log(`📦 [Custódia On-Chain Detectada] ${spl.tokenAmount.toLocaleString()} de ${symbol} (${spl.mint}) adicionados.`);
+          console.log(`📦 [Custódia On-Chain Detectada] ${spl.tokenAmount.toLocaleString()} de ${symbol} (${spl.mint}) adicionados (${atomicAmount} unidades atômicas).`);
         }
       }
     } catch (err: any) {
@@ -1030,6 +1119,43 @@ async function executeAutonomousCycle() {
         }
 
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
+
+        // Gatilho opcional de momentum: observa apenas quotes off-chain/RPC.
+        // Nenhuma transação é assinada ou transmitida nesta etapa.
+        if (ENTRY_MOMENTUM_GATE_ENABLED) {
+          try {
+            const momentum = await observeEntryMomentum(
+              () => scanner.fetchCurrentTokenPriceUsd(topCandidate.mint),
+              {
+                samples: ENTRY_MOMENTUM_SAMPLES,
+                intervalMs: ENTRY_MOMENTUM_INTERVAL_MS,
+                minRisePct: ENTRY_MOMENTUM_MIN_RISE_PCT,
+                maxRisePct: ENTRY_MOMENTUM_MAX_RISE_PCT,
+                maxPullbackPct: ENTRY_MOMENTUM_MAX_PULLBACK_PCT
+              }
+            );
+
+            console.log(
+              `📈 [Momentum Gate] ${topCandidate.symbol}: alta=${momentum.risePct.toFixed(3)}% | ` +
+              `passos=${momentum.risingSteps}/${momentum.samples.length - 1} | ${momentum.reason}`
+            );
+
+            if (!momentum.pass) {
+              antiSpamMemory.recordVeto(
+                topCandidate.mint,
+                `Momentum não confirmado: ${momentum.reason}`,
+                Math.max(SCAN_INTERVAL_MS, 30_000)
+              );
+              continue;
+            }
+          } catch (momentumErr: any) {
+            console.warn(
+              `⚠️ [Momentum Gate] Falha ao observar ${topCandidate.symbol}: ${momentumErr?.message || momentumErr}`
+            );
+            continue;
+          }
+        }
+
         const quoteParams = {
           inputMint: SOL_MINT,
           outputMint: topCandidate.mint,
@@ -1041,14 +1167,21 @@ async function executeAutonomousCycle() {
           maxAutoSlippageBps: 750
         };
 
-        console.log(`⚡ [3/3 Motor Jupiter V6] Dimensionando lote adaptativo com validação pré-voo (escada ${LADDER_SOL.join(' -> ')} SOL | autoSlippage 750bps)...`);
+        console.log(`⚡ [3/3 Motor Jupiter V6] Dimensionando lote econômico com validação pré-voo (máx. 2 tentativas | autoSlippage 750bps)...`);
 
         // O hook `validate` fecha o ciclo sizer -> execução: cada degrau da
         // escada é testado contra a simulação real ANTES de comprometer capital.
         // Sem ele, um lote aprovado só por Price Impact ainda podia ser barrado
         // pelo 6014 no pré-voo interno do executeSwap, e o escalonamento só
         // ocorreria no token seguinte (com 1h de quarentena no meio).
+        const economyLadderSol = topCandidate.liquidityUsd >= 200_000
+          ? [0.05, 0.02]
+          : topCandidate.liquidityUsd >= 75_000
+            ? [0.035, 0.015]
+            : [0.02, 0.015];
+
         const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
+          ladderSol: economyLadderSol,
           validate: async (_quote, sizeSol) => {
             try {
               const sim = await jupiterEngine.simulateSwap({
@@ -1062,7 +1195,7 @@ async function executeAutonomousCycle() {
                 userPublicKey: OFFICIAL_PHANTOM_WALLET,
                 keypair: wallet.getKeypair(),
                 priorityLevel: 'medium'
-              });
+              }, _quote);
               if (sim.success) {
                 console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao APROVADA (CU=${sim.unitsConsumed ?? 'n/d'})`);
                 return null;
@@ -1417,7 +1550,7 @@ async function main() {
       : '🚀 [MODO REAL ON-CHAIN] Jupiter Swap armado para execução real em SOL.'
   );
   console.log(`⏱️ Intervalo de Varredura: ${SCAN_INTERVAL_MS / 1000}s`);
-  console.log(`⚡ Ultra-Fast Exit Monitor: ${FAST_EXIT_INTERVAL_MS}ms (Jupiter Quote Direto)`);
+  console.log(`⚡ Ultra-Fast Exit Monitor: ${FAST_EXIT_INTERVAL_MS}ms (DexScreener sensor + Jupiter confirmação)`);
   console.log(`🎯 Modo Sniper: MAX_CONCURRENT_POSITIONS = ${MAX_CONCURRENT_POSITIONS}`);
   console.log(`⚡ RPC Solana Ativa: ${ACTIVE_SOLANA_RPC_URL.split('?')[0]}`);
   console.log('====================================================');
