@@ -90,7 +90,7 @@ export class SolanaLayaAdapter {
 
   constructor(options: SolanaLayaAdapterOptions = {}) {
     this.baseUrl = options.baseUrl || process.env.SOLANA_LAYA_NATIVE_URL || '';
-    this.apiKey = options.apiKey || process.env.SOLANA_LAYA_API_KEY;
+    this.apiKey = options.apiKey || process.env.SOLANA_LAYA_AUTH_TOKEN || process.env.SOLANA_LAYA_API_KEY;
     this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 4000);
     this.httpClient = options.httpClient || axios;
   }
