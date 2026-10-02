@@ -4,6 +4,10 @@ export type SolanaLayaRoute = 'MECHANICAL_PIPELINE' | 'DEEP_REVIEW' | 'ABSTAIN';
 export type SolanaLayaEntryAction = 'BUY' | 'WAIT' | 'ABSTAIN';
 export type SolanaLayaPositionAction = 'HOLD' | 'EXIT' | 'ABSTAIN';
 
+export function shouldBlockSolanaEntryFromLaya(action: SolanaLayaEntryAction): boolean {
+  return action === 'WAIT';
+}
+
 export interface SolanaLayaFacts {
   mint: string;
   liquidityUsd: number;

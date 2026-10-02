@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { SolanaLayaAdapter } from './solanaLayaAdapter.js';
+import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './solanaLayaAdapter.js';
 
 const FACTS = {
   mint: 'MintNative111111111111111111111111111111111',
@@ -206,4 +206,10 @@ test('SolanaLayaAdapter usa proxy privado sem bearer do cliente', async () => {
     if (oldCompat === undefined) delete process.env.SOLANA_LAYA_API_KEY;
     else process.env.SOLANA_LAYA_API_KEY = oldCompat;
   }
+});
+
+test('política tática Solana trata ABSTAIN como defer e WAIT como bloqueio', () => {
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya('BUY'), false);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya('ABSTAIN'), false);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya('WAIT'), true);
 });

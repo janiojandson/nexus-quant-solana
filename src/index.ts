@@ -26,7 +26,7 @@ import { runMaintenance } from './database/maintenanceJob.js';
 import { DrawdownBreaker } from './risk/drawdownBreaker.js';
 import { assertAtomicAmountToNumber } from './execution/atomicAmount.js';
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
-import { SolanaLayaAdapter } from './risk/solanaLayaAdapter.js';
+import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
 
 
 dotenv.config();
@@ -1291,7 +1291,7 @@ async function executeAutonomousCycle() {
         }
 
         // Laya tática: atua somente depois de todos os hard gates e do momentum.
-        // Em ACTIVE, apenas BUY permite avançar para sizing/Jupiter.
+        // Em ACTIVE, WAIT bloqueia; BUY confirma; ABSTAIN devolve a decisão ao pipeline determinístico.
         if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF') {
           try {
             if (!audit.layaFacts) {
@@ -1305,8 +1305,8 @@ async function executeAutonomousCycle() {
               `abstention=${layaEntry.abstention ?? 'none'} latencyMs=${layaEntry.latencyMs}`
             );
 
-            if (SOLANA_LAYA_TACTICAL_MODE === 'ACTIVE' && layaEntry.action !== 'BUY') {
-              const reason = `LAYA_TACTICAL_${layaEntry.action}`;
+            if (SOLANA_LAYA_TACTICAL_MODE === 'ACTIVE' && shouldBlockSolanaEntryFromLaya(layaEntry.action)) {
+              const reason = 'LAYA_TACTICAL_WAIT';
               antiSpamMemory.recordVeto(
                 topCandidate.mint,
                 reason,
