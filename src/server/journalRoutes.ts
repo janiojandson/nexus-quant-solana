@@ -65,6 +65,7 @@ export async function fetchAuditData(pgPool: Pool | null): Promise<{
     liquidity_usd: number | null;
     price_change_5m_pct: number | null;
     token_age_minutes: number | null;
+    metadata: Record<string, unknown>;
   }>;
 }> {
   if (!pgPool) {
@@ -97,7 +98,8 @@ export async function fetchAuditData(pgPool: Pool | null): Promise<{
         rejection_reason, 
         liquidity_usd,
         price_change_5m_pct,
-        token_age_minutes
+        token_age_minutes,
+        metadata
       FROM decision_journal 
       ORDER BY created_at DESC 
       LIMIT 25
@@ -142,6 +144,7 @@ export async function fetchAuditData(pgPool: Pool | null): Promise<{
       liquidity_usd: r.liquidity_usd != null ? Number(r.liquidity_usd) : null,
       price_change_5m_pct: r.price_change_5m_pct != null ? Number(r.price_change_5m_pct) : null,
       token_age_minutes: r.token_age_minutes != null ? Number(r.token_age_minutes) : null,
+      metadata: (r.metadata && typeof r.metadata === 'object') ? r.metadata : {},
     }))
   };
 }
@@ -443,6 +446,7 @@ export async function handleJournalRoutes(
           FROM decision_journal dj
           INNER JOIN trade_outcomes tj ON dj.trace_id = tj.trace_id
           WHERE dj.decision = 'ENTRY_APPROVED'
+            AND dj.metadata->>'phase' = 'ENTRY_EXECUTED'
             AND tj.status IN ('FULLY_CLOSED','WATCHDOG_CLOSED','PANIC_CLOSED')
             AND dj.token_age_minutes IS NOT NULL
             AND tj.pnl_pct IS NOT NULL
@@ -484,6 +488,7 @@ export async function handleJournalRoutes(
           FROM decision_journal dj
           INNER JOIN trade_outcomes tj ON dj.trace_id = tj.trace_id
           WHERE dj.decision = 'ENTRY_APPROVED'
+            AND dj.metadata->>'phase' = 'ENTRY_EXECUTED'
             AND tj.status IN ('FULLY_CLOSED','WATCHDOG_CLOSED','PANIC_CLOSED')
             AND dj.token_age_minutes IS NOT NULL
             AND tj.pnl_pct IS NOT NULL

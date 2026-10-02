@@ -449,15 +449,47 @@ export function renderJournalSection(): string {
                 : '—';
 
               const isApp = d.decision === 'ENTRY_APPROVED';
-              if (isApp) approvedCount++; else rejectedCount++;
 
-              const reason = d.rejection_reason || (isApp ? 'Aprovado para Swap Jupiter V6' : 'Descarte técnico');
+              const meta = (d.metadata && typeof d.metadata === 'object') ? d.metadata : {};
+              const phase = meta.phase || null;
+              let decisionLabel = d.decision;
+              let reason = d.rejection_reason || '';
+
+              if (!reason && isApp) {
+                if (phase === 'ENTRY_EXECUTED') {
+                  decisionLabel = 'ENTRY_EXECUTED';
+                  reason = 'Swap Jupiter executado e confirmado.';
+                } else if (phase === 'READY_FOR_JUPITER_SWAP') {
+                  reason = 'Hard gates + Momentum + Laya + sizing aprovados. Pronto para envio ao Jupiter.';
+                } else {
+                  decisionLabel = 'PRECHECK_LEGACY';
+                  reason = 'Hard gates aprovados em registro legado; não comprova Momentum, chamada da Laya ou execução Jupiter.';
+                }
+              } else if (!reason) {
+                reason = 'Descarte técnico';
+              }
+
+              if (meta.layaAction) {
+                const conf = meta.layaConfidence != null ? ' (' + (Number(meta.layaConfidence) * 100).toFixed(1) + '%)' : '';
+                reason += ' | Laya: ' + meta.layaAction + conf;
+              } else if (meta.layaStatus) {
+                reason += ' | Laya: ' + String(meta.layaStatus).replaceAll('_', ' ');
+              } else if (isApp && !phase) {
+                reason += ' | Laya: não registrada neste evento legado.';
+              }
+
+              const isTrueApproval = isApp && (phase === 'READY_FOR_JUPITER_SWAP' || phase === 'ENTRY_EXECUTED');
+              if (isTrueApproval) approvedCount++;
+              else if (decisionLabel !== 'PRECHECK_LEGACY') rejectedCount++;
+
               if (reason.toLowerCase().includes('rugcheck') || reason.toLowerCase().includes('lp unlocked')) rugCount++;
-              if (reason.toLowerCase().includes('b/s') || reason.toLowerCase().includes('slippage') || reason.toLowerCase().includes('6014') || reason.toLowerCase().includes('simulação')) flowSlippageCount++;
+              if (reason.toLowerCase().includes('b/s') || reason.toLowerCase().includes('slippage') || reason.toLowerCase().includes('6014') || reason.toLowerCase().includes('simulação') || reason.toLowerCase().includes('momentum')) flowSlippageCount++;
 
-              const badgeCls = isApp 
-                ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800/80' 
-                : 'bg-rose-950/70 text-rose-400 border-rose-800/80';
+              const badgeCls = decisionLabel === 'PRECHECK_LEGACY'
+                ? 'bg-amber-950/70 text-amber-300 border-amber-800/80'
+                : isTrueApproval
+                  ? 'bg-emerald-950/70 text-emerald-400 border-emerald-800/80'
+                  : 'bg-rose-950/70 text-rose-400 border-rose-800/80';
 
               const symbol = d.token_symbol || 'UNKNOWN';
               const mintShort = d.mint ? (d.mint.slice(0, 4) + '...' + d.mint.slice(-4)) : '—';
@@ -480,7 +512,7 @@ export function renderJournalSection(): string {
                   '</div>' +
                 '</td>' +
                 '<td class="py-2.5 px-2 text-center">' +
-                  '<span class="inline-block px-2 py-0.5 rounded text-[10px] font-bold border ' + badgeCls + '">' + d.decision + '</span>' +
+                  '<span class="inline-block px-2 py-0.5 rounded text-[10px] font-bold border ' + badgeCls + '">' + decisionLabel + '</span>' +
                 '</td>' +
                 '<td class="py-2.5 px-2 text-center font-mono text-[11px] text-slate-300">' +
                   metrics.join(' · ') +

@@ -63,3 +63,13 @@ test('observeEntryMomentum: coleta preços sem executar transação', async () =
   assert.strictEqual(calls, 4);
   assert.strictEqual(result.pass, true);
 });
+
+test('EntryMomentumGate: identifica fonte congelada como indeterminada, não como queda real', () => {
+  const result = evaluateEntryMomentum(
+    [sample(1.2345), sample(1.2345), sample(1.2345), sample(1.2345)],
+    DEFAULT_ENTRY_MOMENTUM_CONFIG
+  );
+  assert.strictEqual(result.pass, false);
+  assert.strictEqual(result.staleSource, true);
+  assert.match(result.reason, /sem atualização|indeterminado/i);
+});

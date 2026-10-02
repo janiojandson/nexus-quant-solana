@@ -64,3 +64,18 @@ test('AntiSpamMemory: deve aplicar TTL curto de 5 minutos para descarte técnico
   assert.strictEqual(memory.shouldSkip(mint).skip, false);
 });
 
+
+test('AntiSpamMemory: veto posterior deve limpar aprovação pendente', () => {
+  const memory = new AntiSpamMemory(60);
+  const mint = 'ApprovedThenVetoedMint';
+
+  memory.recordApproval(mint, 91);
+  assert.match(memory.shouldSkip(mint).reason || '', /aprovado recentemente/i);
+
+  memory.recordVeto(mint, 'Momentum não confirmado', -1);
+  assert.strictEqual(
+    memory.shouldSkip(mint).skip,
+    false,
+    'após expirar o veto curto, uma aprovação antiga não pode continuar bloqueando o mint'
+  );
+});

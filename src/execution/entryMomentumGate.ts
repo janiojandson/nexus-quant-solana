@@ -16,6 +16,7 @@ export interface EntryMomentumResult {
   risePct: number;
   maxPullbackPct: number;
   risingSteps: number;
+  staleSource: boolean;
   reason: string;
   samples: EntryMomentumSample[];
 }
@@ -43,7 +44,21 @@ export function evaluateEntryMomentum(
       risePct: 0,
       maxPullbackPct: 0,
       risingSteps: 0,
+      staleSource: false,
       reason: 'Amostras de preço insuficientes ou inválidas.',
+      samples
+    };
+  }
+
+  const uniquePrices = new Set(samples.map(sample => sample.priceUsd.toPrecision(15)));
+  if (uniquePrices.size === 1) {
+    return {
+      pass: false,
+      risePct: 0,
+      maxPullbackPct: 0,
+      risingSteps: 0,
+      staleSource: true,
+      reason: 'Fonte de micropreço sem atualização durante a janela; sinal curto indeterminado.',
       samples
     };
   }
@@ -64,7 +79,7 @@ export function evaluateEntryMomentum(
   }
 
   const requiredRisingSteps = Math.ceil((samples.length - 1) * 0.67);
-  let reason = 'Momentum de alta confirmado pela DexScreener.';
+  let reason = 'Momentum de alta confirmado pela fonte de micropreço.';
   let pass = true;
 
   if (risePct < config.minRisePct) {
@@ -82,7 +97,7 @@ export function evaluateEntryMomentum(
     reason = `Pullback excessivo durante observação: ${maxPullbackPct.toFixed(3)}%.`;
   }
 
-  return { pass, risePct, maxPullbackPct, risingSteps, reason, samples };
+  return { pass, risePct, maxPullbackPct, risingSteps, staleSource: false, reason, samples };
 }
 
 export async function observeEntryMomentum(

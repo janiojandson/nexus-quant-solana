@@ -1342,55 +1342,58 @@ async function executeAutonomousCycle() {
         // Não marca como processado - continua loop para próximo candidato
         continue;
       } else {
-        antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
-
-        // Registro assíncrono no Decision Journal (aprovação no Gatekeeper)
-        journal.logDecision({
-          traceId: currentTraceId,
-          decision: 'ENTRY_APPROVED',
-          compositeScore: audit.score,
-          token: {
-            mint: topCandidate.mint,
-            tokenSymbol: topCandidate.symbol,
-            poolAddress: (topCandidate as any).pairAddress,
-            ageMinutes: candidateAgeMinutes,
-            liquidityUsd: topCandidate.liquidityUsd,
-            priceUsd: topCandidate.priceUsd,
-            priceChange5mPct: topCandidate.priceChangeM5,
-            buysCount5m: topCandidate.buysM5,
-            sellsCount5m: topCandidate.sellsM5,
-            buySellRatio,
-            volume5mUsd: topCandidate.volume5mUsd,
-          },
-          market: {
-            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-            sessionHourUtc: new Date().getUTCHours(),
-            isWeekend: [0, 6].includes(new Date().getUTCDay()),
-          },
-          execution: {
-            sizeSol: TRADE_AMOUNT_SOL,
-            estimatedSlippagePct: 7.5,
-          },
-          gateEvaluations: gates,
-          metadata: {
-            layaNativeShadow: audit.layaNativeShadow ?? null,
-            activeValidator: audit.validatedBy
-          },
-        });
+        let momentumTelemetry: any = null;
+        let layaEntryTelemetry: any = null;
+        const getMomentumStatus = () => {
+          if (!ENTRY_MOMENTUM_GATE_ENABLED) return 'DISABLED';
+          if (!momentumTelemetry) return 'UNKNOWN';
+          if (momentumTelemetry.staleSource) return 'INDETERMINATE_STALE_SOURCE';
+          return momentumTelemetry.pass ? 'PASS' : 'FAIL';
+        };
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
         // Dimensionamento adaptativo: o lote é escolhido pela profundidade real da pool.
         const currentBalance = latestState.balanceSol || (await wallet.getBalanceSol());
         const safeBalance = currentBalance - GAS_RESERVE_SOL;
         if (safeBalance < MIN_TRADE_AMOUNT_SOL) {
+          const reason = `INSUFFICIENT_FREE_BALANCE: ${safeBalance.toFixed(4)} SOL livres < ${MIN_TRADE_AMOUNT_SOL} SOL mínimos`;
           console.log(`🛡️ [Reserva Intocável] Saldo livre (${safeBalance.toFixed(4)} SOL) insuficiente para alocar o lote mínimo ${MIN_TRADE_AMOUNT_SOL} SOL mantendo ${GAS_RESERVE_SOL} SOL de reserva para taxas de saída.`);
+          journal.logDecision({
+            traceId: currentTraceId,
+            decision: 'ENTRY_REJECTED',
+            compositeScore: audit.score,
+            token: {
+              mint: topCandidate.mint,
+              tokenSymbol: topCandidate.symbol,
+              liquidityUsd: topCandidate.liquidityUsd,
+              priceUsd: topCandidate.priceUsd
+            },
+            market: {
+              sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+              sessionHourUtc: new Date().getUTCHours()
+            },
+            execution: { sizeSol: MIN_TRADE_AMOUNT_SOL },
+            gateEvaluations: gates,
+            rejectionReason: reason,
+            metadata: {
+              phase: 'BALANCE_CHECK',
+              balanceSol: currentBalance,
+              safeBalanceSol: safeBalance,
+              gasReserveSol: GAS_RESERVE_SOL,
+              layaStatus: 'NOT_CALLED_BLOCKED_BY_BALANCE'
+            }
+          });
           break; // Sem saldo, não tenta mais candidatos
         }
 
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
-        // Gatilho opcional de momentum: observa apenas quotes off-chain/RPC.
-        // Nenhuma transação é assinada ou transmitida nesta etapa.
+        // Momentum de curtíssimo prazo: usa o micropreço disponível no sensor.
+        // Se todas as amostras vierem exatamente iguais, isso é tratado como fonte
+        // congelada/indeterminada — não como evidência de momentum negativo. Nesse
+        // caso os hard gates de 5m já aprovados continuam válidos e a decisão segue
+        // para a Laya. Movimento real não-estagnado continua sendo bloqueado quando
+        // viola alta mínima/máxima, continuidade ou pullback.
         if (ENTRY_MOMENTUM_GATE_ENABLED) {
           try {
             const momentum = await observeEntryMomentum(
@@ -1403,24 +1406,92 @@ async function executeAutonomousCycle() {
                 maxPullbackPct: ENTRY_MOMENTUM_MAX_PULLBACK_PCT
               }
             );
+            momentumTelemetry = momentum;
 
             console.log(
-              `📈 [Momentum Gate] ${topCandidate.symbol}: alta=${momentum.risePct.toFixed(3)}% | ` +
-              `passos=${momentum.risingSteps}/${momentum.samples.length - 1} | ${momentum.reason}`
+              `📈 [Momentum Gate:MICROPRICE] ${topCandidate.symbol}: alta=${momentum.risePct.toFixed(3)}% | ` +
+              `passos=${momentum.risingSteps}/${momentum.samples.length - 1} | stale=${momentum.staleSource} | ${momentum.reason}`
             );
 
-            if (!momentum.pass) {
+            if (momentum.staleSource) {
+              console.warn(
+                `⚠️ [Momentum Gate:STALE] ${topCandidate.symbol}: fonte sem atualização na janela curta; ` +
+                `hard gates de 5m permanecem válidos e o candidato seguirá para Laya.`
+              );
+            } else if (!momentum.pass) {
+              const reason = `MOMENTUM_GATE: ${momentum.reason}`;
               antiSpamMemory.recordVeto(
                 topCandidate.mint,
-                `Momentum não confirmado: ${momentum.reason}`,
+                reason,
                 Math.max(SCAN_INTERVAL_MS, 30_000)
               );
+              journal.logDecision({
+                traceId: currentTraceId,
+                decision: 'ENTRY_REJECTED',
+                compositeScore: audit.score,
+                token: {
+                  mint: topCandidate.mint,
+                  tokenSymbol: topCandidate.symbol,
+                  liquidityUsd: topCandidate.liquidityUsd,
+                  priceUsd: topCandidate.priceUsd,
+                  priceChange5mPct: topCandidate.priceChangeM5,
+                  buysCount5m: topCandidate.buysM5,
+                  sellsCount5m: topCandidate.sellsM5,
+                  buySellRatio,
+                  volume5mUsd: topCandidate.volume5mUsd
+                },
+                market: {
+                  sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+                  sessionHourUtc: new Date().getUTCHours(),
+                  isWeekend: [0, 6].includes(new Date().getUTCDay())
+                },
+                gateEvaluations: gates,
+                rejectionReason: reason,
+                metadata: {
+                  phase: 'MOMENTUM_GATE',
+                  momentumSource: 'DEXSCREENER_PRICE',
+                  momentumStatus: 'FAIL',
+                  momentumRisePct: momentum.risePct,
+                  momentumRisingSteps: momentum.risingSteps,
+                  momentumMaxPullbackPct: momentum.maxPullbackPct,
+                  momentumSamples: momentum.samples,
+                  layaStatus: 'NOT_CALLED_BLOCKED_BY_MOMENTUM'
+                }
+              });
               continue;
             }
           } catch (momentumErr: any) {
-            console.warn(
-              `⚠️ [Momentum Gate] Falha ao observar ${topCandidate.symbol}: ${momentumErr?.message || momentumErr}`
+            const errText = momentumErr?.message || String(momentumErr);
+            const reason = `MOMENTUM_SOURCE_UNAVAILABLE: ${errText}`;
+            console.warn(`⚠️ [Momentum Gate:MICROPRICE] Falha ao observar ${topCandidate.symbol}: ${errText}`);
+            antiSpamMemory.recordVeto(
+              topCandidate.mint,
+              reason,
+              Math.max(SCAN_INTERVAL_MS, 30_000)
             );
+            journal.logDecision({
+              traceId: currentTraceId,
+              decision: 'ENTRY_REJECTED',
+              compositeScore: audit.score,
+              token: {
+                mint: topCandidate.mint,
+                tokenSymbol: topCandidate.symbol,
+                liquidityUsd: topCandidate.liquidityUsd,
+                priceUsd: topCandidate.priceUsd
+              },
+              market: {
+                sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+                sessionHourUtc: new Date().getUTCHours()
+              },
+              gateEvaluations: gates,
+              rejectionReason: reason,
+              metadata: {
+                phase: 'MOMENTUM_GATE',
+                momentumSource: 'DEXSCREENER_PRICE',
+                momentumStatus: 'SOURCE_FAILED',
+                layaStatus: 'NOT_CALLED_MOMENTUM_SOURCE_FAILED'
+              }
+            });
             continue;
           }
         }
@@ -1434,6 +1505,7 @@ async function executeAutonomousCycle() {
             }
 
             const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
+            layaEntryTelemetry = layaEntry;
             console.log(
               `🧠 [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:ENTRY] ${topCandidate.symbol} ` +
               `action=${layaEntry.action} confidence=${layaEntry.confidence.toFixed(4)} ` +
@@ -1471,9 +1543,15 @@ async function executeAutonomousCycle() {
                 rejectionReason: reason,
                 metadata: {
                   phase: 'LAYA_TACTICAL_ENTRY',
+                  momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+                  momentumStatus: getMomentumStatus(),
+                  momentumRisePct: momentumTelemetry?.risePct ?? null,
+                  momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
+                  layaStatus: 'CALLED_BLOCKED',
                   layaAction: layaEntry.action,
                   layaConfidence: layaEntry.confidence,
-                  layaAbstention: layaEntry.abstention ?? null
+                  layaAbstention: layaEntry.abstention ?? null,
+                  layaLatencyMs: layaEntry.latencyMs
                 }
               });
               continue;
@@ -1484,11 +1562,43 @@ async function executeAutonomousCycle() {
               `${layaEntryErr?.message || layaEntryErr}`
             );
             if (SOLANA_LAYA_TACTICAL_MODE === 'ACTIVE') {
+              const reason = `LAYA_TACTICAL_UNAVAILABLE: ${layaEntryErr?.message || layaEntryErr}`;
               antiSpamMemory.recordVeto(
                 topCandidate.mint,
-                'LAYA_TACTICAL_UNAVAILABLE',
+                reason,
                 Math.max(SCAN_INTERVAL_MS, 30_000)
               );
+              journal.logDecision({
+                traceId: currentTraceId,
+                decision: 'ENTRY_REJECTED',
+                compositeScore: audit.score,
+                token: {
+                  mint: topCandidate.mint,
+                  tokenSymbol: topCandidate.symbol,
+                  liquidityUsd: topCandidate.liquidityUsd,
+                  priceUsd: topCandidate.priceUsd,
+                  priceChange5mPct: topCandidate.priceChangeM5,
+                  buysCount5m: topCandidate.buysM5,
+                  sellsCount5m: topCandidate.sellsM5,
+                  buySellRatio,
+                  volume5mUsd: topCandidate.volume5mUsd
+                },
+                market: {
+                  sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+                  sessionHourUtc: new Date().getUTCHours(),
+                  isWeekend: [0, 6].includes(new Date().getUTCDay())
+                },
+                gateEvaluations: gates,
+                rejectionReason: reason,
+                metadata: {
+                  phase: 'LAYA_TACTICAL_ENTRY',
+                  momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+                  momentumStatus: getMomentumStatus(),
+                  momentumRisePct: momentumTelemetry?.risePct ?? null,
+                  momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
+                  layaStatus: 'CALL_FAILED'
+                }
+              });
               continue;
             }
           }
@@ -1564,7 +1674,19 @@ async function executeAutonomousCycle() {
             market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
             gateEvaluations: gates,
             rejectionReason: `${sizing.abortReason}: ${failReason}`,
-            metadata: { phase: 'SIZING', attempts: sizing.attempts }
+            metadata: {
+              phase: 'SIZING',
+              attempts: sizing.attempts,
+              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+                  momentumStatus: getMomentumStatus(),
+              momentumRisePct: momentumTelemetry?.risePct ?? null,
+              momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
+              layaStatus: SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : (layaEntryTelemetry ? 'CALLED_ALLOWED' : 'NOT_CALLED'),
+              layaAction: layaEntryTelemetry?.action ?? null,
+              layaConfidence: layaEntryTelemetry?.confidence ?? null,
+              layaAbstention: layaEntryTelemetry?.abstention ?? null,
+              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
+            }
           });
           antiSpamMemory.recordVeto(topCandidate.mint, `Sizing abortado: ${failReason}`, 60 * 60 * 1000);
           postgresRepo.saveQuarantine({
@@ -1583,6 +1705,52 @@ async function executeAutonomousCycle() {
         const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
         console.log(`📐 Lote dimensionado e validado no pré-voo: ${dynamicAllocSol} SOL (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
         console.log(`   Escada percorrida: ${sizing.attempts.map((a) => `${a.sizeSol}SOL(${a.accepted ? 'ok' : 'rej'})`).join(' -> ')}`);
+
+        // ENTRY_APPROVED agora significa literalmente "pronto para enviar ao Jupiter":
+        // hard gates + momentum + Laya + sizing/preflight já passaram.
+        journal.logDecision({
+          traceId: currentTraceId,
+          decision: 'ENTRY_APPROVED',
+          compositeScore: audit.score,
+          token: {
+            mint: topCandidate.mint,
+            tokenSymbol: topCandidate.symbol,
+            poolAddress: (topCandidate as any).pairAddress,
+            ageMinutes: candidateAgeMinutes,
+            liquidityUsd: topCandidate.liquidityUsd,
+            priceUsd: topCandidate.priceUsd,
+            priceChange5mPct: topCandidate.priceChangeM5,
+            buysCount5m: topCandidate.buysM5,
+            sellsCount5m: topCandidate.sellsM5,
+            buySellRatio,
+            volume5mUsd: topCandidate.volume5mUsd
+          },
+          market: {
+            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+            sessionHourUtc: new Date().getUTCHours(),
+            isWeekend: [0, 6].includes(new Date().getUTCDay())
+          },
+          execution: {
+            sizeSol: dynamicAllocSol,
+            estimatedSlippagePct: 7.5
+          },
+          gateEvaluations: gates,
+          metadata: {
+            phase: 'READY_FOR_JUPITER_SWAP',
+            momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+                  momentumStatus: getMomentumStatus(),
+            momentumRisePct: momentumTelemetry?.risePct ?? null,
+            momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
+            momentumMaxPullbackPct: momentumTelemetry?.maxPullbackPct ?? null,
+            layaStatus: SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : (layaEntryTelemetry ? 'CALLED_ALLOWED' : 'NOT_CALLED'),
+            layaAction: layaEntryTelemetry?.action ?? null,
+            layaConfidence: layaEntryTelemetry?.confidence ?? null,
+            layaAbstention: layaEntryTelemetry?.abstention ?? null,
+            layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null,
+            sizingAttempts: sizing.attempts,
+            priceImpactPct: sizing.quote.priceImpactPct
+          }
+        });
 
         console.log(`⚡ [3/3 Motor Jupiter V6] Executando compra com pré-voo fail-closed (${dynamicAllocSol} SOL | autoSlippage 750bps)...`);
         const swapSim = await jupiterEngine.executeSwap({
@@ -1608,13 +1776,38 @@ async function executeAutonomousCycle() {
         if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
           // CORREÇÃO: Só adiciona posição se houver txid on-chain confirmado
           if (!swapSim.txSignature && swapSim.status !== 'DRY_RUN_SUCCESS') {
+            const reason = `JUPITER_SWAP_NO_TXID: status=${swapSim.status}`;
             console.error(`🛑 [ENTRADA REJEITADA] Swap sem txid on-chain: ${topCandidate.symbol} | Status: ${swapSim.status}`);
-            antiSpamMemory.recordVeto(topCandidate.mint, 'Swap sem txid on-chain', 60 * 60 * 1000);
+            antiSpamMemory.recordVeto(topCandidate.mint, reason, 60 * 60 * 1000);
+            journal.logDecision({
+              traceId: currentTraceId,
+              decision: 'ENTRY_REJECTED',
+              compositeScore: audit.score,
+              token: {
+                mint: topCandidate.mint,
+                tokenSymbol: topCandidate.symbol,
+                liquidityUsd: topCandidate.liquidityUsd,
+                priceUsd: topCandidate.priceUsd
+              },
+              market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
+              gateEvaluations: gates,
+              rejectionReason: reason,
+              metadata: {
+                phase: 'JUPITER_SWAP',
+                swapStatus: swapSim.status,
+                swapError: swapSim.error ?? null,
+                momentumRisePct: momentumTelemetry?.risePct ?? null,
+                layaAction: layaEntryTelemetry?.action ?? null,
+                layaConfidence: layaEntryTelemetry?.confidence ?? null
+              }
+            });
             return;
           }
           
           // Snapshot de Entrada (Contexto Inicial da Operação):
           const nowTs = Date.now();
+          // Só agora a aprovação entra no cache: a compra já foi confirmada pelo executor.
+          antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
           positionEngine.addPosition({
             mint: topCandidate.mint,
             symbol: topCandidate.symbol,
@@ -1666,7 +1859,17 @@ async function executeAutonomousCycle() {
               stopLossPct: -0.06,
               takeProfitPct: 0.35,
               entryTimestampMs: nowTs,
-              isDryRun: swapSim.isDryRun
+              isDryRun: swapSim.isDryRun,
+              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+                  momentumStatus: getMomentumStatus(),
+              momentumRisePct: momentumTelemetry?.risePct ?? null,
+              momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
+              momentumMaxPullbackPct: momentumTelemetry?.maxPullbackPct ?? null,
+              layaStatus: SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : (layaEntryTelemetry ? 'CALLED_ALLOWED' : 'NOT_CALLED'),
+              layaAction: layaEntryTelemetry?.action ?? null,
+              layaConfidence: layaEntryTelemetry?.confidence ?? null,
+              layaAbstention: layaEntryTelemetry?.abstention ?? null,
+              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
             }
           });
 
@@ -1710,6 +1913,36 @@ async function executeAutonomousCycle() {
           const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';
           const swapVetoText = `Swap Jupiter falhou: ${failReason}`;
           antiSpamMemory.recordVeto(topCandidate.mint, swapVetoText, 60 * 60 * 1000);
+          journal.logDecision({
+            traceId: currentTraceId,
+            decision: 'ENTRY_REJECTED',
+            compositeScore: audit.score,
+            token: {
+              mint: topCandidate.mint,
+              tokenSymbol: topCandidate.symbol,
+              liquidityUsd: topCandidate.liquidityUsd,
+              priceUsd: topCandidate.priceUsd,
+              priceChange5mPct: topCandidate.priceChangeM5
+            },
+            market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
+            gateEvaluations: gates,
+            rejectionReason: swapVetoText,
+            metadata: {
+              phase: 'JUPITER_SWAP',
+              swapStatus: swapSim.status,
+              swapError: failReason,
+              txSignature: swapSim.txSignature || null,
+              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+                  momentumStatus: getMomentumStatus(),
+              momentumRisePct: momentumTelemetry?.risePct ?? null,
+              momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
+              layaStatus: SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : (layaEntryTelemetry ? 'CALLED_ALLOWED' : 'NOT_CALLED'),
+              layaAction: layaEntryTelemetry?.action ?? null,
+              layaConfidence: layaEntryTelemetry?.confidence ?? null,
+              layaAbstention: layaEntryTelemetry?.abstention ?? null,
+              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
+            }
+          });
           // Persistência ativa no banco por 1 hora
           postgresRepo.saveQuarantine({
             mint: topCandidate.mint,

@@ -97,6 +97,10 @@ export class AntiSpamMemory {
   public recordVeto(mint: string, reason: string, customTtlMs?: number): void {
     const now = Date.now();
     const expiresAt = now + (customTtlMs !== undefined ? customTtlMs : this.defaultTtlMs);
+    // Um veto posterior sempre prevalece sobre qualquer pré-aprovação anterior.
+    // Evita que um candidato reprovado em Momentum/Laya continue bloqueado pelo
+    // cache de "aprovado" depois que a quarentena curta expirar.
+    this.approvedTokens.delete(mint);
     this.vettedTokens.set(mint, { timestamp: now, reason, expiresAt });
   }
 
