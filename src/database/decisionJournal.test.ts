@@ -54,6 +54,32 @@ test('DecisionLogger bufferiza em RAM e rastreia contadores sem bloquear', async
   await logger.shutdown();
 });
 
+test('DecisionLogger recoloca batch na fila quando Postgres fica indisponível', async () => {
+  const failingPool = {
+    connect: async () => { throw new Error('postgres indisponível'); }
+  } as any;
+  const logger = new DecisionLogger(failingPool, {
+    maxBufferSize: 100,
+    flushIntervalMs: 60000
+  });
+
+  logger.logDecision({
+    traceId: 'recoverable-trace-1',
+    decision: 'ENTRY_APPROVED',
+    token: { mint: 'RecoverableMint1111111111111111111111111111' },
+    market: { sentinelRegime: 'NORMAL' },
+    gateEvaluations: []
+  });
+
+  assert.strictEqual(logger.getStats().bufferSize, 1);
+  await logger.flush();
+
+  const stats = logger.getStats();
+  assert.strictEqual(stats.bufferSize, 1);
+  assert.strictEqual(stats.totalFlushed, 0);
+  assert.strictEqual(stats.totalErrors, 1);
+});
+
 test('Decision Journal aceita composite_score fracionário e migra SMALLINT legado', () => {
   assert.match(
     DECISION_JOURNAL_DDL,

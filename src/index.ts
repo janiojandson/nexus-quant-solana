@@ -1080,29 +1080,29 @@ async function executeAutonomousCycle() {
       }));
 
       for (const spl of splAccounts) {
-        if (!positionEngine.getPosition(spl.mint)) {
-          const meta = await scanner.fetchTokenMetadata(spl.mint);
-          const price = (meta && meta.priceUsd > 0) ? meta.priceUsd : 0.00001;
-          const symbol = meta?.symbol || (spl.mint.slice(0, 4) + '...' + spl.mint.slice(-4));
-          
-          // Atualiza símbolo no walletHoldings se disponível
-          const h = latestState.walletHoldings.find(x => x.mint === spl.mint);
-          if (h && meta?.symbol) h.symbol = meta.symbol;
+        const tracked = positionEngine.getPosition(spl.mint);
+        if (!tracked) continue;
 
-          const atomicAmount = assertAtomicAmountToNumber(spl.atomicAmount);
-          positionEngine.addPosition({
-            mint: spl.mint,
-            symbol,
-            tokenAmount: atomicAmount,
-            entryPriceUsd: price,
-            entryTimestamp: Date.now(),
-            stopLossPct: -0.20,
-            takeProfitPct: 0.50,
-            entrySol: 0.015
-          });
-          console.log(`📦 [Custódia On-Chain Detectada] ${spl.tokenAmount.toLocaleString()} de ${symbol} (${spl.mint}) adicionados (${atomicAmount} unidades atômicas).`);
+        const atomicAmount = assertAtomicAmountToNumber(spl.atomicAmount);
+        if (atomicAmount < tracked.tokenAmount) {
+          console.warn(
+            `⚖️ [Reconciliação On-Chain] ${tracked.symbol} (${spl.mint}) quantidade gerida ${tracked.tokenAmount} -> ${atomicAmount} unidades atômicas.`
+          );
+          tracked.tokenAmount = atomicAmount;
+        } else if (atomicAmount > tracked.tokenAmount) {
+          console.warn(
+            `⚖️ [Reconciliação On-Chain] ${tracked.symbol} possui ${atomicAmount - tracked.tokenAmount} unidade(s) atômica(s) excedentes; o lote extra não foi adotado automaticamente.`
+          );
         }
+
+        const meta = await scanner.fetchTokenMetadata(spl.mint);
+        const h = latestState.walletHoldings.find(x => x.mint === spl.mint);
+        if (h && meta?.symbol) h.symbol = meta.symbol;
       }
+
+      // Tokens presentes na carteira, mas ausentes do ledger de execução do bot,
+      // permanecem apenas no painel de custódia. Nunca são promovidos a posição
+      // operacional com preço/custo/stops inventados.
     } catch (err: any) {
       console.warn(`⚠️ [Aviso Custódia] Falha ao sincronizar contas SPL: ${err?.message || err}`);
     }
@@ -1629,6 +1629,61 @@ async function executeAutonomousCycle() {
             entryVolume5m: topCandidate.volume5mUsd || 0,
             traceId: currentTraceId
           });
+
+          // Ledger de execução real: somente este evento prova que a compra chegou
+          // ao executor. A aprovação anterior é pré-swap e não pode reidratar posição.
+          journal.logDecision({
+            traceId: currentTraceId,
+            decision: 'ENTRY_APPROVED',
+            compositeScore: audit.score,
+            token: {
+              mint: topCandidate.mint,
+              tokenSymbol: topCandidate.symbol,
+              poolAddress: (topCandidate as any).pairAddress,
+              ageMinutes: candidateAgeMinutes,
+              liquidityUsd: topCandidate.liquidityUsd,
+              priceUsd: topCandidate.priceUsd,
+              priceChange5mPct: topCandidate.priceChangeM5,
+              buysCount5m: topCandidate.buysM5,
+              sellsCount5m: topCandidate.sellsM5,
+              buySellRatio,
+              volume5mUsd: topCandidate.volume5mUsd
+            },
+            market: {
+              sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+              sessionHourUtc: new Date().getUTCHours(),
+              isWeekend: [0, 6].includes(new Date().getUTCDay())
+            },
+            execution: {
+              sizeSol: dynamicAllocSol,
+              estimatedSlippagePct: 7.5
+            },
+            gateEvaluations: gates,
+            metadata: {
+              phase: 'ENTRY_EXECUTED',
+              txSignature: swapSim.txSignature,
+              outAmountAtomic: String(Math.trunc(swapSim.outAmount)),
+              stopLossPct: -0.06,
+              takeProfitPct: 0.35,
+              entryTimestampMs: nowTs,
+              isDryRun: swapSim.isDryRun
+            }
+          });
+
+          // Cria o trade OPEN imediatamente; a mesma linha será atualizada nas
+          // saídas via ON CONFLICT(trace_id). O flush aqui ocorre após a compra,
+          // portanto não adiciona latência ao envio on-chain e evita amnésia pós-restart.
+          journal.logOutcome({
+            traceId: currentTraceId,
+            mint: topCandidate.mint,
+            entryPriceUsd: topCandidate.priceUsd,
+            entrySizeSol: dynamicAllocSol,
+            entryTimestamp: new Date(nowTs),
+            entrySlippagePct: 7.5,
+            status: 'OPEN'
+          });
+          await journal.flush();
+
           console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -6% | TP: +35%)`);
           
           // CORREÇÃO: Atualiza saldo imediatamente após compra
@@ -1720,39 +1775,79 @@ async function executeAutonomousCycle() {
 }
 
 /**
- * 🔄 REIDRATAÇÃO ON-CHAIN NO BOOT (Fim da Amnésia pós-Restart)
- * Consulta getParsedTokenAccountsByOwner na carteira Phantom:
- * Se houver qualquer token SPL com saldo > 0 diferente de SOL/USDC,
- * reidrata-o automaticamente como posição ativa no PositionExitEngine.
+ * 🔄 REIDRATAÇÃO NO BOOT (ledger + reconciliação on-chain)
+ * Só restaura posições cuja compra foi confirmada e persistida pelo agente.
+ * O saldo SPL confirma a quantidade restante; tokens sem prova no ledger
+ * permanecem visíveis como custódia, mas fora do PositionExitEngine.
  */
-/** Janela de reidratação: só recompramos_positions dentro deste prazo. */
-const REHYDRATE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 horas
+interface RecoverablePositionRecord {
+  traceId: string;
+  mint: string;
+  symbol: string;
+  entryPriceUsd: number;
+  entrySizeSol: number;
+  entryTimestamp: number;
+  initialTokenAmountAtomic: number;
+  entryLiquidityUsd: number;
+  entryVolume5m: number;
+  stopLossPct: number;
+  takeProfitPct: number;
+  partialTaken: boolean;
+  entryTxSignature: string;
+}
 
-/**
- * Mints que o AGENTE comprou: registrados como ENTRY_APPROVED no ledger dentro
- * da janela de reidratação. Sem isso, qualquer token solto na carteira virava
- * posição gerida com stop loss sintético.
- */
-async function queryAgentOwnedMints(): Promise<Set<string>> {
-  const mints = new Set<string>();
+async function queryRecoverablePositions(): Promise<Map<string, RecoverablePositionRecord>> {
+  const positions = new Map<string, RecoverablePositionRecord>();
   const pool = postgresRepo.getPool();
   if (!pool) {
     console.warn('⚠️ [BOOT] Sem pool Postgres — reidratação pulada por segurança.');
-    return mints;
+    return positions;
   }
   try {
-    const res = await pool.query(
-      `SELECT DISTINCT mint FROM decision_journal
-        WHERE decision = 'ENTRY_APPROVED'
-          AND created_at >= NOW() - ($1 || ' milliseconds')::interval
-          AND created_at <= NOW()`,
-      [String(REHYDRATE_WINDOW_MS)]
-    );
-    for (const row of res.rows) if (row.mint) mints.add(row.mint);
+    const res = await pool.query(`
+      WITH latest AS (
+        SELECT DISTINCT ON (dj.mint)
+          dj.trace_id, dj.mint, dj.token_symbol, dj.liquidity_usd, dj.volume_5m_usd,
+          dj.metadata, dj.created_at, o.entry_price_usd, o.entry_size_sol,
+          o.entry_timestamp, o.status
+        FROM decision_journal dj
+        JOIN trade_outcomes o ON o.trace_id = dj.trace_id
+        WHERE dj.decision = 'ENTRY_APPROVED'
+          AND dj.metadata->>'phase' = 'ENTRY_EXECUTED'
+          AND COALESCE(dj.metadata->>'txSignature', '') <> ''
+          AND COALESCE(dj.metadata->>'isDryRun', 'false') = 'false'
+        ORDER BY dj.mint, dj.created_at DESC
+      )
+      SELECT * FROM latest WHERE status IN ('OPEN', 'PARTIAL_CLOSED')
+    `);
+
+    for (const row of res.rows) {
+      try {
+        const metadata = row.metadata || {};
+        const initialAtomic = assertAtomicAmountToNumber(String(metadata.outAmountAtomic || ''));
+        positions.set(row.mint, {
+          traceId: String(row.trace_id),
+          mint: String(row.mint),
+          symbol: String(row.token_symbol || `${String(row.mint).slice(0, 4)}...${String(row.mint).slice(-4)}`),
+          entryPriceUsd: Number(row.entry_price_usd),
+          entrySizeSol: Number(row.entry_size_sol),
+          entryTimestamp: new Date(row.entry_timestamp).getTime(),
+          initialTokenAmountAtomic: initialAtomic,
+          entryLiquidityUsd: Number(row.liquidity_usd || 0),
+          entryVolume5m: Number(row.volume_5m_usd || 0),
+          stopLossPct: Number(metadata.stopLossPct ?? -0.06),
+          takeProfitPct: Number(metadata.takeProfitPct ?? 0.35),
+          partialTaken: row.status === 'PARTIAL_CLOSED',
+          entryTxSignature: String(metadata.txSignature)
+        });
+      } catch (rowErr: any) {
+        console.warn(`⚠️ [BOOT] Registro de recuperação inválido para ${row.mint}: ${rowErr?.message || rowErr}`);
+      }
+    }
   } catch (err: any) {
-    console.warn('⚠️ [BOOT] Falha ao consultar mints do agente:', err?.message || err);
+    console.warn('⚠️ [BOOT] Falha ao consultar posições recuperáveis:', err?.message || err);
   }
-  return mints;
+  return positions;
 }
 
 async function rehydratePositionsFromWalletOnBoot() {
@@ -1768,65 +1863,92 @@ async function rehydratePositionsFromWalletOnBoot() {
       'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
     ]);
 
-    // Só reidrata o que o AGENTE comprou. Adotar qualquer token da carteira
-    // criava posições com stop loss sintético (-20%) e PnL inventado sobre
-    // resíduos de dumps manuais — o painel passava a "gerir" ativos que o
-    // bot nunca comprou.
-    const ownedMints = await queryAgentOwnedMints();
-    if (ownedMints.size === 0) {
-      console.log('ℹ️  [BOOT] Nenhum approval recente no ledger — nenhuma posição a reidratar.');
+    // Uma posição só volta à mesa quando existe prova durável de execução:
+    // ENTRY_EXECUTED + trade_outcomes OPEN/PARTIAL_CLOSED + tx signature.
+    // O saldo on-chain serve apenas para reconciliar a quantidade efetivamente
+    // custodiada; ele nunca inventa preço de entrada, custo ou stops.
+    const recoverablePositions = await queryRecoverablePositions();
+    if (recoverablePositions.size === 0) {
+      console.log('ℹ️  [BOOT] Nenhum trade executado e aberto no ledger — nenhuma posição a reidratar.');
     } else {
-      console.log(`📜 [BOOT] Aprovados no ledger (${REHYDRATE_WINDOW_MS / 3_600_000}h): ${ownedMints.size}`);
+      console.log(`📜 [BOOT] Trades executados recuperáveis no ledger: ${recoverablePositions.size}`);
     }
 
-    const orphans: Array<{ mint: string; tokenAmount: number }> = [];
+    const orphans: Array<{ mint: string; tokenAmount: number; decimals: number; ataAddress: string }> = [];
 
     for (const spl of splAccounts) {
-      if (BASE_MINTS.has(spl.mint) || spl.tokenAmount <= 0) continue;
+      if (BASE_MINTS.has(spl.mint)) continue;
 
-      if (!positionEngine.getPosition(spl.mint) && !ownedMints.has(spl.mint)) {
-        orphans.push({ mint: spl.mint, tokenAmount: spl.tokenAmount });
+      const currentAtomic = assertAtomicAmountToNumber(spl.atomicAmount);
+      const recovery = recoverablePositions.get(spl.mint);
+
+      if (!recovery) {
+        orphans.push({
+          mint: spl.mint,
+          tokenAmount: spl.tokenAmount,
+          decimals: spl.decimals,
+          ataAddress: spl.ataAddress
+        });
         continue;
       }
 
-      if (!positionEngine.getPosition(spl.mint)) {
-        const meta = await scanner.fetchTokenMetadata(spl.mint);
-        const price = (meta && meta.priceUsd > 0) ? meta.priceUsd : 0.00001;
-        const symbol = meta?.symbol || (spl.mint.slice(0, 4) + '...' + spl.mint.slice(-4));
+      if (positionEngine.getPosition(spl.mint)) continue;
 
-        positionEngine.addPosition({
-          mint: spl.mint,
-          symbol,
-          tokenAmount: spl.tokenAmount,
-          entryPriceUsd: price,
-          entryTimestamp: Date.now(),
-          stopLossPct: -0.06,
-          takeProfitPct: 0.35,
-          entrySol: 0.015,
-          entrySolValue: 0.015,
-          entryLiquidityUsd: 15000,
-          entryVolume5m: 1000
-        });
+      // Nunca adota unidades adicionadas manualmente depois da compra do bot.
+      // Em runner pós-parcial, a posição esperada não pode exceder ~50% do lote inicial.
+      const expectedCapAtomic = recovery.partialTaken
+        ? Math.ceil(recovery.initialTokenAmountAtomic / 2)
+        : recovery.initialTokenAmountAtomic;
+      const managedAtomic = Math.min(currentAtomic, expectedCapAtomic);
+      if (managedAtomic <= 0) continue;
 
-        console.log(`🛡️ [BOOT: Posição Reidratada e Protegida] ${symbol} (${spl.mint}) | Quantidade: ${spl.tokenAmount.toLocaleString()} | Preço Base: $${price}`);
+      const remainingRatio = managedAtomic / recovery.initialTokenAmountAtomic;
+      const remainingEntrySol = recovery.entrySizeSol * remainingRatio;
+      const effectiveStopLossPct = recovery.partialTaken ? 0.01 : recovery.stopLossPct;
+
+      positionEngine.addPosition({
+        mint: spl.mint,
+        symbol: recovery.symbol,
+        tokenAmount: managedAtomic,
+        initialTokenAmount: recovery.initialTokenAmountAtomic,
+        entryPriceUsd: recovery.entryPriceUsd,
+        entryTimestamp: recovery.entryTimestamp,
+        stopLossPct: effectiveStopLossPct,
+        takeProfitPct: recovery.takeProfitPct,
+        entrySol: remainingEntrySol,
+        entrySolValue: recovery.entrySizeSol,
+        entryLiquidityUsd: recovery.entryLiquidityUsd,
+        entryVolume5m: recovery.entryVolume5m,
+        traceId: recovery.traceId,
+        partialTaken: recovery.partialTaken
+      });
+
+      console.log(
+        `🛡️ [BOOT: Posição Restaurada do Ledger] ${recovery.symbol} (${spl.mint}) | ` +
+        `atomic=${managedAtomic}/${recovery.initialTokenAmountAtomic} | custo restante=${remainingEntrySol.toFixed(6)} SOL | ` +
+        `status=${recovery.partialTaken ? 'PARTIAL_CLOSED' : 'OPEN'}`
+      );
+
+      if (currentAtomic > managedAtomic) {
+        console.warn(
+          `⚖️ [BOOT] ${currentAtomic - managedAtomic} unidade(s) atômica(s) excedentes em ${spl.mint} ` +
+          'ficaram fora da posição automática por segurança.'
+        );
       }
     }
 
     if (orphans.length > 0) {
-      // Listados em bloco separado: visíveis para o operador, invisíveis para
-      // a mesa de operações do bot.
+      // Visíveis ao operador, mas fora da mesa: não há prova de compra do bot.
       latestState.walletHoldings = orphans.map((o) => ({
         mint: o.mint,
         symbol: `${o.mint.slice(0, 4)}...${o.mint.slice(-4)}`,
         tokenAmount: o.tokenAmount,
-        decimals: 0,
-        ataAddress: '',
+        decimals: o.decimals,
+        ataAddress: o.ataAddress,
         solscanUrl: `https://solscan.io/token/${o.mint}`,
         dexScreenerUrl: `https://dexscreener.com/solana/${o.mint}`
       }));
-      console.log(`🚫 [BOOT] ${orphans.length} token(í) órfão(ós) IGNORADOS pela mesa de operações:`);
-      orphans.forEach((o) => console.log(`   • ${o.mint} (${o.tokenAmount})`));
-      console.log(`   Use "npm run token:purge-ci" (ajuste CANARY_MINT) para expurgar.`);
+      console.log(`🚫 [BOOT] ${orphans.length} token(s) sem trade executado no ledger ficaram fora da mesa automática.`);
     } else {
       latestState.walletHoldings = [];
     }

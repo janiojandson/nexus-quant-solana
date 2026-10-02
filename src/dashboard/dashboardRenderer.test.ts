@@ -53,9 +53,11 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /PÂNICO GERAL/);
   assert.match(html, /LIQUIDAR POSIÇÃO/);
   assert.match(html, /adminFetch\('\/api\/positions\//);
-  assert.match(html, /sessionStorage/);
-  assert.match(html, /disabled data-admin-action="true"/);
+  assert.doesNotMatch(html, /sessionStorage/);
   assert.doesNotMatch(html, /localStorage/);
+  assert.match(html, /credentials: 'same-origin'/);
+  assert.match(html, /\/api\/auth\/logout/);
+  assert.match(html, /disabled data-admin-action="true"/);
   assert.doesNotMatch(html, /Ultra-Fast 1\.5s quote loop/);
   assert.doesNotMatch(html, /Stop Loss: -8%/);
 

@@ -562,6 +562,51 @@ test('handleApiRoutes: mutação protegida aceita sessão JWT ADMIN mesmo sem to
   assert.strictEqual(payload.reclaimedSolActual, 0.00203928);
 });
 
+test('handleApiRoutes: mutação protegida aceita sessão JWT ADMIN via cookie HttpOnly', async () => {
+  const mockReq = {
+    url: '/api/wallet/sweep-rent',
+    method: 'POST',
+    headers: { cookie: 'nexusSolanaAdminSession=jwt-admin-cookie' }
+  } as any;
+
+  let statusCode = 0;
+  let responseData = '';
+  let sweepCalled = false;
+
+  const mockRes = {
+    setHeader: () => {},
+    writeHead: (code: number) => { statusCode = code; },
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  const mockContext = {
+    adminToken: '',
+    authService: {
+      isDatabaseAvailable: () => true,
+      verifyAdminToken: (token: string) =>
+        token === 'jwt-admin-cookie'
+          ? { userId: 'admin-cookie', email: 'admin@example.com', role: 'ADMIN', name: 'Admin' }
+          : null
+    },
+    latestState: {},
+    sweepRent: async () => {
+      sweepCalled = true;
+      return {
+        closedCount: 0,
+        reclaimedSolEst: 0,
+        reclaimedSolActual: 0,
+        txSignatures: [],
+        errors: []
+      };
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(statusCode, 200);
+  assert.strictEqual(sweepCalled, true);
+  assert.strictEqual(JSON.parse(responseData).success, true);
+});
+
 test('handleApiRoutes: JWT inválido não cai para autorização se token legado também não confere', async () => {
   const mockReq = {
     url: '/api/positions/TestMint/exit',

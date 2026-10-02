@@ -5,7 +5,7 @@ import { DashboardState, renderDashboardHtml } from '../dashboard/dashboardRende
 import type { DecisionLogger } from '../database/decisionJournal.js';
 import { handleJournalRoutes } from './journalRoutes.js';
 import type { SolanaAdminAuthService } from '../auth/adminAuthService.js';
-import { getBearerToken, handleAdminAuthRoutes } from '../auth/adminAuthRoutes.js';
+import { getAdminAuthToken, handleAdminAuthRoutes } from '../auth/adminAuthRoutes.js';
 
 export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
 
@@ -55,7 +55,7 @@ function authorizeMutation(
   adminToken?: string,
   authService?: SolanaAdminAuthService
 ): boolean {
-  const receivedToken = getBearerToken(req);
+  const receivedToken = getAdminAuthToken(req);
 
   // Sessão web/admin JWT: caminho preferencial.
   if (receivedToken && authService?.verifyAdminToken(receivedToken)) {

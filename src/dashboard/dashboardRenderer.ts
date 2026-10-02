@@ -512,13 +512,8 @@ export function renderDashboardHtml(state: DashboardState): string {
 
   <!-- SCRIPT DE AÇÕES & POLLING NATIVO A CADA 2.5s -->
   <script>
-    const ADMIN_TOKEN_KEY = 'nexusSolanaAdminJwt';
     let adminSession = null;
     let adminAuthStatus = { configured: false, needsBootstrap: false };
-
-    function getAdminToken() {
-      return sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
-    }
 
     function setAdminMessage(message, isError) {
       const el = document.getElementById('admin-auth-message');
@@ -530,7 +525,7 @@ export function renderDashboardHtml(state: DashboardState): string {
     }
 
     function applyAdminUi() {
-      const logged = Boolean(adminSession && adminSession.role === 'ADMIN' && getAdminToken());
+      const logged = Boolean(adminSession && adminSession.role === 'ADMIN');
       const loginButton = document.getElementById('admin-login-button');
       const controls = document.getElementById('admin-session-controls');
       const nameEl = document.getElementById('admin-session-name');
@@ -555,13 +550,13 @@ export function renderDashboardHtml(state: DashboardState): string {
     }
 
     async function adminFetch(url, options) {
-      const token = getAdminToken();
-      if (!token) throw new Error('Faça login como ADMIN para executar esta ação.');
-      const opts = Object.assign({}, options || {});
-      opts.headers = Object.assign({}, opts.headers || {}, { Authorization: 'Bearer ' + token });
+      if (!adminSession || adminSession.role !== 'ADMIN') {
+        throw new Error('Faça login como ADMIN para executar esta ação.');
+      }
+      const opts = Object.assign({ credentials: 'same-origin' }, options || {});
       const res = await fetch(url, opts);
       if (res.status === 401) {
-        logoutAdmin(false);
+        await logoutAdmin(false);
         throw new Error('Sessão administrativa expirada. Faça login novamente.');
       }
       return res;
@@ -593,12 +588,12 @@ export function renderDashboardHtml(state: DashboardState): string {
         const password = document.getElementById('admin-login-password')?.value || '';
         const res = await fetch('/api/auth/login', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: email, password: password })
         });
         const data = await res.json();
-        if (!res.ok || !data.success || !data.token) throw new Error(data.error || 'Falha no login.');
-        sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        if (!res.ok || !data.success || !data.user) throw new Error(data.error || 'Falha no login.');
         adminSession = data.user;
         const pwd = document.getElementById('admin-login-password');
         if (pwd) pwd.value = '';
@@ -618,12 +613,12 @@ export function renderDashboardHtml(state: DashboardState): string {
         const bootstrapToken = document.getElementById('admin-register-bootstrap')?.value || '';
         const res = await fetch('/api/auth/register-admin', {
           method: 'POST',
+          credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: name, email: email, password: password, bootstrapToken: bootstrapToken })
         });
         const data = await res.json();
-        if (!res.ok || !data.success || !data.token) throw new Error(data.error || 'Falha no cadastro.');
-        sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        if (!res.ok || !data.success || !data.user) throw new Error(data.error || 'Falha no cadastro.');
         adminSession = data.user;
         adminAuthStatus.needsBootstrap = false;
         ['admin-register-password', 'admin-register-bootstrap'].forEach(function (id) {
@@ -637,8 +632,10 @@ export function renderDashboardHtml(state: DashboardState): string {
       }
     }
 
-    function logoutAdmin(showMessage) {
-      sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    async function logoutAdmin(showMessage) {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+      } catch (_) {}
       adminSession = null;
       applyAdminUi();
       if (showMessage !== false) alert('Sessão administrativa encerrada.');
@@ -646,23 +643,20 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     async function refreshAuthState() {
       try {
-        const statusRes = await fetch('/api/auth/status');
+        const statusRes = await fetch('/api/auth/status', { credentials: 'same-origin' });
         if (statusRes.ok) adminAuthStatus = await statusRes.json();
       } catch (_) {}
 
-      const token = getAdminToken();
-      if (token) {
-        try {
-          const meRes = await fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } });
-          const me = await meRes.json();
-          if (meRes.ok && me.success && me.user?.role === 'ADMIN') {
-            adminSession = me.user;
-          } else {
-            sessionStorage.removeItem(ADMIN_TOKEN_KEY);
-          }
-        } catch (_) {
+      try {
+        const meRes = await fetch('/api/auth/me', { credentials: 'same-origin' });
+        const me = await meRes.json();
+        if (meRes.ok && me.success && me.user?.role === 'ADMIN') {
+          adminSession = me.user;
+        } else {
           adminSession = null;
         }
+      } catch (_) {
+        adminSession = null;
       }
       applyAdminUi();
     }

@@ -295,9 +295,20 @@ export class DecisionLogger {
     this.flushTimer.unref?.();
   }
 
+  private requeueFailedBatch(batch: BufferedItem[]): void {
+    if (batch.length === 0) return;
+    // O batch mais antigo volta para a frente da fila. Itens recebidos enquanto
+    // o flush estava em andamento permanecem depois dele, preservando ordem.
+    this.buffer = [...batch, ...this.buffer];
+    if (this.buffer.length > this.maxBufferMemoryItems) {
+      this.buffer.splice(this.maxBufferMemoryItems);
+    }
+  }
+
   /**
    * Envia o buffer para o PostgreSQL em batch transaction.
-   * Nunca lança exceção — loga erros silenciosamente.
+   * Nunca lança exceção. Em falha, recoloca o batch na fila para evitar perda
+   * silenciosa do ledger (especialmente crítico após uma compra on-chain).
    */
   public async flush(): Promise<void> {
     if (this.isFlushing || this.buffer.length === 0 || !this.pool) return;
@@ -323,12 +334,14 @@ export class DecisionLogger {
         this.totalFlushed += batch.length;
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
+        this.requeueFailedBatch(batch);
         this.totalErrors += batch.length;
         console.error('[DecisionJournal] Flush error:', (err as Error).message);
       } finally {
         client.release();
       }
     } catch (poolErr) {
+      this.requeueFailedBatch(batch);
       this.totalErrors += batch.length;
       console.error('[DecisionJournal] Pool error:', (poolErr as Error).message);
     } finally {
