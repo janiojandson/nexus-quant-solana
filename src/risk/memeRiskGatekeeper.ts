@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { RugCheckService } from './rugCheckService.js';
-import { SolanaLayaAdapter } from './solanaLayaAdapter.js';
+import { SolanaLayaAdapter, type SolanaLayaDecision } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
@@ -31,6 +31,7 @@ export interface SecurityAuditResult {
   score: number; // 0 a 100
   validatedBy: 'AYLA_LAYA_ENGINE' | 'RUGCHECK_API' | 'LOCAL_HEURISTICS_FALLBACK' | 'MACRO_CIRCUIT_BREAKER';
   latencyMs?: number;
+  layaNativeShadow?: SolanaLayaDecision;
 }
 
 export interface MemeGatekeeperConfig {
@@ -92,6 +93,7 @@ export class MemeRiskGatekeeper {
 
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
     const startTime = Date.now();
+    let layaNativeShadow: SolanaLayaDecision | undefined;
 
     // 1. Pré-Filtro Local Imediato (0ms): Honeypot e Risco de Rug Pull
     if (typeof token.mintAuthority === 'string' && token.mintAuthority.length > 0) {
@@ -192,7 +194,7 @@ export class MemeRiskGatekeeper {
 
     if (this.layaNativeShadowEnabled) {
       try {
-        const shadow = await this.solanaLayaAdapter.evaluate({
+        layaNativeShadow = await this.solanaLayaAdapter.evaluate({
           mint: token.mint,
           liquidityUsd: token.liquidityUsd,
           holdersCount: rugReport.holdersCount,
@@ -210,10 +212,10 @@ export class MemeRiskGatekeeper {
           h1HighPriceUsd: token.h1HighPriceUsd
         });
         console.log(
-          `[LayaNative:SHADOW] mint=${token.mint} action=${shadow.action} ` +
-          `confidence=${shadow.actionConfidence.toFixed(4)} risk=${shadow.residualRiskScore ?? 'n/a'} ` +
-          `review=${shadow.needsDeeperReview ?? 'n/a'} model=${shadow.routingModel ?? 'n/a'} ` +
-          `latencyMs=${shadow.latencyMs}`
+          `[LayaNative:SHADOW] mint=${token.mint} route=${layaNativeShadow.route} ` +
+          `confidence=${layaNativeShadow.routeConfidence.toFixed(4)} risk=${layaNativeShadow.residualRiskScore ?? 'n/a'} ` +
+          `needsLlm=${layaNativeShadow.needsLlm ?? 'n/a'} model=${layaNativeShadow.routingModel ?? 'n/a'} ` +
+          `latencyMs=${layaNativeShadow.latencyMs}`
         );
       } catch (shadowErr: any) {
         console.warn(`[LayaNative:SHADOW] falha sem impacto na decisão: ${shadowErr?.message || shadowErr}`);
@@ -299,7 +301,8 @@ export class MemeRiskGatekeeper {
           reason: `Veto emitido pela Ayla/Laya: ${reason}`,
           score: 15,
           validatedBy: 'AYLA_LAYA_ENGINE',
-          latencyMs
+          latencyMs,
+          layaNativeShadow
         };
       }
 
@@ -310,7 +313,8 @@ export class MemeRiskGatekeeper {
           reason: `Resposta da Ayla/Laya sem aprova??o expl?cita (${normalizedChoice || 'ausente'}). Entrada bloqueada por fail-closed.`,
           score: 0,
           validatedBy: 'AYLA_LAYA_ENGINE',
-          latencyMs
+          latencyMs,
+          layaNativeShadow
         };
       }
 
@@ -318,7 +322,8 @@ export class MemeRiskGatekeeper {
         safe: true,
         score: 95,
         validatedBy: 'AYLA_LAYA_ENGINE',
-        latencyMs
+        latencyMs,
+        layaNativeShadow
       };
     } catch (err: any) {
       // Fail-closed: falha, timeout ou resposta inv?lida da Ayla n?o autorizam compra.
@@ -327,7 +332,8 @@ export class MemeRiskGatekeeper {
         reason: `Ayla/Laya indispon?vel ou resposta inv?lida: ${err?.message || 'erro desconhecido'}. Entrada bloqueada.`,
         score: 0,
         validatedBy: 'LOCAL_HEURISTICS_FALLBACK',
-        latencyMs: Date.now() - startTime
+        latencyMs: Date.now() - startTime,
+        layaNativeShadow
       };
     }
   }

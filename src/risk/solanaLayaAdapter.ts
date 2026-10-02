@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export type SolanaLayaAction = 'PROCEED' | 'WATCH' | 'VETO';
+export type SolanaLayaRoute = 'MECHANICAL_PIPELINE' | 'DEEP_REVIEW' | 'ABSTAIN';
 
 export interface SolanaLayaFacts {
   mint: string;
@@ -21,12 +21,12 @@ export interface SolanaLayaFacts {
 }
 
 export interface SolanaLayaDecision {
-  action: SolanaLayaAction;
-  actionConfidence: number;
+  route: SolanaLayaRoute;
+  routeConfidence: number;
   residualRiskScore?: number;
   residualRiskConfidence?: number;
-  needsDeeperReview?: number;
-  needsDeeperReviewConfidence?: number;
+  needsLlm?: number;
+  needsLlmConfidence?: number;
   routingModel?: string;
   latencyMs: number;
   raw?: unknown;
@@ -57,32 +57,44 @@ export class SolanaLayaAdapter {
   public async evaluate(facts: SolanaLayaFacts): Promise<SolanaLayaDecision> {
     if (!this.apiKey) throw new Error('LAYA_API_KEY ausente para contrato nativo');
 
+    const body = [
+      'Pré-entrada de memecoin Solana após todos os filtros determinísticos obrigatórios terem sido aprovados.',
+      `Liquidez USD: ${facts.liquidityUsd}. Holders: ${facts.holdersCount}.`,
+      `Mint authority revogada: ${facts.mintAuthorityRevoked ? 'sim' : 'não'}. Freeze authority revogada: ${facts.freezeAuthorityRevoked ? 'sim' : 'não'}.`,
+      `RugCheck score: ${facts.rugCheckScore}/100. LP trancada/queimada: ${facts.lpLockedPct ?? 'desconhecida'}%. Top holders: ${facts.topHoldersPct ?? 'desconhecido'}%.`,
+      `Momentum 5m: ${facts.priceChangeM5 ?? 'desconhecido'}%. Compras/Vendas 5m: ${facts.buysM5 ?? 'desconhecido'}/${facts.sellsM5 ?? 'desconhecido'}.`,
+      `Volume comprador/vendedor 5m: ${facts.volumeBuysM5 ?? 'desconhecido'}/${facts.volumeSellsM5 ?? 'desconhecido'}.`,
+      'A Laya atua apenas como Sistema 1 de triagem. Ela não autoriza compra, venda, sizing ou execução financeira.',
+      'Roteie para MECHANICAL_PIPELINE quando o contexto estiver claro e puder seguir somente pelas regras determinísticas do domínio; DEEP_REVIEW quando houver ambiguidade relevante; ABSTAIN quando o contexto for insuficiente.'
+    ].join(' ');
+
     const payload = {
       state: {
+        body,
         domain: 'solana_memecoin',
         contractVersion: 'solana-laya/v1',
-        stage: 'PRE_ENTRY_RESIDUAL_RISK',
+        stage: 'PRE_ENTRY_TRIAGE',
         deterministicGatesPassed: true,
         facts
       },
       questions: {
-        action: {
+        route: {
           type: 'choice',
-          instructions: 'Qual é a decisão residual de Sistema 1 para esta oportunidade?',
+          instructions: 'Para qual caminho de processamento este contexto deve ser encaminhado?',
           criteria: {
-            PROCEED: 'Fatos objetivos passaram; fluxo e momentum são coerentes. Prosseguir somente para sizing e simulação.',
-            WATCH: 'Há incerteza ou sinais mistos. Aguardar nova observação sem abrir posição.',
-            VETO: 'Há risco residual ou deterioração suficiente para bloquear a oportunidade.'
+            MECHANICAL_PIPELINE: 'Contexto suficientemente claro para continuar somente pelas regras determinísticas do projeto Solana.',
+            DEEP_REVIEW: 'Contexto ambíguo ou conflitante; exige análise deliberada adicional antes de prosseguir.',
+            ABSTAIN: 'Informação insuficiente para uma triagem confiável.'
           }
         },
         residual_risk: {
           type: 'score',
-          instructions: 'Qual o risco residual após os filtros determinísticos?',
+          instructions: 'Qual o risco operacional residual deste contexto para fins de triagem?',
           criteria: ['baixo', 'moderado', 'alto', 'crítico']
         },
-        needs_deeper_review: {
+        needs_llm: {
           type: 'noul',
-          instructions: 'Os fatos apresentam ambiguidade que exige revisão adicional antes de qualquer entrada?'
+          instructions: 'Este contexto exige análise deliberada adicional por um LLM antes de continuar?'
         }
       },
       lang: 'pt'
@@ -99,29 +111,29 @@ export class SolanaLayaAdapter {
     );
 
     const data = response.data || {};
-    const actionAnswer = data.answers?.action;
-    const rawAction = String(actionAnswer?.choice || '').trim().toUpperCase();
-    if (!['PROCEED', 'WATCH', 'VETO'].includes(rawAction)) {
-      throw new Error(`Laya nativa retornou action inválida: ${rawAction || 'ausente'}`);
+    const routeAnswer = data.answers?.route;
+    const rawRoute = String(routeAnswer?.choice || '').trim().toUpperCase();
+    if (!['MECHANICAL_PIPELINE', 'DEEP_REVIEW', 'ABSTAIN'].includes(rawRoute)) {
+      throw new Error(`Laya nativa retornou route inválida: ${rawRoute || 'ausente'}`);
     }
 
-    const actionConfidence = Number(actionAnswer?.answer_confidence);
-    if (!Number.isFinite(actionConfidence) || actionConfidence < 0 || actionConfidence > 1) {
+    const routeConfidence = Number(routeAnswer?.answer_confidence);
+    if (!Number.isFinite(routeConfidence) || routeConfidence < 0 || routeConfidence > 1) {
       throw new Error('Laya nativa retornou answer_confidence inválida');
     }
 
     const riskAnswer = data.answers?.residual_risk;
-    const reviewAnswer = data.answers?.needs_deeper_review;
+    const needsLlmAnswer = data.answers?.needs_llm;
 
     return {
-      action: rawAction as SolanaLayaAction,
-      actionConfidence,
+      route: rawRoute as SolanaLayaRoute,
+      routeConfidence,
       residualRiskScore: Number.isFinite(Number(riskAnswer?.score)) ? Number(riskAnswer.score) : undefined,
       residualRiskConfidence: Number.isFinite(Number(riskAnswer?.answer_confidence))
         ? Number(riskAnswer.answer_confidence) : undefined,
-      needsDeeperReview: Number.isFinite(Number(reviewAnswer?.noul)) ? Number(reviewAnswer.noul) : undefined,
-      needsDeeperReviewConfidence: Number.isFinite(Number(reviewAnswer?.answer_confidence))
-        ? Number(reviewAnswer.answer_confidence) : undefined,
+      needsLlm: Number.isFinite(Number(needsLlmAnswer?.noul)) ? Number(needsLlmAnswer.noul) : undefined,
+      needsLlmConfidence: Number.isFinite(Number(needsLlmAnswer?.answer_confidence))
+        ? Number(needsLlmAnswer.answer_confidence) : undefined,
       routingModel: typeof data.routing?.model === 'string' ? data.routing.model : undefined,
       latencyMs: Date.now() - started,
       raw: data

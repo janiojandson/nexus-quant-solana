@@ -1068,6 +1068,10 @@ async function executeAutonomousCycle() {
           },
           gateEvaluations: gates,
           rejectionReason: vetoReasonText,
+          metadata: {
+            layaNativeShadow: audit.layaNativeShadow ?? null,
+            activeValidator: audit.validatedBy
+          },
         });
         
         console.log(`⏭️ Candidato #${candidateIndex + 1} reprovado no gatekeeper. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
@@ -1104,6 +1108,10 @@ async function executeAutonomousCycle() {
             estimatedSlippagePct: 7.5,
           },
           gateEvaluations: gates,
+          metadata: {
+            layaNativeShadow: audit.layaNativeShadow ?? null,
+            activeValidator: audit.validatedBy
+          },
         });
 
         // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)

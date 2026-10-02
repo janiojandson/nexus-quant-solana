@@ -32,9 +32,9 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
       return {
         data: {
           answers: {
-            action: { choice: 'PROCEED', answer_confidence: 0.93 },
+            route: { choice: 'MECHANICAL_PIPELINE', answer_confidence: 0.93 },
             residual_risk: { score: 0.7, answer_confidence: 0.82 },
-            needs_deeper_review: { noul: 0.18, answer_confidence: 0.82 }
+            needs_llm: { noul: 0.18, answer_confidence: 0.82 }
           },
           routing: { model: 'multilingual' }
         }
@@ -52,30 +52,32 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
   assert.strictEqual(seenUrl, 'http://laya-next.internal:8080/v1/systemone');
   assert.strictEqual(seenHeaders.Authorization, 'Bearer secret-test');
   assert.strictEqual(seenPayload.state.domain, 'solana_memecoin');
+  assert.match(seenPayload.state.body, /filtros determinísticos obrigatórios/);
+  assert.match(seenPayload.state.body, /não autoriza compra, venda, sizing ou execução financeira/);
   assert.strictEqual(seenPayload.state.contractVersion, 'solana-laya/v1');
   assert.strictEqual(seenPayload.state.deterministicGatesPassed, true);
-  assert.strictEqual(seenPayload.questions.action.type, 'choice');
+  assert.strictEqual(seenPayload.questions.route.type, 'choice');
   assert.strictEqual(seenPayload.questions.residual_risk.type, 'score');
-  assert.strictEqual(seenPayload.questions.needs_deeper_review.type, 'noul');
-  assert.match(seenPayload.questions.action.criteria.PROCEED, /sizing e simulação/);
-  assert.strictEqual(result.action, 'PROCEED');
-  assert.strictEqual(result.actionConfidence, 0.93);
+  assert.strictEqual(seenPayload.questions.needs_llm.type, 'noul');
+  assert.match(seenPayload.questions.route.criteria.MECHANICAL_PIPELINE, /regras determinísticas/);
+  assert.strictEqual(result.route, 'MECHANICAL_PIPELINE');
+  assert.strictEqual(result.routeConfidence, 0.93);
   assert.strictEqual(result.routingModel, 'multilingual');
 });
 
-test('SolanaLayaAdapter falha fechado se action ou confiança forem inválidas', async () => {
+test('SolanaLayaAdapter falha fechado se route ou confiança forem inválidas', async () => {
   const invalidAction = new SolanaLayaAdapter({
     apiKey: 'k',
     httpClient: { post: async () => ({ data: {
-      answers: { action: { choice: 'BUY', answer_confidence: 0.99 } }
+      answers: { route: { choice: 'BUY', answer_confidence: 0.99 } }
     } }) } as any
   });
-  await assert.rejects(() => invalidAction.evaluate(FACTS), /action inválida/);
+  await assert.rejects(() => invalidAction.evaluate(FACTS), /route inválida/);
 
   const invalidConfidence = new SolanaLayaAdapter({
     apiKey: 'k',
     httpClient: { post: async () => ({ data: {
-      answers: { action: { choice: 'VETO', answer_confidence: 7 } }
+      answers: { route: { choice: 'ABSTAIN', answer_confidence: 7 } }
     } }) } as any
   });
   await assert.rejects(
