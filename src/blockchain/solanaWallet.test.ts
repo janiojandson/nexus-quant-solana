@@ -1,9 +1,9 @@
-import { describe, it } from 'node:test';
+﻿import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import { Keypair } from '@solana/web3.js';
 import { SolanaWalletService } from './solanaWallet.js';
 
-describe('SolanaWalletService - Blindagem e Custódia Segura', () => {
+describe('SolanaWalletService - Blindagem e CustÃ³dia Segura', () => {
   const dummyKeypair = Keypair.generate();
   const dummySecretKeyString = JSON.stringify(Array.from(dummyKeypair.secretKey));
   const dummyPublicKey = dummyKeypair.publicKey.toBase58();
@@ -15,7 +15,7 @@ describe('SolanaWalletService - Blindagem e Custódia Segura', () => {
     });
 
     assert.strictEqual(wallet.getPublicKey(), dummyPublicKey);
-    // Garante que o dump/JSON do objeto de carteira não contenha a chave privada em texto claro
+    // Garante que o dump/JSON do objeto de carteira nÃ£o contenha a chave privada em texto claro
     const jsonStr = JSON.stringify(wallet);
     assert.strictEqual(jsonStr.includes(dummySecretKeyString), false);
   });
@@ -72,3 +72,75 @@ describe('SolanaWalletService - Blindagem e Custódia Segura', () => {
   });
 });
 
+
+it('deve reconciliar saldos do SPL clÃ¡ssico e Token-2022', async () => {
+  const token2022TestKeypair = Keypair.generate();
+  const wallet = new SolanaWalletService({
+    secretKeyRaw: JSON.stringify(Array.from(token2022TestKeypair.secretKey)),
+    rpcUrl: 'https://api.mainnet-beta.solana.com'
+  });
+
+  const seenPrograms: string[] = [];
+  const fakePubkey = { toBase58: () => 'FakeAtaToken2022' };
+  (wallet as any).connection = {
+    getParsedTokenAccountsByOwner: async (_owner: any, filter: any) => {
+      const program = filter.programId.toBase58();
+      seenPrograms.push(program);
+      if (program === 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb') {
+        return {
+          value: [{
+            pubkey: fakePubkey,
+            account: {
+              data: {
+                parsed: {
+                  info: {
+                    mint: 'Token2022Mint',
+                    tokenAmount: {
+                      uiAmount: 5245.575701,
+                      amount: '5245575701',
+                      decimals: 6
+                    }
+                  }
+                }
+              }
+            }
+          }]
+        };
+      }
+      return { value: [] };
+    }
+  };
+
+  const accounts = await wallet.getSplTokenAccounts();
+  assert.ok(seenPrograms.includes('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'));
+  assert.ok(seenPrograms.includes('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'));
+  assert.strictEqual(accounts.length, 1);
+  assert.strictEqual(accounts[0].mint, 'Token2022Mint');
+  assert.strictEqual(accounts[0].atomicAmount, '5245575701');
+  assert.strictEqual(accounts[0].decimals, 6);
+});
+
+it('deve usar o delta real da transação confirmada, não o outAmount esperado da quote', async () => {
+  const kp = Keypair.generate();
+  const owner = kp.publicKey.toBase58();
+  const wallet = new SolanaWalletService({
+    secretKeyRaw: JSON.stringify(Array.from(kp.secretKey)),
+    rpcUrl: 'https://api.mainnet-beta.solana.com'
+  });
+
+  (wallet as any).connection = {
+    getParsedTransaction: async () => ({
+      meta: {
+        preTokenBalances: [],
+        postTokenBalances: [{
+          mint: 'GoogleMint',
+          owner,
+          uiTokenAmount: { amount: '5245575701' }
+        }]
+      }
+    })
+  };
+
+  const delta = await wallet.getReceivedTokenDeltaAtomic('MockTx', 'GoogleMint');
+  assert.strictEqual(delta, '5245575701');
+});

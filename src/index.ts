@@ -24,7 +24,7 @@ import { DecisionLogger, DecisionType, GateEvaluation } from './database/decisio
 import { startCalibrationCron, runCalibrationNow } from './calibration/calibrationCron.js';
 import { runMaintenance } from './database/maintenanceJob.js';
 import { DrawdownBreaker } from './risk/drawdownBreaker.js';
-import { assertAtomicAmountToNumber } from './execution/atomicAmount.js';
+import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './execution/atomicAmount.js';
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
 import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
@@ -59,6 +59,7 @@ const SOLANA_LAYA_TACTICAL_MODE = (() => {
 const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLANA_LAYA_POSITION_INTERVAL_MS || 10_000));
 const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
 const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
+const NEXUS_MAINTENANCE_MODE = process.env.NEXUS_MAINTENANCE_MODE === 'true';
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
@@ -108,6 +109,7 @@ const latestState: DashboardState = {
   initialDepositSol: 0.3133,
   vitalityState: 'NORMAL',
   dryRun: IS_DRY_RUN,
+  maintenanceMode: NEXUS_MAINTENANCE_MODE,
   macroRegime: 'NEUTRAL_RANGING',
   circuitBreakerActive: false,
   activeRpcUrl: ACTIVE_SOLANA_RPC_URL.split('?')[0],
@@ -233,7 +235,7 @@ async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<
   }
 }
 
-if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN) {
+if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN && !NEXUS_MAINTENANCE_MODE) {
   const firstSweepDelayMs = Math.min(60_000, Math.max(15_000, Math.floor(AUTO_RENT_RECOVERY_INTERVAL_MS / 4)));
   setTimeout(() => {
     void runRentRecoverySweep('AUTO').catch((err: any) => {
@@ -248,7 +250,7 @@ if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN) {
   console.log(`🧹 [RentRecovery:AUTO] habilitado a cada ${Math.round(AUTO_RENT_RECOVERY_INTERVAL_MS / 60000)} min.`);
 } else {
   console.log(
-    `🧹 [RentRecovery:AUTO] desabilitado (config=${AUTO_RENT_RECOVERY_ENABLED}, dryRun=${IS_DRY_RUN}).`
+    `🧹 [RentRecovery:AUTO] desabilitado (config=${AUTO_RENT_RECOVERY_ENABLED}, dryRun=${IS_DRY_RUN}, maintenance=${NEXUS_MAINTENANCE_MODE}).`
   );
 }
 
@@ -303,7 +305,7 @@ async function executeExitOrderUnlocked(
   // a vender 5 lamports em vez de milhões, deixando a posição presa na carteira.
   let exitAmountAtomic: number;
   try {
-    exitAmountAtomic = assertAtomicAmountToNumber(tokenAmountToSell);
+    exitAmountAtomic = assertStoredAtomicNumberToNumber(tokenAmountToSell);
   } catch (err: any) {
     console.error(`🛑 [PositionExit] ${pos.symbol}: ${err.message}`);
     latestState.recentAudits[0] = {
@@ -311,6 +313,35 @@ async function executeExitOrderUnlocked(
       swapFailReason: `Montante de saida invalido: ${err.message}`
     } as any;
     return { success: false, error: err.message };
+  }
+
+  // Saídas manuais chegam pela API sem um valor econômico pré-calculado.
+  // Antes do broadcast, obtém uma quote executável para registrar PnL/valor reais
+  // e evitar fechar o ledger com pnl=0 e exit_size_sol=0.
+  if (exitReason === 'MANUAL' || !Number.isFinite(exitSolValue) || exitSolValue <= 0) {
+    try {
+      const manualQuote = await jupiterEngine.getQuote(
+        pos.mint,
+        'So11111111111111111111111111111111111111112',
+        exitAmountAtomic,
+        500
+      );
+      const quotedSolValue = (manualQuote.outAmount || 0) / 1e9;
+      if (!Number.isFinite(quotedSolValue) || quotedSolValue <= 0) {
+        return { success: false, error: 'Quote Jupiter inválida para liquidação manual.' };
+      }
+      exitSolValue = quotedSolValue;
+      const effectiveEntrySol = pos.entrySol || 0.015;
+      pnlPct = (exitSolValue - effectiveEntrySol) / effectiveEntrySol;
+      console.log(
+        `🎯 [SAÍDA MANUAL COTADA] ${pos.symbol} | valor executável=${exitSolValue.toFixed(9)} SOL ` +
+        `| PnL=${(pnlPct * 100).toFixed(2)}%`
+      );
+    } catch (err: any) {
+      const reason = err?.message || String(err);
+      console.error(`🚫 [SAÍDA MANUAL SEM QUOTE] ${pos.symbol}: ${reason}`);
+      return { success: false, error: `Falha ao cotar saída manual: ${reason}` };
+    }
   }
 
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
@@ -390,13 +421,29 @@ async function executeExitOrderUnlocked(
     }
   }
 
-  // 3. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido)
+  // 3. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido).
+  // Falha ao fechar a ATA NÃO reabre a posição: se o swap foi confirmado, o risco financeiro já foi encerrado.
+  // O rent fica pendente para o sweep automático, e não é creditado ficticiamente no ledger.
+  let ataClosed = false;
+  let rentRecoveredActualSol = 0;
   if (shouldCloseAta) {
     try {
-      await wallet.closeTokenAccount(pos.mint);
-      console.log(`🧹 [Higiene On-Chain] Conta ATA de ${pos.symbol} encerrada. ~0.00204 SOL de caução recuperados!`);
+      const closeResult = await wallet.closeTokenAccount(pos.mint);
+      ataClosed = closeResult.success;
+      if (ataClosed) {
+        rentRecoveredActualSol = 0.00204;
+        console.log(`🧹 [Higiene On-Chain] Conta ATA de ${pos.symbol} encerrada. ~0.00204 SOL de caução recuperados!`);
+      } else {
+        console.warn(
+          `⚠️ [Aviso Fechamento ATA] Swap de ${pos.symbol} confirmado, mas ATA permaneceu aberta. ` +
+          'Rent ficará pendente para o sweep automático.'
+        );
+      }
     } catch (err: any) {
-      console.warn(`⚠️ [Aviso Fechamento ATA] Não foi possível fechar ATA de ${pos.symbol}:`, err?.message || err);
+      console.warn(
+        `⚠️ [Aviso Fechamento ATA] Swap de ${pos.symbol} confirmado, mas fechamento da ATA falhou:`,
+        err?.message || err
+      );
     }
   } else {
     console.log(`🛡️ [Custódia Parcial] Conta ATA de ${pos.symbol} mantida aberta para os 50% restantes (Super Runner Mode).`);
@@ -462,7 +509,7 @@ async function executeExitOrderUnlocked(
     LAYA_EXIT: 'EXIT_LAYA',
   };
 
-  const rentRecovered = shouldCloseAta ? 0.00204 : 0;
+  const rentRecovered = rentRecoveredActualSol;
   const feesSol = 0.00005;
   const netPnlSol = pnlSol - feesSol + rentRecovered;
   const tradeDurationS = Math.floor((Date.now() - pos.entryTimestamp) / 1000);
@@ -563,7 +610,7 @@ async function maybeRunLayaTacticalPositionDecision(
     const freshPosition = positionEngine.getPosition(pos.mint);
     if (!freshPosition) return;
 
-    const tokenAtomicAmount = assertAtomicAmountToNumber(freshPosition.tokenAmount);
+    const tokenAtomicAmount = assertStoredAtomicNumberToNumber(freshPosition.tokenAmount);
     const executableQuote = await jupiterEngine.getQuote(
       freshPosition.mint,
       'So11111111111111111111111111111111111111112',
@@ -813,6 +860,7 @@ server.listen(PORT, '0.0.0.0', () => {
  * Se o valor cotado for <= 80% do investido (-20%), executa Stop-Loss imediato sem delay.
  */
 async function runUltraFastExitMonitor() {
+  if (NEXUS_MAINTENANCE_MODE) return;
   if (isRunningFastExit) return;
   isRunningFastExit = true;
 
@@ -844,7 +892,7 @@ async function runUltraFastExitMonitor() {
           currentSolValue = entrySol * (1 + pnlPct);
         } else {
           sensorSource = 'JUPITER_DEGRADED';
-          const tokenAtomicAmount = assertAtomicAmountToNumber(pos.tokenAmount);
+          const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
           const fallbackQuote = await jupiterEngine.getQuote(
             pos.mint,
             'So11111111111111111111111111111111111111112',
@@ -920,9 +968,11 @@ async function runUltraFastExitMonitor() {
           }
         );
 
-        positionEngine.recordQuoteSuccess(pos.mint);
-
         if (!exitSignal.shouldExit || exitSignal.type === 'HOLD') {
+          // O ciclo inteiro de leitura foi saudável; só agora zeramos o watchdog.
+          // Antes isto ocorria ANTES da cotação executável de saída e mascarava
+          // falhas consecutivas justamente no caminho crítico de liquidação.
+          positionEngine.recordQuoteSuccess(pos.mint);
           void maybeRunLayaTacticalPositionDecision(
             pos,
             currentSolValue,
@@ -934,7 +984,7 @@ async function runUltraFastExitMonitor() {
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
           // O sensor só arma a saída. A decisão financeira final usa uma cotação
           // executável Jupiter imediatamente antes do swap.
-          const tokenAtomicAmount = assertAtomicAmountToNumber(pos.tokenAmount);
+          const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
           const executableQuote = await jupiterEngine.getQuote(
             pos.mint,
             'So11111111111111111111111111111111111111112',
@@ -952,6 +1002,10 @@ async function runUltraFastExitMonitor() {
               currentVolume5m: pos.entryVolume5m
             }
           );
+
+          // A cotação executável também foi concluída com sucesso. Só aqui
+          // consideramos o ciclo crítico de saída integralmente saudável.
+          positionEngine.recordQuoteSuccess(pos.mint);
 
           if (confirmedSignal.shouldExit && confirmedSignal.type !== 'HOLD') {
             const detail = confirmedSignal.reasonDetail ? ` [${confirmedSignal.reasonDetail}]` : '';
@@ -972,14 +1026,20 @@ async function runUltraFastExitMonitor() {
         }
       } catch (quoteErr: any) {
         const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);
+        if (failures === 1) {
+          console.warn(
+            `⚠️ [ExitMonitor:Falha Crítica] ${pos.symbol} (${pos.mint}) | ` +
+            `falha=${quoteErr?.message || quoteErr}`
+          );
+        }
         if (shouldWarn) {
-          console.warn(`⚠️ [WATCHDOG] Instabilidade de sinal para ${pos.mint}. Tentando endpoint RPC secundário...`);
+          console.warn(`⚠️ [WATCHDOG] ${failures} falhas consecutivas no caminho de cotação/saída para ${pos.mint}.`);
         } else if (shouldEmergencyExit) {
           console.error(`🚨 [WATCHDOG CONTINGÊNCIA] 8 falhas consecutivas de cotação (12s sem cotação). Disparando liquidação defensiva de emergência para ${pos.symbol} (${pos.mint})!`);
           try {
             let rawLamports: number;
             try {
-              rawLamports = assertAtomicAmountToNumber(pos.tokenAmount);
+              rawLamports = assertStoredAtomicNumberToNumber(pos.tokenAmount);
             } catch (amountErr: any) {
               throw new Error(`Watchdog recusou quantidade n?o at?mica: ${amountErr?.message || amountErr}`);
             }
@@ -998,7 +1058,10 @@ async function runUltraFastExitMonitor() {
             if (emergencySwap.status === 'SUCCESS') {
               const closeResult = await rentRecovery.closeTokenAccount(pos.mint);
               if (!closeResult.success) {
-                throw new Error('Swap confirmado, mas fechamento da ATA falhou; posição preservada para reconciliação.');
+                console.warn(
+                  `⚠️ [WATCHDOG] Swap de ${pos.symbol} confirmado, mas ATA permaneceu aberta; ` +
+                  'posição financeira será encerrada e o rent ficará para o sweep automático.'
+                );
               }
             }
             antiSpamMemory.recordVeto(pos.mint, 'Watchdog de Perda de Sinal (12s sem cotação)', 24 * 60 * 60 * 1000);
@@ -1035,6 +1098,7 @@ async function runUltraFastExitMonitor() {
  * Varredura DexScreener, Análise RugCheck + filtros determinísticos + Laya shadow e Execução Sniper
  */
 async function executeAutonomousCycle() {
+  if (NEXUS_MAINTENANCE_MODE) return;
   if (isRunningScanner) {
     console.log('⏳ Ciclo de scanner anterior ainda em processamento. Pulando iteração...');
     return;
@@ -1771,7 +1835,7 @@ async function executeAutonomousCycle() {
           console.log(`   ⚠️ Erro Swap: ${swapSim.error}`);
         }
         console.log(`   Assinatura Tx: ${swapSim.txSignature || 'N/A'}`);
-        console.log(`   Retorno: ${swapSim.outAmount.toLocaleString()} tokens`);
+        console.log(`   Retorno cotado: ${swapSim.outAmount.toLocaleString()} unidades atômicas`);
 
         if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
           // CORREÇÃO: Só adiciona posição se houver txid on-chain confirmado
@@ -1806,12 +1870,37 @@ async function executeAutonomousCycle() {
           
           // Snapshot de Entrada (Contexto Inicial da Operação):
           const nowTs = Date.now();
+
+          // A quote Jupiter informa uma expectativa. Para posição REAL, a quantidade
+          // gerida deve vir do delta efetivamente confirmado na própria transação.
+          let managedEntryAtomic = Math.trunc(swapSim.outAmount);
+          if (!swapSim.isDryRun && swapSim.txSignature) {
+            const actualReceivedAtomic = await wallet.getReceivedTokenDeltaAtomic(
+              swapSim.txSignature,
+              topCandidate.mint
+            );
+            if (actualReceivedAtomic) {
+              managedEntryAtomic = assertAtomicAmountToNumber(actualReceivedAtomic);
+              if (managedEntryAtomic !== Math.trunc(swapSim.outAmount)) {
+                console.warn(
+                  `⚖️ [ENTRY:Reconciliação Imediata] ${topCandidate.symbol}: quote=${Math.trunc(swapSim.outAmount)} ` +
+                  `| recebido on-chain=${managedEntryAtomic} unidades atômicas.`
+                );
+              }
+            } else {
+              console.warn(
+                `⚠️ [ENTRY] ${topCandidate.symbol}: delta on-chain indisponível após confirmação; ` +
+                'mantendo outAmount cotado até a próxima reconciliação de custódia.'
+              );
+            }
+          }
+
           // Só agora a aprovação entra no cache: a compra já foi confirmada pelo executor.
           antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
           positionEngine.addPosition({
             mint: topCandidate.mint,
             symbol: topCandidate.symbol,
-            tokenAmount: swapSim.outAmount,
+            tokenAmount: managedEntryAtomic,
             entryPriceUsd: topCandidate.priceUsd,
             entryTimestamp: nowTs,
             stopLossPct: -0.06,
@@ -1855,7 +1944,8 @@ async function executeAutonomousCycle() {
             metadata: {
               phase: 'ENTRY_EXECUTED',
               txSignature: swapSim.txSignature,
-              outAmountAtomic: String(Math.trunc(swapSim.outAmount)),
+              outAmountAtomic: String(managedEntryAtomic),
+              quotedOutAmountAtomic: String(Math.trunc(swapSim.outAmount)),
               stopLossPct: -0.06,
               takeProfitPct: 0.35,
               entryTimestampMs: nowTs,
@@ -1901,7 +1991,7 @@ async function executeAutonomousCycle() {
             title: `Nova Entrada Executada (Sniper ${dynamicAllocSol} SOL)`,
             symbol: topCandidate.symbol,
             mint: topCandidate.mint,
-            action: `Compra na Jupiter V6 | Lote: ${swapSim.outAmount.toLocaleString()}`,
+            action: `Compra na Jupiter V6 | Recebido: ${managedEntryAtomic.toLocaleString()} unidades atômicas`,
             solValue: dynamicAllocSol,
             txSignature: swapSim.txSignature,
             detail: `Liq: $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m: $${(topCandidate.volume5mUsd || 0).toLocaleString()}`
@@ -2170,20 +2260,26 @@ async function rehydratePositionsFromWalletOnBoot() {
       }
     }
 
+    // A visão de custódia deve refletir TODAS as contas com saldo on-chain,
+    // inclusive posições gerenciadas. "Órfão" é apenas classificação operacional,
+    // não critério para esconder saldo do operador.
+    latestState.walletHoldings = splAccounts
+      .filter((spl) => !BASE_MINTS.has(spl.mint))
+      .map((spl) => {
+        const recovery = recoverablePositions.get(spl.mint);
+        return {
+          mint: spl.mint,
+          symbol: recovery?.symbol || `${spl.mint.slice(0, 4)}...${spl.mint.slice(-4)}`,
+          tokenAmount: spl.tokenAmount,
+          decimals: spl.decimals,
+          ataAddress: spl.ataAddress,
+          solscanUrl: `https://solscan.io/token/${spl.mint}`,
+          dexScreenerUrl: `https://dexscreener.com/solana/${spl.mint}`
+        };
+      });
+
     if (orphans.length > 0) {
-      // Visíveis ao operador, mas fora da mesa: não há prova de compra do bot.
-      latestState.walletHoldings = orphans.map((o) => ({
-        mint: o.mint,
-        symbol: `${o.mint.slice(0, 4)}...${o.mint.slice(-4)}`,
-        tokenAmount: o.tokenAmount,
-        decimals: o.decimals,
-        ataAddress: o.ataAddress,
-        solscanUrl: `https://solscan.io/token/${o.mint}`,
-        dexScreenerUrl: `https://dexscreener.com/solana/${o.mint}`
-      }));
-      console.log(`🚫 [BOOT] ${orphans.length} token(s) sem trade executado no ledger ficaram fora da mesa automática.`);
-    } else {
-      latestState.walletHoldings = [];
+      console.log(`🚫 [BOOT] ${orphans.length} token(s) sem trade executado no ledger ficaram fora da mesa automática, mas permanecem visíveis em holdings.`);
     }
 
     updateDashboardViews();
@@ -2266,6 +2362,14 @@ async function main() {
 
   // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
   await rehydratePositionsFromWalletOnBoot();
+
+  if (NEXUS_MAINTENANCE_MODE) {
+    console.warn(
+      '🛠️ [MODO MANUTENÇÃO] Scanner, saídas automáticas e sweeps automáticos estão pausados. ' +
+      'Dashboard, autenticação e liquidação manual permanecem disponíveis.'
+    );
+    return;
+  }
 
   // 2.1 Varredura e Resgate Automático de Rent Exemption de Contas Órfãs Vazias
   try {

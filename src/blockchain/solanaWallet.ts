@@ -1,4 +1,4 @@
-import { Keypair, Connection, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Keypair, Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
 
 export interface WalletServiceConfig {
@@ -74,14 +74,71 @@ export class SolanaWalletService {
     }
   }
 
+  /**
+   * Lê da própria transação confirmada quanto deste mint entrou efetivamente
+   * na carteira. Isso evita tratar o outAmount da quote Jupiter como saldo real:
+   * slippage/execução podem fazer o post-balance diferir do valor cotado.
+   */
+  public async getReceivedTokenDeltaAtomic(
+    txSignature: string,
+    mintAddress: string
+  ): Promise<string | null> {
+    try {
+      const tx = await this.connection.getParsedTransaction(txSignature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0
+      });
+      if (!tx?.meta) return null;
+
+      const owner = this.keypair.publicKey.toBase58();
+      const sumForOwner = (balances: any[] | null | undefined): bigint => {
+        let total = 0n;
+        for (const balance of balances || []) {
+          if (balance?.mint !== mintAddress || balance?.owner !== owner) continue;
+          const raw = String(balance?.uiTokenAmount?.amount ?? '0');
+          if (!/^\d+$/.test(raw)) continue;
+          total += BigInt(raw);
+        }
+        return total;
+      };
+
+      const pre = sumForOwner(tx.meta.preTokenBalances);
+      const post = sumForOwner(tx.meta.postTokenBalances);
+      const delta = post - pre;
+      return delta > 0n ? delta.toString() : null;
+    } catch (err: any) {
+      console.warn(
+        `⚠️ [Wallet] Não foi possível obter delta atômico da tx ${txSignature}: ${err?.message || err}`
+      );
+      return null;
+    }
+  }
+
+  private async getParsedTokenAccountsForSupportedPrograms(): Promise<any[]> {
+    const programIds = [
+      new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // SPL Token clássico
+      new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb')  // Token-2022
+    ];
+
+    const accounts: any[] = [];
+    for (const programId of programIds) {
+      try {
+        const response = await this.connection.getParsedTokenAccountsByOwner(
+          this.keypair.publicKey,
+          { programId }
+        );
+        accounts.push(...response.value);
+      } catch (err: any) {
+        console.warn(`⚠️ [Wallet] Falha ao consultar contas do programa ${programId.toBase58()}: ${err?.message || err}`);
+      }
+    }
+    return accounts;
+  }
+
   public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number; atomicAmount: string; decimals: number; ataAddress: string }>> {
     try {
-      const { PublicKey } = await import('@solana/web3.js');
-      const response = await this.connection.getParsedTokenAccountsByOwner(
-        this.keypair.publicKey,
-        { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
-      );
-      return response.value
+      const accounts = await this.getParsedTokenAccountsForSupportedPrograms();
+      return accounts
         .map(a => {
           const info = a.account.data.parsed.info;
           return {
@@ -135,12 +192,31 @@ export class SolanaWalletService {
 
   public async closeTokenAccount(mintAddress: string): Promise<{ txSignature: string | null; success: boolean }> {
     try {
-      const { PublicKey, Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
-      const { createCloseAccountInstruction, getAssociatedTokenAddress } = await import('@solana/spl-token');
+      const { Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
+      const {
+        createCloseAccountInstruction,
+        getAssociatedTokenAddress,
+        TOKEN_PROGRAM_ID,
+        TOKEN_2022_PROGRAM_ID
+      } = await import('@solana/spl-token');
 
       const mint = new PublicKey(mintAddress);
       const owner = this.keypair.publicKey;
-      const ata = await getAssociatedTokenAddress(mint, owner);
+      const mintInfo = await this.connection.getAccountInfo(mint);
+      if (!mintInfo) {
+        throw new Error(`Mint inexistente: ${mintAddress}`);
+      }
+
+      const tokenProgramId = mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)
+        ? TOKEN_2022_PROGRAM_ID
+        : mintInfo.owner.equals(TOKEN_PROGRAM_ID)
+          ? TOKEN_PROGRAM_ID
+          : null;
+      if (!tokenProgramId) {
+        throw new Error(`Programa de token não suportado para ${mintAddress}: ${mintInfo.owner.toBase58()}`);
+      }
+
+      const ata = await getAssociatedTokenAddress(mint, owner, false, tokenProgramId);
 
       // Verifica se a conta existe antes de tentar fechar
       const accountInfo = await this.connection.getAccountInfo(ata);
@@ -151,7 +227,9 @@ export class SolanaWalletService {
       const closeIx = createCloseAccountInstruction(
         ata,          // Conta associada a ser fechada
         owner,        // Destino do SOL de aluguel (a própria carteira Phantom)
-        owner         // Proprietário/Autoridade da conta
+        owner,        // Proprietário/Autoridade da conta
+        [],           // Multi-signers
+        tokenProgramId
       );
 
       const transaction = new Transaction().add(closeIx);
@@ -176,16 +254,12 @@ export class SolanaWalletService {
    */
   public async sweepEmptyTokenAccounts(): Promise<{ closedCount: number; reclaimedSolEst: number; errors: string[] }> {
     try {
-      const { PublicKey } = await import('@solana/web3.js');
-      const response = await this.connection.getParsedTokenAccountsByOwner(
-        this.keypair.publicKey,
-        { programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA') }
-      );
+      const accounts = await this.getParsedTokenAccountsForSupportedPrograms();
 
       let closedCount = 0;
       const errors: string[] = [];
 
-      for (const a of response.value) {
+      for (const a of accounts) {
         const info = a.account.data.parsed.info;
         const amount = Number(info.tokenAmount.uiAmount || 0);
         const mint = info.mint as string;

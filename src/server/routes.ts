@@ -264,6 +264,7 @@ export async function handleApiRoutes(
       totalNetworkFeesSolEst: s.totalNetworkFeesSolEst,
       operational: {
         executionMode: s.dryRun ? 'DRY_RUN' : 'REAL_ON_CHAIN',
+        maintenanceMode: Boolean(s.maintenanceMode),
         adminAuth: s.auth || { configured: false, needsBootstrap: false },
         rentRecovery: s.rentRecovery || null,
         laya: s.laya || null

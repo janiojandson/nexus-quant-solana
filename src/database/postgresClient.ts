@@ -56,13 +56,18 @@ export class SolanaPostgresRepository {
         liquidity_usd NUMERIC(16, 2),
         price_usd NUMERIC(16, 8),
         is_safe BOOLEAN NOT NULL,
-        score INTEGER NOT NULL,
+        score NUMERIC(5,2) NOT NULL,
         validated_by VARCHAR(64) NOT NULL,
         veto_reason TEXT,
         dry_run BOOLEAN NOT NULL DEFAULT TRUE,
         tx_signature VARCHAR(128),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      -- Migração idempotente: scores reais podem ser fracionários (ex.: 91.5).
+      ALTER TABLE solana_agent_audits
+        ALTER COLUMN score TYPE NUMERIC(5,2)
+        USING score::numeric;
+
       CREATE INDEX IF NOT EXISTS idx_solana_audits_mint ON solana_agent_audits(mint);
       CREATE INDEX IF NOT EXISTS idx_solana_audits_created_at ON solana_agent_audits(created_at DESC);
     `;
@@ -85,10 +90,14 @@ export class SolanaPostgresRepository {
       CREATE TABLE IF NOT EXISTS token_quarantine (
         mint VARCHAR(64) PRIMARY KEY,
         symbol VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN',
-        reason VARCHAR(255) NOT NULL,
+        reason TEXT NOT NULL,
         quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         expires_at TIMESTAMPTZ NOT NULL
       );
+      -- Migração idempotente: motivos operacionais completos podem exceder 255 caracteres.
+      ALTER TABLE token_quarantine
+        ALTER COLUMN reason TYPE TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_token_quarantine_expires ON token_quarantine(expires_at DESC);
     `;
 

@@ -33,6 +33,7 @@ export interface DashboardState {
   initialDepositSol: number;
   vitalityState: string;
   dryRun: boolean;
+  maintenanceMode?: boolean;
   macroRegime: string;
   circuitBreakerActive: boolean;
   activeRpcUrl: string;
@@ -755,8 +756,8 @@ export function renderDashboardHtml(state: DashboardState): string {
 
         const execEl = document.getElementById('op-execution-mode');
         if (execEl) {
-          execEl.textContent = operational.executionMode === 'REAL_ON_CHAIN' ? 'REAL ON-CHAIN' : 'DRY-RUN';
-          execEl.className = 'mt-1 font-bold ' + (operational.executionMode === 'REAL_ON_CHAIN' ? 'text-emerald-400' : 'text-amber-400');
+          execEl.textContent = operational.maintenanceMode ? 'MODO MANUTENÇÃO' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'REAL ON-CHAIN' : 'DRY-RUN');
+          execEl.className = 'mt-1 font-bold ' + (operational.maintenanceMode ? 'text-amber-300' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'text-emerald-400' : 'text-amber-400'));
         }
 
         const layaEl = document.getElementById('op-laya-status');

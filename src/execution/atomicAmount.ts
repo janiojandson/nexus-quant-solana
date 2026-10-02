@@ -56,6 +56,25 @@ export function assertAtomicAmountToNumber(amount: unknown): number {
 }
 
 /**
+ * Valida um montante que JÁ ESTÁ documentado internamente como unidades atômicas,
+ * mas é armazenado como number pelo PositionExitEngine.
+ *
+ * Não relaxa assertAtomicAmountToNumber(): floats/uiAmount continuam proibidos.
+ * Só aceita inteiros positivos dentro de Number.MAX_SAFE_INTEGER e então passa
+ * novamente pela validação canônica via string.
+ */
+export function assertStoredAtomicNumberToNumber(amount: unknown): number {
+  if (
+    typeof amount !== 'number' ||
+    !Number.isSafeInteger(amount) ||
+    amount <= 0
+  ) {
+    throw new InvalidAtomicAmountError(amount);
+  }
+  return assertAtomicAmountToNumber(String(amount));
+}
+
+/**
  * Converte um saldo uiAmount (legível) para string atômica, usando as
  * decimais do mint. Serve apenas para migração de dados legados — a
  * produção deve sempre ler `value.amount` direto do RPC.

@@ -1,5 +1,10 @@
 import { Connection, PublicKey, Keypair, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync, createCloseAccountInstruction, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import {
+  getAssociatedTokenAddressSync,
+  createCloseAccountInstruction,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID
+} from '@solana/spl-token';
 
 export interface SweepResult {
   closedCount: number;
@@ -26,9 +31,39 @@ export class RentRecoveryService {
     this.keypair = keypair;
   }
 
+  private async getParsedTokenAccountsForSupportedPrograms(): Promise<any[]> {
+    if (!this.keypair) return [];
+    const accounts: any[] = [];
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      try {
+        const response = await this.connection.getParsedTokenAccountsByOwner(
+          this.keypair.publicKey,
+          { programId }
+        );
+        accounts.push(...response.value);
+      } catch (err: any) {
+        console.warn(
+          `⚠️ [RentRecoveryService] Falha ao consultar ${programId.toBase58()}: ${err?.message || err}`
+        );
+      }
+    }
+    return accounts;
+  }
+
+  private async resolveTokenProgram(mint: PublicKey): Promise<PublicKey> {
+    const mintInfo = await this.connection.getAccountInfo(mint);
+    if (!mintInfo) throw new Error(`Mint inexistente: ${mint.toBase58()}`);
+    if (mintInfo.owner.equals(TOKEN_PROGRAM_ID)) return TOKEN_PROGRAM_ID;
+    if (mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) return TOKEN_2022_PROGRAM_ID;
+    throw new Error(
+      `Programa de token não suportado para ${mint.toBase58()}: ${mintInfo.owner.toBase58()}`
+    );
+  }
+
   private async closeAccountAddress(
     tokenAccountAddress: PublicKey,
-    destinationAddress?: string
+    destinationAddress?: string,
+    tokenProgramId: PublicKey = TOKEN_PROGRAM_ID
   ): Promise<{ success: boolean; txSignature?: string | null; error?: string }> {
     if (!this.keypair) {
       return { success: true, txSignature: 'DRY_RUN_ATA_CLOSED' };
@@ -42,7 +77,7 @@ export class RentRecoveryService {
         destination,
         ownerPubkey,
         [],
-        TOKEN_PROGRAM_ID
+        tokenProgramId
       );
 
       const transaction = new Transaction().add(instruction);
@@ -73,8 +108,18 @@ export class RentRecoveryService {
     }
 
     const mintPubkey = new PublicKey(mintAddress);
-    const ataAddress = getAssociatedTokenAddressSync(mintPubkey, this.keypair.publicKey);
-    const result = await this.closeAccountAddress(ataAddress, destinationAddress);
+    const tokenProgramId = await this.resolveTokenProgram(mintPubkey);
+    const ataAddress = getAssociatedTokenAddressSync(
+      mintPubkey,
+      this.keypair.publicKey,
+      false,
+      tokenProgramId
+    );
+    const result = await this.closeAccountAddress(
+      ataAddress,
+      destinationAddress,
+      tokenProgramId
+    );
 
     if (result.success) {
       console.log(`💰 [RentRecoveryService] ATA de ${mintAddress} encerrada. Tx: ${result.txSignature}`);
@@ -101,17 +146,14 @@ export class RentRecoveryService {
     }
 
     try {
-      const response = await this.connection.getParsedTokenAccountsByOwner(
-        this.keypair.publicKey,
-        { programId: TOKEN_PROGRAM_ID }
-      );
+      const accounts = await this.getParsedTokenAccountsForSupportedPrograms();
 
       let closedCount = 0;
       let reclaimedLamportsActual = 0;
       const txSignatures: string[] = [];
       const errors: string[] = [];
 
-      for (const account of response.value) {
+      for (const account of accounts) {
         const info = account.account.data.parsed?.info;
         if (!info) continue;
 
@@ -122,7 +164,12 @@ export class RentRecoveryService {
 
         try {
           const rentLamports = Number(account.account.lamports || 0);
-          const res = await this.closeAccountAddress(account.pubkey, destinationAddress);
+          const tokenProgramId = account.account.owner as PublicKey;
+          const res = await this.closeAccountAddress(
+            account.pubkey,
+            destinationAddress,
+            tokenProgramId
+          );
           if (res.success && res.txSignature) {
             closedCount++;
             reclaimedLamportsActual += rentLamports;
@@ -166,21 +213,19 @@ export class RentRecoveryService {
     if (!this.keypair) return [];
 
     try {
-      const response = await this.connection.getParsedTokenAccountsByOwner(
-        this.keypair.publicKey,
-        { programId: TOKEN_PROGRAM_ID }
-      );
+      const parsedAccounts = await this.getParsedTokenAccountsForSupportedPrograms();
 
       const accounts: SplAccountInfo[] = [];
-      for (const a of response.value) {
+      for (const a of parsedAccounts) {
         const info = a.account.data.parsed?.info;
         if (!info) continue;
 
+        const amountRaw = String(info.tokenAmount?.amount ?? '0');
         const amount = Number(info.tokenAmount?.uiAmount || 0);
         const mint = info.mint as string;
         const decimals = Number(info.tokenAmount?.decimals || 0);
 
-        if (amount > 0 && mint) {
+        if (/^\d+$/.test(amountRaw) && BigInt(amountRaw) > 0n && mint) {
           accounts.push({
             pubkey: a.pubkey.toBase58(),
             mint,
