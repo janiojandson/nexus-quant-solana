@@ -86,10 +86,12 @@ test('SolanaLayaAdapter falha fechado se route ou confiança forem inválidas', 
   );
 });
 
-test('SolanaLayaAdapter exige SOLANA_LAYA_API_KEY e ignora LAYA_API_KEY genérica', async () => {
+test('SolanaLayaAdapter exige credencial para endpoint público', async () => {
+  const oldAuth = process.env.SOLANA_LAYA_AUTH_TOKEN;
   const oldSolana = process.env.SOLANA_LAYA_API_KEY;
   const oldGeneric = process.env.LAYA_API_KEY;
   try {
+    delete process.env.SOLANA_LAYA_AUTH_TOKEN;
     delete process.env.SOLANA_LAYA_API_KEY;
     process.env.LAYA_API_KEY = 'legacy-key';
 
@@ -98,8 +100,10 @@ test('SolanaLayaAdapter exige SOLANA_LAYA_API_KEY e ignora LAYA_API_KEY genéric
       httpClient: { post: async () => { throw new Error('não deveria chamar'); } } as any
     });
 
-    await assert.rejects(() => adapter.evaluate(FACTS), /SOLANA_LAYA_API_KEY ausente/);
+    await assert.rejects(() => adapter.evaluate(FACTS), /Credencial Laya ausente/);
   } finally {
+    if (oldAuth === undefined) delete process.env.SOLANA_LAYA_AUTH_TOKEN;
+    else process.env.SOLANA_LAYA_AUTH_TOKEN = oldAuth;
     if (oldSolana === undefined) delete process.env.SOLANA_LAYA_API_KEY;
     else process.env.SOLANA_LAYA_API_KEY = oldSolana;
     if (oldGeneric === undefined) delete process.env.LAYA_API_KEY;
@@ -175,4 +179,31 @@ test('SolanaLayaAdapter força ABSTAIN quando a Laya sinaliza baixa confiança e
 
   assert.strictEqual(result.action, 'ABSTAIN');
   assert.strictEqual(result.lowConfidence, true);
+});
+
+test('SolanaLayaAdapter usa proxy privado sem bearer do cliente', async () => {
+  const oldAuth = process.env.SOLANA_LAYA_AUTH_TOKEN;
+  const oldCompat = process.env.SOLANA_LAYA_API_KEY;
+  try {
+    delete process.env.SOLANA_LAYA_AUTH_TOKEN;
+    delete process.env.SOLANA_LAYA_API_KEY;
+    let seenHeaders: any = null;
+    const adapter = new SolanaLayaAdapter({
+      baseUrl: 'http://nexus-decisor-laya-next.railway.internal:8001',
+      httpClient: { post: async (_url: string, _payload: any, config: any) => {
+        seenHeaders = config.headers;
+        return { data: { answers: { route: {
+          choice: 'MECHANICAL_PIPELINE', answer_confidence: 0.91, abstention: 'passed'
+        } } } };
+      } } as any
+    });
+    const result = await adapter.evaluate(FACTS);
+    assert.strictEqual(seenHeaders?.Authorization, undefined);
+    assert.strictEqual(result.route, 'MECHANICAL_PIPELINE');
+  } finally {
+    if (oldAuth === undefined) delete process.env.SOLANA_LAYA_AUTH_TOKEN;
+    else process.env.SOLANA_LAYA_AUTH_TOKEN = oldAuth;
+    if (oldCompat === undefined) delete process.env.SOLANA_LAYA_API_KEY;
+    else process.env.SOLANA_LAYA_API_KEY = oldCompat;
+  }
 });

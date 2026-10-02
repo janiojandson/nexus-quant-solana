@@ -67,6 +67,7 @@ export interface SolanaLayaAdapterOptions {
   baseUrl?: string;
   apiKey?: string;
   timeoutMs?: number;
+  privateProxy?: boolean;
   httpClient?: typeof axios;
 }
 
@@ -86,18 +87,22 @@ export class SolanaLayaAdapter {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
   private readonly timeoutMs: number;
+  private readonly privateProxy: boolean;
   private readonly httpClient: typeof axios;
 
   constructor(options: SolanaLayaAdapterOptions = {}) {
     this.baseUrl = options.baseUrl || process.env.SOLANA_LAYA_NATIVE_URL || '';
     this.apiKey = options.apiKey || process.env.SOLANA_LAYA_AUTH_TOKEN || process.env.SOLANA_LAYA_API_KEY;
     this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 4000);
+    this.privateProxy = options.privateProxy
+      ?? (process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true'
+        || this.baseUrl.includes('.railway.internal:8001'));
     this.httpClient = options.httpClient || axios;
   }
 
   private assertConfigured(): void {
     if (!this.baseUrl) throw new Error('SOLANA_LAYA_NATIVE_URL ausente para contrato nativo');
-    if (!this.apiKey) throw new Error('SOLANA_LAYA_API_KEY ausente para contrato nativo');
+    if (!this.privateProxy && !this.apiKey) throw new Error('Credencial Laya ausente para endpoint público');
   }
 
   private async askChoice<TAction extends string>(
@@ -131,7 +136,7 @@ export class SolanaLayaAdapter {
       payload,
       {
         timeout: this.timeoutMs,
-        headers: { Authorization: `Bearer ${this.apiKey}` }
+        headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : undefined
       }
     );
 
