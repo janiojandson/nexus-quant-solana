@@ -37,7 +37,7 @@ export interface ClosedTrade {
   exitTimestamp: number;
   pnlPct: number;
   pnlUsdEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'HOLD';
   txSignature?: string;
   pnlSolEst?: number;
 }

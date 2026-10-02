@@ -15,7 +15,7 @@ import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
-import { PositionExitEngine } from './execution/positionExitEngine.js';
+import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
@@ -26,6 +26,7 @@ import { runMaintenance } from './database/maintenanceJob.js';
 import { DrawdownBreaker } from './risk/drawdownBreaker.js';
 import { assertAtomicAmountToNumber } from './execution/atomicAmount.js';
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
+import { SolanaLayaAdapter } from './risk/solanaLayaAdapter.js';
 
 
 dotenv.config();
@@ -49,6 +50,13 @@ const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_P
 const ENTRY_MOMENTUM_MAX_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxRisePct);
 const ENTRY_MOMENTUM_MAX_PULLBACK_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_PULLBACK_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxPullbackPct);
 
+type SolanaLayaTacticalMode = 'OFF' | 'SHADOW' | 'ACTIVE';
+const SOLANA_LAYA_TACTICAL_MODE = (() => {
+  const raw = String(process.env.SOLANA_LAYA_TACTICAL_MODE || 'SHADOW').toUpperCase();
+  return (['OFF', 'SHADOW', 'ACTIVE'].includes(raw) ? raw : 'SHADOW') as SolanaLayaTacticalMode;
+})();
+const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLANA_LAYA_POSITION_INTERVAL_MS || 10_000));
+
 let isRunningScanner = false;
 let isRunningFastExit = false;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
@@ -66,6 +74,9 @@ const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
   macroSentinelUrl: MACRO_SENTINEL_URL
 });
+const solanaLayaAdapter = new SolanaLayaAdapter();
+const layaPositionLastCheck = new Map<string, number>();
+const layaPositionInFlight = new Set<string>();
 
 const jupiterEngine = new JupiterExecutionEngine({
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
@@ -114,7 +125,7 @@ const latestState: DashboardState = {
  */
 async function executeExitOrder(
   mint: string,
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL',
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT',
   pnlPct: number,
   exitSolValue: number,
   options?: { exitTokenAmount?: number; shouldCloseAta?: boolean }
@@ -240,7 +251,8 @@ async function executeExitOrder(
       TIME_STOP:     30 * 60 * 1000,       // 30 minutos
       MANUAL:        24 * 60 * 60 * 1000,  // 24 horas
       TRAILING_STOP: 0,
-      TAKE_PROFIT:   0
+      TAKE_PROFIT:   0,
+      LAYA_EXIT:     0
     };
     const quarantineMs = QUARANTINE_MS[exitReason] ?? 0;
     if (quarantineMs > 0) {
@@ -289,6 +301,7 @@ async function executeExitOrder(
     TIME_STOP: 'EXIT_TIME_STOP',
     MANUAL: 'EXIT_PANIC',
     TAKE_PROFIT: 'EXIT_PARTIAL',
+    LAYA_EXIT: 'EXIT_LAYA',
   };
 
   const rentRecovered = shouldCloseAta ? 0.00204 : 0;
@@ -342,6 +355,92 @@ async function executeExitOrder(
 
   updateDashboardViews();
   return { success: true, txSignature: exitSwap.txSignature };
+}
+
+async function maybeRunLayaTacticalPositionDecision(
+  pos: PositionTracking,
+  currentSolValue: number,
+  pnlPct: number,
+  currentPriceUsd: number
+): Promise<void> {
+  if (SOLANA_LAYA_TACTICAL_MODE === 'OFF') return;
+
+  const now = Date.now();
+  const lastCheck = layaPositionLastCheck.get(pos.mint) || 0;
+  if (now - lastCheck < SOLANA_LAYA_POSITION_INTERVAL_MS) return;
+  if (layaPositionInFlight.has(pos.mint)) return;
+
+  layaPositionLastCheck.set(pos.mint, now);
+  layaPositionInFlight.add(pos.mint);
+
+  try {
+    const entrySol = pos.entrySol || 0.015;
+    const peakSol = positionEngine.getPeakSolValue(pos.mint) || entrySol;
+    const peakPnlPct = entrySol > 0 ? (peakSol - entrySol) / entrySol : pnlPct;
+    const layaPosition = await solanaLayaAdapter.evaluatePosition({
+      mint: pos.mint,
+      symbol: pos.symbol,
+      pnlPct,
+      peakPnlPct,
+      holdingSeconds: Math.max(0, Math.floor((Date.now() - pos.entryTimestamp) / 1000)),
+      partialTaken: Boolean(pos.partialTaken),
+      currentPriceUsd,
+      entryPriceUsd: pos.entryPriceUsd,
+      lastKnownLiquidityUsd: pos.entryLiquidityUsd,
+      lastKnownVolume5mUsd: pos.entryVolume5m,
+      trailingActive: Boolean(pos.trailingActive),
+      stopLossPct: pos.stopLossPct
+    });
+
+    console.log(
+      `🧠 [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:POSITION] ${pos.symbol} ` +
+      `action=${layaPosition.action} confidence=${layaPosition.confidence.toFixed(4)} ` +
+      `abstention=${layaPosition.abstention ?? 'none'} latencyMs=${layaPosition.latencyMs}`
+    );
+
+    if (SOLANA_LAYA_TACTICAL_MODE !== 'ACTIVE' || layaPosition.action !== 'EXIT') {
+      return;
+    }
+
+    const freshPosition = positionEngine.getPosition(pos.mint);
+    if (!freshPosition) return;
+
+    const tokenAtomicAmount = assertAtomicAmountToNumber(freshPosition.tokenAmount);
+    const executableQuote = await jupiterEngine.getQuote(
+      freshPosition.mint,
+      'So11111111111111111111111111111111111111112',
+      tokenAtomicAmount,
+      500
+    );
+    const executableSolValue = (executableQuote.outAmount || 0) / 1e9;
+    if (!Number.isFinite(executableSolValue) || executableSolValue <= 0) {
+      throw new Error('Jupiter não retornou valor executável válido para saída tática');
+    }
+
+    const effectiveEntrySol = freshPosition.entrySol || 0.015;
+    const executablePnlPct = (executableSolValue - effectiveEntrySol) / effectiveEntrySol;
+
+    console.log(
+      `🚪 [Laya:Tactical:EXIT] ${freshPosition.symbol}: confiança=${layaPosition.confidence.toFixed(4)} ` +
+      `| PnL executável=${(executablePnlPct * 100).toFixed(2)}% | valor=${executableSolValue.toFixed(4)} SOL`
+    );
+
+    await executeExitOrder(
+      freshPosition.mint,
+      'LAYA_EXIT',
+      executablePnlPct,
+      executableSolValue,
+      { exitTokenAmount: tokenAtomicAmount, shouldCloseAta: true }
+    );
+  } catch (err: any) {
+    // Falha da Laya nunca desarma os hard exits do motor determinístico.
+    console.warn(
+      `⚠️ [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:POSITION] ${pos.symbol}: ` +
+      `${err?.message || err}`
+    );
+  } finally {
+    layaPositionInFlight.delete(pos.mint);
+  }
 }
 
 function updateDashboardViews() {
@@ -663,6 +762,15 @@ async function runUltraFastExitMonitor() {
         );
 
         positionEngine.recordQuoteSuccess(pos.mint);
+
+        if (!exitSignal.shouldExit || exitSignal.type === 'HOLD') {
+          void maybeRunLayaTacticalPositionDecision(
+            pos,
+            currentSolValue,
+            pnlPct,
+            Number(sensorPriceUsd || pos.entryPriceUsd)
+          );
+        }
 
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
           // O sensor só arma a saída. A decisão financeira final usa uma cotação
@@ -1155,6 +1263,75 @@ async function executeAutonomousCycle() {
               `⚠️ [Momentum Gate] Falha ao observar ${topCandidate.symbol}: ${momentumErr?.message || momentumErr}`
             );
             continue;
+          }
+        }
+
+        // Laya tática: atua somente depois de todos os hard gates e do momentum.
+        // Em ACTIVE, apenas BUY permite avançar para sizing/Jupiter.
+        if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF') {
+          try {
+            if (!audit.layaFacts) {
+              throw new Error('Fatos on-chain validados ausentes para decisão tática');
+            }
+
+            const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
+            console.log(
+              `🧠 [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:ENTRY] ${topCandidate.symbol} ` +
+              `action=${layaEntry.action} confidence=${layaEntry.confidence.toFixed(4)} ` +
+              `abstention=${layaEntry.abstention ?? 'none'} latencyMs=${layaEntry.latencyMs}`
+            );
+
+            if (SOLANA_LAYA_TACTICAL_MODE === 'ACTIVE' && layaEntry.action !== 'BUY') {
+              const reason = `LAYA_TACTICAL_${layaEntry.action}`;
+              antiSpamMemory.recordVeto(
+                topCandidate.mint,
+                reason,
+                Math.max(SCAN_INTERVAL_MS, 30_000)
+              );
+              journal.logDecision({
+                traceId: currentTraceId,
+                decision: 'ENTRY_REJECTED',
+                compositeScore: audit.score,
+                token: {
+                  mint: topCandidate.mint,
+                  tokenSymbol: topCandidate.symbol,
+                  liquidityUsd: topCandidate.liquidityUsd,
+                  priceUsd: topCandidate.priceUsd,
+                  priceChange5mPct: topCandidate.priceChangeM5,
+                  buysCount5m: topCandidate.buysM5,
+                  sellsCount5m: topCandidate.sellsM5,
+                  buySellRatio,
+                  volume5mUsd: topCandidate.volume5mUsd
+                },
+                market: {
+                  sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+                  sessionHourUtc: new Date().getUTCHours(),
+                  isWeekend: [0, 6].includes(new Date().getUTCDay())
+                },
+                gateEvaluations: gates,
+                rejectionReason: reason,
+                metadata: {
+                  phase: 'LAYA_TACTICAL_ENTRY',
+                  layaAction: layaEntry.action,
+                  layaConfidence: layaEntry.confidence,
+                  layaAbstention: layaEntry.abstention ?? null
+                }
+              });
+              continue;
+            }
+          } catch (layaEntryErr: any) {
+            console.warn(
+              `⚠️ [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:ENTRY] falha em ${topCandidate.symbol}: ` +
+              `${layaEntryErr?.message || layaEntryErr}`
+            );
+            if (SOLANA_LAYA_TACTICAL_MODE === 'ACTIVE') {
+              antiSpamMemory.recordVeto(
+                topCandidate.mint,
+                'LAYA_TACTICAL_UNAVAILABLE',
+                Math.max(SCAN_INTERVAL_MS, 30_000)
+              );
+              continue;
+            }
           }
         }
 

@@ -10,7 +10,7 @@ export interface ClosedTradeView {
   exitTimestamp: number;
   pnlPct: number;
   pnlSolEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'HOLD';
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
@@ -83,7 +83,8 @@ const EXIT_REASON_LABELS: Record<string, { label: string; cls: string }> = {
   TRAILING_STOP: { label: 'Trailing Stop', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
   TIME_STOP: { label: 'Time-Stop', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
   TAKE_PROFIT: { label: 'Take Profit', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
-  MANUAL: { label: 'Manual / Pânico', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30' }
+  MANUAL: { label: 'Manual / Pânico', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30' },
+  LAYA_EXIT: { label: 'Saída Tática Laya', cls: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' }
 };
 
 function renderClosedTradesSection(state: DashboardState): string {
@@ -580,7 +581,8 @@ export function renderDashboardHtml(state: DashboardState): string {
               TRAILING_STOP: ['Trailing Stop', 'bg-amber-500/15 text-amber-300 border-amber-500/30'],
               TIME_STOP: ['Time-Stop', 'bg-slate-500/15 text-slate-300 border-slate-500/30'],
               TAKE_PROFIT: ['Take Profit', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],
-              MANUAL: ['Manual / Pânico', 'bg-purple-500/15 text-purple-300 border-purple-500/30']
+              MANUAL: ['Manual / Pânico', 'bg-purple-500/15 text-purple-300 border-purple-500/30'],
+              LAYA_EXIT: ['Saída Tática Laya', 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30']
             };
             tradesTbody.innerHTML = closed.map(function (t) {
               var pnlPct = Number(t.pnlPct || 0);

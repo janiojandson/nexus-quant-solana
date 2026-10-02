@@ -22,6 +22,7 @@ export type DecisionType =
   | 'EXIT_TIME_STOP'
   | 'EXIT_WATCHDOG'
   | 'EXIT_PANIC'
+  | 'EXIT_LAYA'
   | 'ABORTED_LATENCY';
 
 export type GateName =

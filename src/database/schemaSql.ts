@@ -26,11 +26,15 @@ DO $$ BEGIN
     'EXIT_TIME_STOP',
     'EXIT_WATCHDOG',
     'EXIT_PANIC',
+    'EXIT_LAYA',
     'ABORTED_LATENCY'
   );
 EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
+
+-- Migração idempotente para bancos criados antes da decisão tática Laya.
+ALTER TYPE decision_type ADD VALUE IF NOT EXISTS 'EXIT_LAYA';
 
 DO $$ BEGIN
   CREATE TYPE gate_name AS ENUM (

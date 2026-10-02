@@ -51,9 +51,9 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
   assert.strictEqual(seenHeaders.Authorization, 'Bearer secret-test');
   assert.strictEqual(seenPayload.state.domain, 'solana_memecoin');
   assert.match(seenPayload.state.body, /filtros determinísticos obrigatórios/);
-  assert.match(seenPayload.state.body, /não autoriza compra, venda, sizing ou execução financeira/);
+  assert.match(seenPayload.state.body, /Regras de segurança e execução continuam fora da Laya/);
   assert.strictEqual(seenPayload.state.contractVersion, 'solana-laya/v1');
-  assert.strictEqual(seenPayload.state.deterministicGatesPassed, true);
+  assert.strictEqual(seenPayload.state.hardSafetyGatesRemainAuthoritative, true);
   assert.strictEqual(seenPayload.questions.route.type, 'choice');
   assert.deepStrictEqual(Object.keys(seenPayload.questions), ['route']);
   assert.strictEqual(seenPayload.min_confidence, 0.85);
@@ -71,7 +71,7 @@ test('SolanaLayaAdapter falha fechado se route ou confiança forem inválidas', 
       answers: { route: { choice: 'BUY', answer_confidence: 0.99 } }
     } }) } as any
   });
-  await assert.rejects(() => invalidAction.evaluate(FACTS), /route inválida/);
+  await assert.rejects(() => invalidAction.evaluate(FACTS), /ação inválida em PRE_ENTRY_TRIAGE/);
 
   const invalidConfidence = new SolanaLayaAdapter({
     baseUrl: 'https://laya.example',
@@ -105,4 +105,74 @@ test('SolanaLayaAdapter exige SOLANA_LAYA_API_KEY e ignora LAYA_API_KEY genéric
     if (oldGeneric === undefined) delete process.env.LAYA_API_KEY;
     else process.env.LAYA_API_KEY = oldGeneric;
   }
+});
+
+test('SolanaLayaAdapter decide entrada BUY/WAIT/ABSTAIN pelo contrato original', async () => {
+  let seenPayload: any;
+  const adapter = new SolanaLayaAdapter({
+    baseUrl: 'https://laya.example',
+    apiKey: 'k',
+    httpClient: {
+      post: async (_url: string, payload: any) => {
+        seenPayload = payload;
+        return {
+          data: {
+            answers: {
+              action: { choice: 'BUY', answer_confidence: 0.91, abstention: 'passed' }
+            },
+            routing: { model: 'multilingual' }
+          }
+        };
+      }
+    } as any
+  });
+
+  const result = await adapter.evaluateEntry(FACTS);
+  assert.strictEqual(seenPayload.state.stage, 'ENTRY_DECISION');
+  assert.strictEqual(seenPayload.state.contractVersion, 'solana-laya-entry/v1');
+  assert.deepStrictEqual(Object.keys(seenPayload.questions), ['action']);
+  assert.deepStrictEqual(Object.keys(seenPayload.questions.action.criteria), ['BUY', 'WAIT', 'ABSTAIN']);
+  assert.strictEqual(seenPayload.min_confidence, 0.85);
+  assert.strictEqual(result.action, 'BUY');
+  assert.strictEqual(result.confidence, 0.91);
+});
+
+test('SolanaLayaAdapter força ABSTAIN quando a Laya sinaliza baixa confiança em posição aberta', async () => {
+  const adapter = new SolanaLayaAdapter({
+    baseUrl: 'https://laya.example',
+    apiKey: 'k',
+    httpClient: {
+      post: async () => ({
+        data: {
+          answers: {
+            action: {
+              choice: 'EXIT',
+              answer_confidence: 0.42,
+              abstention: 'abstained',
+              low_confidence: true
+            }
+          },
+          routing: { model: 'multilingual' }
+        }
+      })
+    } as any
+  });
+
+  const result = await adapter.evaluatePosition({
+    mint: FACTS.mint,
+    symbol: 'TEST',
+    pnlPct: 0.04,
+    peakPnlPct: 0.09,
+    holdingSeconds: 120,
+    partialTaken: false,
+    currentPriceUsd: 0.00104,
+    entryPriceUsd: 0.001,
+    lastKnownLiquidityUsd: 45_000,
+    lastKnownVolume5mUsd: 12_000,
+    trailingActive: true,
+    stopLossPct: -0.06
+  });
+
+  assert.strictEqual(result.action, 'ABSTAIN');
+  assert.strictEqual(result.lowConfidence, true);
 });

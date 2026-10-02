@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { RugCheckService } from './rugCheckService.js';
-import { SolanaLayaAdapter, type SolanaLayaDecision } from './solanaLayaAdapter.js';
+import { SolanaLayaAdapter, type SolanaLayaDecision, type SolanaLayaFacts } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
@@ -32,6 +32,8 @@ export interface SecurityAuditResult {
   validatedBy: 'RUGCHECK_API' | 'LOCAL_HEURISTICS_FALLBACK' | 'MACRO_CIRCUIT_BREAKER' | 'DETERMINISTIC_SOLANA_PIPELINE';
   latencyMs?: number;
   layaNativeShadow?: SolanaLayaDecision;
+  /** Fatos on-chain já validados para decisões táticas posteriores da Laya. */
+  layaFacts?: SolanaLayaFacts;
 }
 
 export interface MemeGatekeeperConfig {
@@ -181,25 +183,27 @@ export class MemeRiskGatekeeper {
       };
     }
 
+    const layaFacts: SolanaLayaFacts = {
+      mint: token.mint,
+      liquidityUsd: token.liquidityUsd,
+      holdersCount: rugReport.holdersCount,
+      mintAuthorityRevoked: rugReport.mintAuthority === null,
+      freezeAuthorityRevoked: rugReport.freezeAuthority === null,
+      rugCheckScore: rugReport.score,
+      lpLockedPct: rugReport.lpLockedPct,
+      topHoldersPct: rugReport.topHoldersPct,
+      priceChangeM5: token.priceChangeM5,
+      buysM5: token.buysM5,
+      sellsM5: token.sellsM5,
+      volumeBuysM5: token.volumeBuysM5,
+      volumeSellsM5: token.volumeSellsM5,
+      priceUsd: token.priceUsd,
+      h1HighPriceUsd: token.h1HighPriceUsd
+    };
+
     if (this.layaNativeShadowEnabled) {
       try {
-        layaNativeShadow = await this.solanaLayaAdapter.evaluate({
-          mint: token.mint,
-          liquidityUsd: token.liquidityUsd,
-          holdersCount: rugReport.holdersCount,
-          mintAuthorityRevoked: rugReport.mintAuthority === null,
-          freezeAuthorityRevoked: rugReport.freezeAuthority === null,
-          rugCheckScore: rugReport.score,
-          lpLockedPct: rugReport.lpLockedPct,
-          topHoldersPct: rugReport.topHoldersPct,
-          priceChangeM5: token.priceChangeM5,
-          buysM5: token.buysM5,
-          sellsM5: token.sellsM5,
-          volumeBuysM5: token.volumeBuysM5,
-          volumeSellsM5: token.volumeSellsM5,
-          priceUsd: token.priceUsd,
-          h1HighPriceUsd: token.h1HighPriceUsd
-        });
+        layaNativeShadow = await this.solanaLayaAdapter.evaluate(layaFacts);
         console.log(
           `[LayaNative:SHADOW] mint=${token.mint} route=${layaNativeShadow.route} ` +
           `confidence=${layaNativeShadow.routeConfidence.toFixed(4)} abstention=${layaNativeShadow.abstention ?? 'none'} ` +
@@ -216,7 +220,8 @@ export class MemeRiskGatekeeper {
       score: Math.max(50, Math.min(100, 100 - (rugReport.score / 10))),
       validatedBy: 'DETERMINISTIC_SOLANA_PIPELINE',
       latencyMs: Date.now() - startTime,
-      layaNativeShadow
+      layaNativeShadow,
+      layaFacts
     };
   }
 
