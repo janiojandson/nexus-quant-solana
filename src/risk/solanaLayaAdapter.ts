@@ -176,6 +176,25 @@ export class SolanaLayaAdapter {
     };
   }
 
+  /** Probe operacional sem efeito financeiro. Valida conectividade e checkpoint carregado. */
+  public async checkHealth(): Promise<{ ok: boolean; loaded: string[]; latencyMs: number }> {
+    this.assertConfigured();
+    const started = Date.now();
+    const response = await this.httpClient.get(
+      `${this.baseUrl.replace(/\/$/, '')}/health`,
+      {
+        timeout: this.timeoutMs,
+        headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : undefined
+      }
+    );
+    const data = response.data || {};
+    return {
+      ok: response.status >= 200 && response.status < 300,
+      loaded: Array.isArray(data.loaded) ? data.loaded.map((x: unknown) => String(x)) : [],
+      latencyMs: Date.now() - started
+    };
+  }
+
   /**
    * Contrato legado de triagem/roteamento.
    * Mantido para observabilidade e compatibilidade do gatekeeper.

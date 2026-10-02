@@ -213,3 +213,22 @@ test('política tática Solana trata ABSTAIN como defer e WAIT como bloqueio', (
   assert.strictEqual(shouldBlockSolanaEntryFromLaya('ABSTAIN'), false);
   assert.strictEqual(shouldBlockSolanaEntryFromLaya('WAIT'), true);
 });
+
+test('SolanaLayaAdapter health usa proxy privado sem bearer e reporta checkpoint', async () => {
+  let seenHeaders: any = null;
+  const adapter = new SolanaLayaAdapter({
+    baseUrl: 'http://nexus-decisor-laya.railway.internal:8001',
+    privateProxy: true,
+    httpClient: {
+      get: async (_url: string, config: any) => {
+        seenHeaders = config.headers;
+        return { status: 200, data: { status: 'ok', loaded: ['multilingual'] } };
+      }
+    } as any
+  });
+
+  const health = await adapter.checkHealth();
+  assert.strictEqual(seenHeaders?.Authorization, undefined);
+  assert.strictEqual(health.ok, true);
+  assert.deepStrictEqual(health.loaded, ['multilingual']);
+});

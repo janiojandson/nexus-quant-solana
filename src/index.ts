@@ -75,6 +75,13 @@ const gatekeeper = new MemeRiskGatekeeper({
   macroSentinelUrl: MACRO_SENTINEL_URL
 });
 const solanaLayaAdapter = new SolanaLayaAdapter();
+void solanaLayaAdapter.checkHealth().then((health) => {
+  console.log(
+    `🧠 [Laya:Health] ok=${health.ok} loaded=${health.loaded.join(',') || 'none'} latencyMs=${health.latencyMs}`
+  );
+}).catch((err: any) => {
+  console.warn(`⚠️ [Laya:Health] indisponível no startup: ${err?.message || err}`);
+});
 const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
 /** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
