@@ -982,9 +982,6 @@ async function executeAutonomousCycle() {
         const audit = await gatekeeper.auditToken({
         mint: topCandidate.mint,
         liquidityUsd: topCandidate.liquidityUsd,
-        mintAuthority: null,
-        freezeAuthority: null,
-        holdersCount: 250,
         priceChangeM5: topCandidate.priceChangeM5,
         buysM5: topCandidate.buysM5,
         sellsM5: topCandidate.sellsM5,

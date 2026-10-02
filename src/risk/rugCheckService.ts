@@ -7,6 +7,10 @@ export interface RugCheckReport {
   isRugged: boolean;
   isSafe: boolean;
   verified: boolean;
+  mintAuthority?: string | null;
+  freezeAuthority?: string | null;
+  holdersCount?: number;
+  factsComplete?: boolean;
   lpLockedPct?: number;
   topHoldersPct?: number;
 }
@@ -39,50 +43,69 @@ export class RugCheckService {
 
   public async auditToken(mint: string): Promise<RugCheckReport> {
     try {
-      const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report/summary`;
+      const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
       const response = await this.fetchClient(url);
       const data = response.data || {};
 
       const rawRisks = Array.isArray(data.risks) ? data.risks : [];
       const riskNames = rawRisks.map((r: any) => typeof r === 'string' ? r : (r.name || r.description || 'Risco não especificado'));
 
-      // 1. Verificações Fatais Inegociáveis (Score = 0 / Veto Imediato)
-      const isMintAuthActive = Boolean(data.token?.mintAuthority);
-      const isFreezeAuthActive = Boolean(data.token?.freezeAuthority);
+      const tokenData = data.token && typeof data.token === 'object' ? data.token : {};
+      const hasOwn = (obj: any, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+      const mintAuthorityKnown = hasOwn(tokenData, 'mintAuthority') || hasOwn(data, 'mintAuthority');
+      const freezeAuthorityKnown = hasOwn(tokenData, 'freezeAuthority') || hasOwn(data, 'freezeAuthority');
+      const mintAuthority = hasOwn(tokenData, 'mintAuthority') ? tokenData.mintAuthority : data.mintAuthority;
+      const freezeAuthority = hasOwn(tokenData, 'freezeAuthority') ? tokenData.freezeAuthority : data.freezeAuthority;
+      const holdersRaw = Number(data.totalHolders);
+      const holdersCount = Number.isFinite(holdersRaw) && holdersRaw >= 0 ? holdersRaw : undefined;
+
+      // 1. Verificações fatais inequívocas. Campo ausente nunca significa autoridade revogada.
+      const isMintAuthActive = mintAuthorityKnown && Boolean(mintAuthority);
+      const isFreezeAuthActive = freezeAuthorityKnown && Boolean(freezeAuthority);
       const isRugged = Boolean(data.rugged) || isMintAuthActive || isFreezeAuthActive;
 
-      // 2. Extração de métricas de LP trancada/queimada
-      let lpLockedPct = 100;
+      // 2. Extração de métricas de LP trancada/queimada. Ausência permanece UNKNOWN.
+      const directLp = Number(data.lpLockedPct);
+      let lpLockedPct: number | undefined = Number.isFinite(directLp) ? directLp : undefined;
       if (Array.isArray(data.markets)) {
         const raydiumMarket = data.markets.find((m: any) => m.lp);
         if (raydiumMarket?.lp) {
-          const locked = Number(raydiumMarket.lp.lpLockedPct || raydiumMarket.lp.lpLocked || 0);
-          const burned = Number(raydiumMarket.lp.lpBurnedPct || raydiumMarket.lp.lpBurned || 0);
-          lpLockedPct = Math.max(locked, burned);
+          const locked = Number(raydiumMarket.lp.lpLockedPct ?? raydiumMarket.lp.lpLocked ?? NaN);
+          const burned = Number(raydiumMarket.lp.lpBurnedPct ?? raydiumMarket.lp.lpBurned ?? NaN);
+          const candidates = [locked, burned].filter(Number.isFinite);
+          if (candidates.length > 0) lpLockedPct = Math.max(...candidates);
         }
       }
 
-      // Se o RugCheck apontar "Large Amount of LP Unlocked", verifica se há queima de 100%
       const hasUnlockedLpRisk = rawRisks.some((r: any) => {
         const name = (typeof r === 'string' ? r : (r.name || '')).toLowerCase();
         return name.includes('large amount of lp unlocked');
       });
-
-      if (hasUnlockedLpRisk && lpLockedPct < 90) {
-        lpLockedPct = 0; // Confirma risco fatal de LP destrancada
+      if (hasUnlockedLpRisk && (lpLockedPct ?? 0) < 90) {
+        lpLockedPct = 0;
       }
 
-      // 3. Extração e Sanitização dos Top Holders (ignora AMM/Raydium Pool)
-      let topHoldersPct = 0;
+      // 3. Top holders e completude dos fatos críticos.
+      let topHoldersPct: number | undefined;
       if (Array.isArray(data.topHolders)) {
         const nonAmmHolders = data.topHolders.filter((h: any) => !h.isLpPool && !h.owner?.includes('Raydium') && !h.address?.includes('11111111111111111111111111111111'));
         topHoldersPct = nonAmmHolders.slice(0, 5).reduce((acc: number, h: any) => acc + Number(h.pct || 0), 0);
       }
 
-      // 4. Avaliação de Riscos Fatais vs Penalidades Benignas
-      let fatalRiskDetected = false;
-      const fatalReasons: string[] = [];
+      const missingFacts: string[] = [];
+      if (!mintAuthorityKnown) missingFacts.push('mintAuthority');
+      if (!freezeAuthorityKnown) missingFacts.push('freezeAuthority');
+      if (holdersCount === undefined) missingFacts.push('totalHolders');
+      if (lpLockedPct === undefined) missingFacts.push('lpLockedPct');
+      if (!Array.isArray(data.topHolders)) missingFacts.push('topHolders');
+      const factsComplete = missingFacts.length === 0;
 
+      // 4. Avaliação de riscos fatais vs penalidades benignas.
+      let fatalRiskDetected = !factsComplete;
+      const fatalReasons: string[] = [];
+      if (!factsComplete) {
+        fatalReasons.push(`RugCheck sem fatos críticos: ${missingFacts.join(', ')}`);
+      }
       if (isMintAuthActive) {
         fatalRiskDetected = true;
         fatalReasons.push('Mint Authority Ativa');
@@ -95,11 +118,11 @@ export class RugCheckService {
         fatalRiskDetected = true;
         fatalReasons.push('Contrato Marcado como Rugged');
       }
-      if (lpLockedPct < 90) {
+      if (lpLockedPct !== undefined && lpLockedPct < 90) {
         fatalRiskDetected = true;
         fatalReasons.push(`LP Trancada/Queimada insuficiente (${lpLockedPct.toFixed(1)}% < 90%)`);
       }
-      if (topHoldersPct > 35) {
+      if (topHoldersPct !== undefined && topHoldersPct > 35) {
         fatalRiskDetected = true;
         fatalReasons.push(`Concentração excessiva de Top 5 Holders (${topHoldersPct.toFixed(1)}% > 35%)`);
       }
@@ -138,9 +161,13 @@ export class RugCheckService {
         mint,
         score: finalScore,
         risks: fatalReasons.length > 0 ? fatalReasons : riskNames,
-        isRugged: fatalRiskDetected,
+        isRugged,
         isSafe,
         verified: Boolean(data.verification?.verified),
+        mintAuthority: mintAuthorityKnown ? (mintAuthority ?? null) : undefined,
+        freezeAuthority: freezeAuthorityKnown ? (freezeAuthority ?? null) : undefined,
+        holdersCount,
+        factsComplete,
         lpLockedPct,
         topHoldersPct
       };
@@ -153,6 +180,7 @@ export class RugCheckService {
         isRugged: false,
         isSafe: false,
         verified: false,
+        factsComplete: false,
         lpLockedPct: 0,
         topHoldersPct: 100
       };

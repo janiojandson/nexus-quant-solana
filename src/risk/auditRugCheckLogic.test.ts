@@ -9,6 +9,9 @@ test('AuditRugCheck: Payload A (Golpe Real / Honeypot) deve ser VETADO', async (
       mintAuthority: 'ScamDev1111111111111111111111111111111111',
       freezeAuthority: 'ScamDev1111111111111111111111111111111111'
     },
+    totalHolders: 250,
+    markets: [{ lp: { lpLockedPct: 95 } }],
+    topHolders: [{ pct: 5 }, { pct: 4 }],
     risks: [
       { name: 'Mint Authority Enabled', score: 1000, level: 'danger' },
       { name: 'Freeze Authority Enabled', score: 1000, level: 'danger' }
@@ -37,6 +40,7 @@ test('AuditRugCheck: Payload B (Token Pump.fun Legítimo Migrado) deve ser APROV
     tokenMeta: {
       mutable: true
     },
+    totalHolders: 650,
     markets: [
       {
         marketType: 'pump_fun_amm',

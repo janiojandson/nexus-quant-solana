@@ -1,12 +1,13 @@
 import axios from 'axios';
 import { RugCheckService } from './rugCheckService.js';
+import { SolanaLayaAdapter } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
   liquidityUsd: number;
-  mintAuthority: string | null;
-  freezeAuthority: string | null;
-  holdersCount: number;
+  mintAuthority?: string | null;
+  freezeAuthority?: string | null;
+  holdersCount?: number;
   buyTaxPct?: number;
   sellTaxPct?: number;
   priceChangeM5?: number;
@@ -40,6 +41,8 @@ export interface MemeGatekeeperConfig {
   minLiquidityUsd?: number;
   minHolders?: number;
   rugCheckService?: RugCheckService;
+  solanaLayaAdapter?: SolanaLayaAdapter;
+  layaNativeShadowEnabled?: boolean;
 }
 
 export class MemeRiskGatekeeper {
@@ -50,6 +53,8 @@ export class MemeRiskGatekeeper {
   private minLiquidityUsd: number;
   private minHolders: number;
   private rugCheckService: RugCheckService;
+  private solanaLayaAdapter: SolanaLayaAdapter;
+  private layaNativeShadowEnabled: boolean;
 
   constructor(config?: MemeGatekeeperConfig) {
     // Malha interna do Railway ou URL configurada
@@ -62,6 +67,9 @@ export class MemeRiskGatekeeper {
     this.minLiquidityUsd = config?.minLiquidityUsd || 15000;
     this.minHolders = config?.minHolders || 100;
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
+    this.solanaLayaAdapter = config?.solanaLayaAdapter || new SolanaLayaAdapter();
+    this.layaNativeShadowEnabled = config?.layaNativeShadowEnabled
+      ?? process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true';
   }
 
   public async checkMacroCircuitBreaker(): Promise<{ isBreakerActive: boolean; regime?: string }> {
@@ -86,7 +94,7 @@ export class MemeRiskGatekeeper {
     const startTime = Date.now();
 
     // 1. Pré-Filtro Local Imediato (0ms): Honeypot e Risco de Rug Pull
-    if (token.mintAuthority !== null) {
+    if (typeof token.mintAuthority === 'string' && token.mintAuthority.length > 0) {
       return {
         safe: false,
         reason: 'Risco de honeypot: mintAuthority ativo (o desenvolvedor pode emitir tokens infinitos).',
@@ -96,7 +104,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    if (token.freezeAuthority !== null) {
+    if (typeof token.freezeAuthority === 'string' && token.freezeAuthority.length > 0) {
       return {
         safe: false,
         reason: 'Risco de congelamento: freezeAuthority ativo (sua carteira pode ser bloqueada para venda).',
@@ -116,7 +124,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    if (token.holdersCount < this.minHolders) {
+    if (token.holdersCount !== undefined && token.holdersCount < this.minHolders) {
       return {
         safe: false,
         reason: `Base de detentores frágil: ${token.holdersCount} holders < Mínimo seguro de ${this.minHolders}.`,
@@ -162,6 +170,56 @@ export class MemeRiskGatekeeper {
       };
     }
 
+    if (rugReport.factsComplete !== true || rugReport.holdersCount === undefined) {
+      return {
+        safe: false,
+        reason: 'RugCheck não forneceu todos os fatos críticos do contrato. Entrada bloqueada por fail-closed.',
+        score: 0,
+        validatedBy: 'RUGCHECK_API',
+        latencyMs: Date.now() - startTime
+      };
+    }
+
+    if (rugReport.holdersCount < this.minHolders) {
+      return {
+        safe: false,
+        reason: `Base de detentores frágil: ${rugReport.holdersCount} holders < Mínimo seguro de ${this.minHolders}.`,
+        score: 25,
+        validatedBy: 'RUGCHECK_API',
+        latencyMs: Date.now() - startTime
+      };
+    }
+
+    if (this.layaNativeShadowEnabled) {
+      try {
+        const shadow = await this.solanaLayaAdapter.evaluate({
+          mint: token.mint,
+          liquidityUsd: token.liquidityUsd,
+          holdersCount: rugReport.holdersCount,
+          mintAuthorityRevoked: rugReport.mintAuthority === null,
+          freezeAuthorityRevoked: rugReport.freezeAuthority === null,
+          rugCheckScore: rugReport.score,
+          lpLockedPct: rugReport.lpLockedPct,
+          topHoldersPct: rugReport.topHoldersPct,
+          priceChangeM5: token.priceChangeM5,
+          buysM5: token.buysM5,
+          sellsM5: token.sellsM5,
+          volumeBuysM5: token.volumeBuysM5,
+          volumeSellsM5: token.volumeSellsM5,
+          priceUsd: token.priceUsd,
+          h1HighPriceUsd: token.h1HighPriceUsd
+        });
+        console.log(
+          `[LayaNative:SHADOW] mint=${token.mint} action=${shadow.action} ` +
+          `confidence=${shadow.actionConfidence.toFixed(4)} risk=${shadow.residualRiskScore ?? 'n/a'} ` +
+          `review=${shadow.needsDeeperReview ?? 'n/a'} model=${shadow.routingModel ?? 'n/a'} ` +
+          `latencyMs=${shadow.latencyMs}`
+        );
+      } catch (shadowErr: any) {
+        console.warn(`[LayaNative:SHADOW] falha sem impacto na decisão: ${shadowErr?.message || shadowErr}`);
+      }
+    }
+
     // 3. Consulta à Ayla/Laya (Decisão Reflexiva com timeout tolerante de até 4000ms)
     // Padrão: malha interna do Railway (sem custo de egressa, latência mínima).
     // Fallback: URL pública via internet, apenas se a interna falhar por DNS/conexão.
@@ -174,9 +232,12 @@ export class MemeRiskGatekeeper {
         context: 'SOLANA_MEMECOIN_AUDIT',
         targetMint: token.mint,
         liquidityUsd: token.liquidityUsd,
-        holdersCount: token.holdersCount,
-        mintAuthority: token.mintAuthority,
-        freezeAuthority: token.freezeAuthority,
+        holdersCount: rugReport.holdersCount,
+        mintAuthority: rugReport.mintAuthority ?? null,
+        freezeAuthority: rugReport.freezeAuthority ?? null,
+        rugCheckScore: rugReport.score,
+        lpLockedPct: rugReport.lpLockedPct,
+        topHoldersPct: rugReport.topHoldersPct,
         buyTaxPct: token.buyTaxPct,
         sellTaxPct: token.sellTaxPct,
         priceChangeM5: token.priceChangeM5,

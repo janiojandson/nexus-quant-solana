@@ -10,6 +10,9 @@ test('RugCheckService: deve aprovar token seguro com score baixo e sem honeypot'
         mintAuthority: null,
         freezeAuthority: null
       },
+      totalHolders: 500,
+      markets: [{ lp: { lpLockedPct: 95 } }],
+      topHolders: [{ pct: 4 }, { pct: 3 }, { pct: 2 }],
       risks: [
         { name: 'Low Liquidity', level: 'warn', description: 'Liquidez moderada' }
       ],
@@ -34,6 +37,9 @@ test('RugCheckService: deve vetar token com mintAuthority ativo ou score de peri
         mintAuthority: 'DevMalicioso1111111111111111111111111111111',
         freezeAuthority: null
       },
+      totalHolders: 500,
+      markets: [{ lp: { lpLockedPct: 95 } }],
+      topHolders: [{ pct: 4 }, { pct: 3 }],
       risks: [
         { name: 'Mint Authority Enabled', level: 'danger', description: 'Dev pode cunhar infinitos tokens' }
       ],
@@ -58,6 +64,9 @@ test('RugCheckService: deve vetar se freezeAuthority for ativa', async () => {
         mintAuthority: null,
         freezeAuthority: 'FreezeDev1111111111111111111111111111111111'
       },
+      totalHolders: 500,
+      markets: [{ lp: { lpLockedPct: 95 } }],
+      topHolders: [{ pct: 4 }, { pct: 3 }],
       risks: [],
       rugged: false
     }
@@ -74,6 +83,7 @@ test('RugCheckService: deve vetar se top 5 holders possuírem mais de 35% do sup
     data: {
       score: 100,
       token: { mintAuthority: null, freezeAuthority: null },
+      totalHolders: 500,
       markets: [{ lp: { lpLockedPct: 95 } }],
       topHolders: [{ pct: 15 }, { pct: 12 }, { pct: 10 }] // Top 3 = 37% > 35%
     }
@@ -85,3 +95,47 @@ test('RugCheckService: deve vetar se top 5 holders possuírem mais de 35% do sup
   assert.ok(report.risks.some(r => r.includes('Top 5 Holders')));
 });
 
+
+test('RugCheckService: usa o relatório completo /report, nunca /report/summary', async () => {
+  let seenUrl = '';
+  const service = new RugCheckService({
+    fetchClient: async (url: string) => {
+      seenUrl = url;
+      return {
+        data: {
+          token: { mintAuthority: null, freezeAuthority: null },
+          totalHolders: 500,
+          lpLockedPct: 95,
+          topHolders: [],
+          markets: [],
+          risks: [],
+          rugged: false
+        }
+      };
+    }
+  });
+
+  await service.auditToken('MintUrl111111111111111111111111111111111');
+  assert.match(seenUrl, /\/report$/);
+  assert.doesNotMatch(seenUrl, /\/report\/summary$/);
+});
+
+test('RugCheckService: campo crítico ausente deve bloquear em fail-closed', async () => {
+  const service = new RugCheckService({
+    fetchClient: async () => ({
+      data: {
+        score: 100,
+        token: {},
+        risks: [],
+        rugged: false
+      }
+    })
+  });
+
+  const report = await service.auditToken('MintIncomplete111111111111111111111111111111');
+  assert.strictEqual(report.isSafe, false);
+  assert.strictEqual(report.factsComplete, false);
+  assert.match(report.risks.join(' | '), /RugCheck sem fatos críticos/);
+  assert.match(report.risks.join(' | '), /mintAuthority/);
+  assert.match(report.risks.join(' | '), /totalHolders/);
+});

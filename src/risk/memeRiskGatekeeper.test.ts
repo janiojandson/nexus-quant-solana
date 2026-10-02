@@ -48,7 +48,13 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
         risks: [],
         isRugged: false,
         isSafe: true,
-        verified: true
+        verified: true,
+        mintAuthority: null,
+        freezeAuthority: null,
+        holdersCount: 320,
+        factsComplete: true,
+        lpLockedPct: 95,
+        topHoldersPct: 12
       })
     };
 
@@ -214,7 +220,13 @@ it('envia LAYA_API_KEY via x-laya-key sem alterar o payload de decisão', async 
         risks: [],
         isRugged: false,
         isSafe: true,
-        verified: true
+        verified: true,
+        mintAuthority: null,
+        freezeAuthority: null,
+        holdersCount: 320,
+        factsComplete: true,
+        lpLockedPct: 95,
+        topHoldersPct: 12
       })
     };
 
