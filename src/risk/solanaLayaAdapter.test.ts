@@ -43,13 +43,13 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
   } as any;
 
   const adapter = new SolanaLayaAdapter({
-    baseUrl: 'http://laya-next.internal:8080/',
+    baseUrl: 'http://nexus-decisor-laya.railway.internal:8000/',
     apiKey: 'secret-test',
     httpClient
   });
   const result = await adapter.evaluate(FACTS);
 
-  assert.strictEqual(seenUrl, 'http://laya-next.internal:8080/v1/systemone');
+  assert.strictEqual(seenUrl, 'http://nexus-decisor-laya.railway.internal:8000/v1/systemone');
   assert.strictEqual(seenHeaders.Authorization, 'Bearer secret-test');
   assert.strictEqual(seenPayload.state.domain, 'solana_memecoin');
   assert.match(seenPayload.state.body, /filtros determinísticos obrigatórios/);

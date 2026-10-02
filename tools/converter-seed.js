@@ -48,8 +48,10 @@ AGENT_SOLANA_PRIVATE_KEY=${secretKeyArray}
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
 
 # Malha Interna Railway
-LAYA_INTERNAL_URL=http://nexus-decisor-laya.railway.internal:8080
-LAYA_PUBLIC_FALLBACK_URL=https://nexus-decisor-laya-production.up.railway.app
+SOLANA_LAYA_NATIVE_URL=http://nexus-decisor-laya.railway.internal:8000
+SOLANA_LAYA_SHADOW_ENABLED=true
+SOLANA_LAYA_TIMEOUT_MS=4000
+# SOLANA_LAYA_API_KEY deve ser configurada separadamente por secret/reference no Railway
 MERCADO_FINANCEIRO_INTERNAL_URL=http://operacional.railway.internal:4000
 MERCADO_FINANCEIRO_PUBLIC_FALLBACK_URL=https://operacional-production-57d9.up.railway.app
 NEXUS_CEREBRO_INTERNAL_URL=http://nexus-cerebro.railway.internal:3000

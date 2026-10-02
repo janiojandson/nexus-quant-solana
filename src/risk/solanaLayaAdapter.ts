@@ -48,7 +48,7 @@ export class SolanaLayaAdapter {
   constructor(options: SolanaLayaAdapterOptions = {}) {
     this.baseUrl = options.baseUrl
       || process.env.SOLANA_LAYA_NATIVE_URL
-      || 'http://nexus-decisor-laya-next.railway.internal:8080';
+      || 'http://nexus-decisor-laya.railway.internal:8000';
     this.apiKey = options.apiKey || process.env.SOLANA_LAYA_API_KEY || process.env.LAYA_API_KEY;
     this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 4000);
     this.httpClient = options.httpClient || axios;
