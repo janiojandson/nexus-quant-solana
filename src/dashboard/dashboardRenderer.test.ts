@@ -65,3 +65,19 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /p\.stopLossPct !== undefined \? p\.stopLossPct : -6/);
   assert.doesNotMatch(html, /p\.stopLossPct \* 100/);
 });
+
+test('todos os scripts inline gerados pelo dashboard têm sintaxe JavaScript válida', () => {
+  const html = renderDashboardHtml(state);
+  const scripts = Array.from(
+    html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi),
+    match => match[1]
+  ).filter(script => script.trim().length > 0);
+
+  assert.ok(scripts.length > 0);
+  scripts.forEach((script, index) => {
+    assert.doesNotThrow(
+      () => new Function(script),
+      `script inline #${index} deve compilar sem SyntaxError`
+    );
+  });
+});

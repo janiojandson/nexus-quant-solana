@@ -662,7 +662,7 @@ export function renderDashboardHtml(state: DashboardState): string {
     }
 
     async function panicToken(mint, symbol) {
-      if (!confirm('⚡ CONFIRMAR LIQUIDAÇÃO ADMIN:\nLiquidar 100% da posição ' + (symbol || mint) + ' pelo executor seguro. Após confirmação on-chain, o sistema tentará fechar a conta SPL vazia e devolver o rent real à carteira.')) {
+      if (!confirm('⚡ CONFIRMAR LIQUIDAÇÃO ADMIN:\\nLiquidar 100% da posição ' + (symbol || mint) + ' pelo executor seguro. Após confirmação on-chain, o sistema tentará fechar a conta SPL vazia e devolver o rent real à carteira.')) {
         return;
       }
       try {
@@ -680,14 +680,14 @@ export function renderDashboardHtml(state: DashboardState): string {
     }
 
     async function panicAll() {
-      if (!confirm('🚨 PÂNICO GERAL ADMIN\n\nEsta ação arma o circuit breaker, liquida posições rastreadas e holdings SPL positivos não-base, preserva SOL/USDC/USDT e depois varre contas SPL vazias.\n\nDeseja prosseguir?')) {
+      if (!confirm('🚨 PÂNICO GERAL ADMIN\\n\\nEsta ação arma o circuit breaker, liquida posições rastreadas e holdings SPL positivos não-base, preserva SOL/USDC/USDT e depois varre contas SPL vazias.\\n\\nDeseja prosseguir?')) {
         return;
       }
       try {
         const res = await adminFetch('/api/positions/liquidate-all', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
-          alert('🚨 PÂNICO GERAL EXECUTADO COM SUCESSO!\n' + (data.message || ''));
+          alert('🚨 PÂNICO GERAL EXECUTADO COM SUCESSO!\\n' + (data.message || ''));
           pollDashboard();
         } else {
           alert('❌ Falha no pânico geral: ' + (data.error || 'Erro desconhecido'));
@@ -837,7 +837,7 @@ export function renderDashboardHtml(state: DashboardState): string {
                     '</span>') +
                 '</td>' +
                 '<td class="py-4 px-4 md:px-6 text-right font-sans">' +
-                  '<button disabled data-admin-action="true" onclick="panicToken(\'' + p.mint + '\')" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">' +
+                  '<button disabled data-admin-action="true" onclick="panicToken(&quot;' + p.mint + '&quot;)" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">' +
                     'LIQUIDAR POSIÇÃO' +
                   '</button>' +
                 '</td>' +
