@@ -32,9 +32,7 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
       return {
         data: {
           answers: {
-            route: { choice: 'MECHANICAL_PIPELINE', answer_confidence: 0.93 },
-            residual_risk: { score: 0.7, answer_confidence: 0.82 },
-            needs_llm: { noul: 0.18, answer_confidence: 0.82 }
+            route: { choice: 'MECHANICAL_PIPELINE', answer_confidence: 0.93, abstention: 'passed' }
           },
           routing: { model: 'multilingual' }
         }
@@ -43,13 +41,13 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
   } as any;
 
   const adapter = new SolanaLayaAdapter({
-    baseUrl: 'http://nexus-decisor-laya.railway.internal:8000/',
+    baseUrl: 'https://laya.example/',
     apiKey: 'secret-test',
     httpClient
   });
   const result = await adapter.evaluate(FACTS);
 
-  assert.strictEqual(seenUrl, 'http://nexus-decisor-laya.railway.internal:8000/v1/systemone');
+  assert.strictEqual(seenUrl, 'https://laya.example/v1/systemone');
   assert.strictEqual(seenHeaders.Authorization, 'Bearer secret-test');
   assert.strictEqual(seenPayload.state.domain, 'solana_memecoin');
   assert.match(seenPayload.state.body, /filtros determinísticos obrigatórios/);
@@ -57,8 +55,8 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
   assert.strictEqual(seenPayload.state.contractVersion, 'solana-laya/v1');
   assert.strictEqual(seenPayload.state.deterministicGatesPassed, true);
   assert.strictEqual(seenPayload.questions.route.type, 'choice');
-  assert.strictEqual(seenPayload.questions.residual_risk.type, 'score');
-  assert.strictEqual(seenPayload.questions.needs_llm.type, 'noul');
+  assert.deepStrictEqual(Object.keys(seenPayload.questions), ['route']);
+  assert.strictEqual(seenPayload.min_confidence, 0.85);
   assert.match(seenPayload.questions.route.criteria.MECHANICAL_PIPELINE, /regras determinísticas/);
   assert.strictEqual(result.route, 'MECHANICAL_PIPELINE');
   assert.strictEqual(result.routeConfidence, 0.93);
@@ -67,6 +65,7 @@ test('SolanaLayaAdapter usa contrato nativo e Authorization Bearer', async () =>
 
 test('SolanaLayaAdapter falha fechado se route ou confiança forem inválidas', async () => {
   const invalidAction = new SolanaLayaAdapter({
+    baseUrl: 'https://laya.example',
     apiKey: 'k',
     httpClient: { post: async () => ({ data: {
       answers: { route: { choice: 'BUY', answer_confidence: 0.99 } }
@@ -75,6 +74,7 @@ test('SolanaLayaAdapter falha fechado se route ou confiança forem inválidas', 
   await assert.rejects(() => invalidAction.evaluate(FACTS), /route inválida/);
 
   const invalidConfidence = new SolanaLayaAdapter({
+    baseUrl: 'https://laya.example',
     apiKey: 'k',
     httpClient: { post: async () => ({ data: {
       answers: { route: { choice: 'ABSTAIN', answer_confidence: 7 } }
@@ -94,6 +94,7 @@ test('SolanaLayaAdapter exige SOLANA_LAYA_API_KEY e ignora LAYA_API_KEY genéric
     process.env.LAYA_API_KEY = 'legacy-key';
 
     const adapter = new SolanaLayaAdapter({
+      baseUrl: 'https://laya.example',
       httpClient: { post: async () => { throw new Error('não deveria chamar'); } } as any
     });
 

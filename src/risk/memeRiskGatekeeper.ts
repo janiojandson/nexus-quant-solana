@@ -202,9 +202,8 @@ export class MemeRiskGatekeeper {
         });
         console.log(
           `[LayaNative:SHADOW] mint=${token.mint} route=${layaNativeShadow.route} ` +
-          `confidence=${layaNativeShadow.routeConfidence.toFixed(4)} risk=${layaNativeShadow.residualRiskScore ?? 'n/a'} ` +
-          `needsLlm=${layaNativeShadow.needsLlm ?? 'n/a'} model=${layaNativeShadow.routingModel ?? 'n/a'} ` +
-          `latencyMs=${layaNativeShadow.latencyMs}`
+          `confidence=${layaNativeShadow.routeConfidence.toFixed(4)} abstention=${layaNativeShadow.abstention ?? 'none'} ` +
+          `model=${layaNativeShadow.routingModel ?? 'n/a'} latencyMs=${layaNativeShadow.latencyMs}`
         );
       } catch (shadowErr: any) {
         console.warn(`[LayaNative:SHADOW] falha sem impacto na decisão: ${shadowErr?.message || shadowErr}`);

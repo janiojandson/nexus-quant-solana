@@ -2,7 +2,7 @@
 **Módulo:** Nexus Quant Solana
 **Versão do Agente:** 1.0.0
 **Porta do Serviço:** 3009 (`nexus-quant-solana.railway.internal:3009`)
-**Sistema 1 advisory:** Laya upstream ✅ (`http://nexus-decisor-laya.railway.internal:8000`)
+**Sistema 1 advisory:** Laya upstream ✅ (endpoint obrigatório via `SOLANA_LAYA_NATIVE_URL`; sem fallback hardcoded)
 **Carteira Phantom Oficial:** `FBx2SKLDLsdeLM8owxU8MNVPKAfJpLpmpHHRgiZDqBoi`
 
 ---
@@ -58,7 +58,7 @@ Loop Contínuo (a cada 30 segundos)
 | **nexus-cerebro** | **3000** | `nexus-cerebro.railway.internal:3000` | Orquestrador Central |
 | **Mercado Financeiro** | **4000** | `operacional.railway.internal:4000` | MarketFlow Pro / Bybit |
 | **Postgres Principal** | **5432** | `postgres.railway.internal:5432` | Banco Central (Auditoria e Posições) |
-| **nexus-decisor-laya** | **8000** | `nexus-decisor-laya.railway.internal:8000` | Laya upstream — Sistema 1 advisory |
+| **Laya upstream canônica** | dinâmica | `SOLANA_LAYA_NATIVE_URL` | Sistema 1 advisory; nunca contém estratégia Solana |
 
 ---
 

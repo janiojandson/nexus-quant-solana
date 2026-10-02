@@ -23,10 +23,13 @@ export interface SolanaLayaFacts {
 export interface SolanaLayaDecision {
   route: SolanaLayaRoute;
   routeConfidence: number;
+  /** Legacy telemetry fields retained only for backward-compatible readers. */
   residualRiskScore?: number;
   residualRiskConfidence?: number;
   needsLlm?: number;
   needsLlmConfidence?: number;
+  abstention?: string;
+  lowConfidence?: boolean;
   routingModel?: string;
   latencyMs: number;
   raw?: unknown;
@@ -46,15 +49,14 @@ export class SolanaLayaAdapter {
   private readonly httpClient: typeof axios;
 
   constructor(options: SolanaLayaAdapterOptions = {}) {
-    this.baseUrl = options.baseUrl
-      || process.env.SOLANA_LAYA_NATIVE_URL
-      || 'http://nexus-decisor-laya.railway.internal:8000';
+    this.baseUrl = options.baseUrl || process.env.SOLANA_LAYA_NATIVE_URL || '';
     this.apiKey = options.apiKey || process.env.SOLANA_LAYA_API_KEY;
     this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 4000);
     this.httpClient = options.httpClient || axios;
   }
 
   public async evaluate(facts: SolanaLayaFacts): Promise<SolanaLayaDecision> {
+    if (!this.baseUrl) throw new Error('SOLANA_LAYA_NATIVE_URL ausente para contrato nativo');
     if (!this.apiKey) throw new Error('SOLANA_LAYA_API_KEY ausente para contrato nativo');
 
     const body = [
@@ -86,18 +88,10 @@ export class SolanaLayaAdapter {
             DEEP_REVIEW: 'Contexto ambíguo ou conflitante; exige análise deliberada adicional antes de prosseguir.',
             ABSTAIN: 'Informação insuficiente para uma triagem confiável.'
           }
-        },
-        residual_risk: {
-          type: 'score',
-          instructions: 'Qual o risco operacional residual deste contexto para fins de triagem?',
-          criteria: ['baixo', 'moderado', 'alto', 'crítico']
-        },
-        needs_llm: {
-          type: 'noul',
-          instructions: 'Este contexto exige análise deliberada adicional por um LLM antes de continuar?'
         }
       },
-      lang: 'pt'
+      lang: 'pt',
+      min_confidence: Number(process.env.SOLANA_LAYA_MIN_CONFIDENCE || 0.85)
     };
 
     const started = Date.now();
@@ -122,18 +116,14 @@ export class SolanaLayaAdapter {
       throw new Error('Laya nativa retornou answer_confidence inválida');
     }
 
-    const riskAnswer = data.answers?.residual_risk;
-    const needsLlmAnswer = data.answers?.needs_llm;
+    const abstention = typeof routeAnswer?.abstention === 'string' ? routeAnswer.abstention : undefined;
+    const lowConfidence = routeAnswer?.low_confidence === true || abstention === 'abstained';
 
     return {
-      route: rawRoute as SolanaLayaRoute,
+      route: (lowConfidence ? 'ABSTAIN' : rawRoute) as SolanaLayaRoute,
       routeConfidence,
-      residualRiskScore: Number.isFinite(Number(riskAnswer?.score)) ? Number(riskAnswer.score) : undefined,
-      residualRiskConfidence: Number.isFinite(Number(riskAnswer?.answer_confidence))
-        ? Number(riskAnswer.answer_confidence) : undefined,
-      needsLlm: Number.isFinite(Number(needsLlmAnswer?.noul)) ? Number(needsLlmAnswer.noul) : undefined,
-      needsLlmConfidence: Number.isFinite(Number(needsLlmAnswer?.answer_confidence))
-        ? Number(needsLlmAnswer.answer_confidence) : undefined,
+      abstention,
+      lowConfidence,
       routingModel: typeof data.routing?.model === 'string' ? data.routing.model : undefined,
       latencyMs: Date.now() - started,
       raw: data
