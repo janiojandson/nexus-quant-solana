@@ -86,16 +86,22 @@ test('SolanaLayaAdapter falha fechado se route ou confiança forem inválidas', 
   );
 });
 
-test('SolanaLayaAdapter exige credencial', async () => {
-  const adapter = new SolanaLayaAdapter({
-    apiKey: '',
-    httpClient: { post: async () => { throw new Error('não deveria chamar'); } } as any
-  });
-  const old = process.env.LAYA_API_KEY;
-  delete process.env.LAYA_API_KEY;
+test('SolanaLayaAdapter exige SOLANA_LAYA_API_KEY e ignora LAYA_API_KEY genérica', async () => {
+  const oldSolana = process.env.SOLANA_LAYA_API_KEY;
+  const oldGeneric = process.env.LAYA_API_KEY;
   try {
-    await assert.rejects(() => adapter.evaluate(FACTS), /LAYA_API_KEY ausente/);
+    delete process.env.SOLANA_LAYA_API_KEY;
+    process.env.LAYA_API_KEY = 'legacy-key';
+
+    const adapter = new SolanaLayaAdapter({
+      httpClient: { post: async () => { throw new Error('não deveria chamar'); } } as any
+    });
+
+    await assert.rejects(() => adapter.evaluate(FACTS), /SOLANA_LAYA_API_KEY ausente/);
   } finally {
-    if (old !== undefined) process.env.LAYA_API_KEY = old;
+    if (oldSolana === undefined) delete process.env.SOLANA_LAYA_API_KEY;
+    else process.env.SOLANA_LAYA_API_KEY = oldSolana;
+    if (oldGeneric === undefined) delete process.env.LAYA_API_KEY;
+    else process.env.LAYA_API_KEY = oldGeneric;
   }
 });
