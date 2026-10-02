@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS decision_journal (
 
   -- A decisão
   decision            decision_type NOT NULL,
-  composite_score     SMALLINT     CHECK (composite_score BETWEEN 0 AND 100),
+  composite_score     NUMERIC(5,2) CHECK (composite_score BETWEEN 0 AND 100),
   confidence          confidence_level DEFAULT 'MEDIUM',
 
   -- Contexto do token no momento da decisão (features)
@@ -132,6 +132,22 @@ CREATE TABLE IF NOT EXISTS decision_journal (
 
   PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
+
+-- Migração idempotente: versões anteriores usavam SMALLINT e rejeitavam scores fracionários (ex.: 91.5).
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'decision_journal'
+      AND column_name = 'composite_score'
+      AND data_type = 'smallint'
+  ) THEN
+    ALTER TABLE decision_journal
+      ALTER COLUMN composite_score TYPE NUMERIC(5,2)
+      USING composite_score::numeric;
+  END IF;
+END $$;
 
 -- Índices particionados (herdados por todas as partições)
 CREATE INDEX IF NOT EXISTS idx_dj_mint         ON decision_journal (mint);
