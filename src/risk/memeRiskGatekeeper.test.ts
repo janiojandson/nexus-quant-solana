@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import axios from 'axios';
 import { MemeRiskGatekeeper, TokenSecurityMetadata } from './memeRiskGatekeeper.js';
 
 describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', () => {
@@ -185,3 +186,65 @@ describe('MemeRiskGatekeeper - Auditoria de Memecoins & Governança Ayla/Laya', 
   });
 });
 
+
+it('envia LAYA_API_KEY via x-laya-key sem alterar o payload de decisão', async () => {
+  const originalGet = axios.get;
+  const originalPost = axios.post;
+  let seenHeader: string | undefined;
+
+  try {
+    axios.get = (async () => ({
+      data: { is_circuit_breaker_active: false, regime: 'NEUTRAL_RANGING' }
+    })) as any;
+
+    axios.post = (async (_url: string, _payload: any, config: any) => {
+      seenHeader = config?.headers?.['x-laya-key'];
+      return {
+        data: {
+          success: true,
+          answers: { action: { choice: 'ALLOW', rationale: 'test' } }
+        }
+      };
+    }) as any;
+
+    const mockRugCheck = {
+      auditToken: async () => ({
+        mint: 'MemeAuth111111111111111111111111111111111111',
+        score: 0,
+        risks: [],
+        isRugged: false,
+        isSafe: true,
+        verified: true
+      })
+    };
+
+    const gatekeeper = new MemeRiskGatekeeper({
+      layaBaseUrl: 'http://laya.internal',
+      layaApiKey: 'test-laya-key',
+      macroSentinelUrl: 'http://sentinel.internal',
+      rugCheckService: mockRugCheck as any
+    });
+
+    const audit = await gatekeeper.auditToken({
+      mint: 'MemeAuth111111111111111111111111111111111111',
+      liquidityUsd: 25_000,
+      mintAuthority: null,
+      freezeAuthority: null,
+      holdersCount: 250,
+      priceChangeM5: 10,
+      buysM5: 30,
+      sellsM5: 10,
+      volumeBuysM5: 15_000,
+      volumeSellsM5: 5_000,
+      priceUsd: 0.001,
+      h1HighPriceUsd: 0.0011
+    });
+
+    assert.strictEqual(seenHeader, 'test-laya-key');
+    assert.strictEqual(audit.safe, true);
+    assert.strictEqual(audit.validatedBy, 'AYLA_LAYA_ENGINE');
+  } finally {
+    axios.get = originalGet;
+    axios.post = originalPost;
+  }
+});

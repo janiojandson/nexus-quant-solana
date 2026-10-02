@@ -34,6 +34,7 @@ export interface SecurityAuditResult {
 
 export interface MemeGatekeeperConfig {
   layaBaseUrl?: string;
+  layaApiKey?: string;
   macroSentinelUrl?: string;
   timeoutMs?: number;
   minLiquidityUsd?: number;
@@ -43,6 +44,7 @@ export interface MemeGatekeeperConfig {
 
 export class MemeRiskGatekeeper {
   private layaBaseUrl: string;
+  private layaApiKey?: string;
   private macroSentinelUrl: string;
   private timeoutMs: number;
   private minLiquidityUsd: number;
@@ -52,6 +54,7 @@ export class MemeRiskGatekeeper {
   constructor(config?: MemeGatekeeperConfig) {
     // Malha interna do Railway ou URL configurada
     this.layaBaseUrl = config?.layaBaseUrl || process.env.LAYA_INTERNAL_URL || 'http://nexus-decisor-laya.railway.internal:8000';
+    this.layaApiKey = config?.layaApiKey || process.env.LAYA_API_KEY;
     this.macroSentinelUrl = config?.macroSentinelUrl || process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
     // Tolerância estendida de latência para a CPU da Ayla (padrão 4000ms para acomodar 800ms-1500ms com folga)
     this.timeoutMs = config?.timeoutMs || 4000;
@@ -190,9 +193,14 @@ export class MemeRiskGatekeeper {
       }
     };
 
+    const layaRequestConfig = {
+      timeout: this.timeoutMs,
+      headers: this.layaApiKey ? { 'x-laya-key': this.layaApiKey } : undefined
+    };
+
     let response;
     try {
-      response = await axios.post(`${internalUrl}/v1/systemone`, layaPayload, { timeout: this.timeoutMs });
+      response = await axios.post(`${internalUrl}/v1/systemone`, layaPayload, layaRequestConfig);
     } catch (firstErr: any) {
       // Timeout não tenta fallback: a Laya pode estar processando.
       const isTimeout = firstErr?.code === 'ECONNABORTED' || firstErr?.message?.includes('timeout');
@@ -200,7 +208,7 @@ export class MemeRiskGatekeeper {
 
       try {
         console.warn(`[Ayla/Laya] Malha interna ${internalUrl} falhou (${firstErr?.message || firstErr}). Tentando fallback público...`);
-        response = await axios.post(`${publicUrl}/v1/systemone`, layaPayload, { timeout: this.timeoutMs });
+        response = await axios.post(`${publicUrl}/v1/systemone`, layaPayload, layaRequestConfig);
         console.warn(`[Ayla/Laya] Resposta via fallback público (${publicUrl})`);
       } catch (publicErr: any) {
         console.warn(`[Ayla/Laya] Fallback público também falhou (${publicErr?.message || publicErr}). Usando heurísticas locais.`);
