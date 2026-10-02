@@ -151,7 +151,7 @@ test('handleApiRoutes: deve executar liquidação global via POST /api/positions
   assert.deepStrictEqual(liquidatedMints, ['MintA111', 'MintB222']);
   const resObj = JSON.parse(responseData);
   assert.strictEqual(resObj.results.length, 2);
-  assert.ok(resObj.message.includes('2 posições'));
+  assert.ok(resObj.message.includes('2 exposição(ões) liquidada(s)'));
 });
 
 test('handleApiRoutes: deve executar liquidação avulsa de holding via POST /api/wallet/liquidate-holding', async () => {
@@ -514,4 +514,82 @@ test('handleApiRoutes: /api/positions/liquidate-all não deve chamar panicAll le
   await handleApiRoutes(mockReq, mockRes, mockContext);
   assert.strictEqual(panicAllCalled, false);
   assert.deepStrictEqual(exited, ['SafeA']);
+});
+
+test('handleApiRoutes: mutação protegida aceita sessão JWT ADMIN mesmo sem token legado', async () => {
+  const mockReq = {
+    url: '/api/wallet/sweep-rent',
+    method: 'POST',
+    headers: { authorization: 'Bearer jwt-admin-valido' }
+  } as any;
+
+  let statusCode = 0;
+  let responseData = '';
+  let sweepCalled = false;
+
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: (data: string) => { responseData = data; }
+  } as any;
+
+  const mockContext = {
+    adminToken: '',
+    authService: {
+      isDatabaseAvailable: () => true,
+      verifyAdminToken: (token: string) =>
+        token === 'jwt-admin-valido'
+          ? { userId: 'admin-1', email: 'admin@example.com', role: 'ADMIN', name: 'Admin' }
+          : null
+    },
+    latestState: {},
+    sweepRent: async () => {
+      sweepCalled = true;
+      return {
+        closedCount: 1,
+        reclaimedSolEst: 0.00204,
+        reclaimedSolActual: 0.00203928,
+        txSignatures: ['tx-rent-1'],
+        errors: []
+      };
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(statusCode, 200);
+  assert.strictEqual(sweepCalled, true);
+  const payload = JSON.parse(responseData);
+  assert.strictEqual(payload.success, true);
+  assert.strictEqual(payload.reclaimedSolActual, 0.00203928);
+});
+
+test('handleApiRoutes: JWT inválido não cai para autorização se token legado também não confere', async () => {
+  const mockReq = {
+    url: '/api/positions/TestMint/exit',
+    method: 'POST',
+    headers: { authorization: 'Bearer token-invalido' }
+  } as any;
+
+  let statusCode = 0;
+  let executorCalled = false;
+  const mockRes = {
+    writeHead: (code: number) => { statusCode = code; },
+    end: () => {}
+  } as any;
+
+  const mockContext = {
+    adminToken: 'legacy-diferente',
+    authService: {
+      isDatabaseAvailable: () => true,
+      verifyAdminToken: () => null
+    },
+    latestState: {},
+    executeExitOrder: async () => {
+      executorCalled = true;
+      return { success: true };
+    }
+  } as any;
+
+  await handleApiRoutes(mockReq, mockRes, mockContext);
+  assert.strictEqual(statusCode, 401);
+  assert.strictEqual(executorCalled, false);
 });

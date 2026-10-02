@@ -4,6 +4,8 @@ import type { Pool } from 'pg';
 import { DashboardState, renderDashboardHtml } from '../dashboard/dashboardRenderer.js';
 import type { DecisionLogger } from '../database/decisionJournal.js';
 import { handleJournalRoutes } from './journalRoutes.js';
+import type { SolanaAdminAuthService } from '../auth/adminAuthService.js';
+import { getBearerToken, handleAdminAuthRoutes } from '../auth/adminAuthRoutes.js';
 
 export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
 
@@ -20,6 +22,7 @@ export interface RouteContext {
   getSnapshots?: (limit: number) => Promise<any[]>;
   pgPool?: Pool | null;
   journal?: DecisionLogger | null;
+  authService?: SolanaAdminAuthService;
   adminToken?: string;
   allowedCorsOrigins?: string[];
   enableLegacyPanicApi?: boolean;
@@ -46,29 +49,37 @@ function secureTokenEquals(received: string, expected: string): boolean {
     timingSafeEqual(receivedBuffer, expectedBuffer);
 }
 
-function authorizeMutation(req: IncomingMessage, res: ServerResponse, adminToken?: string): boolean {
+function authorizeMutation(
+  req: IncomingMessage,
+  res: ServerResponse,
+  adminToken?: string,
+  authService?: SolanaAdminAuthService
+): boolean {
+  const receivedToken = getBearerToken(req);
+
+  // Sessão web/admin JWT: caminho preferencial.
+  if (receivedToken && authService?.verifyAdminToken(receivedToken)) {
+    return true;
+  }
+
+  // Compatibilidade temporária para automações/API/CLI existentes.
   const expectedToken = (adminToken || '').trim();
-  if (!expectedToken) {
-    res.writeHead(503, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: false, error: 'Admin API authentication is not configured.' }));
-    return false;
+  if (receivedToken && expectedToken && secureTokenEquals(receivedToken, expectedToken)) {
+    return true;
   }
 
-  const rawHeader = req.headers.authorization;
-  const authHeader = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
-  const prefix = 'Bearer ';
-  const receivedToken = authHeader?.startsWith(prefix) ? authHeader.slice(prefix.length).trim() : '';
-
-  if (!receivedToken || !secureTokenEquals(receivedToken, expectedToken)) {
-    res.writeHead(401, {
-      'Content-Type': 'application/json',
-      'WWW-Authenticate': 'Bearer'
-    });
-    res.end(JSON.stringify({ success: false, error: 'Unauthorized.' }));
-    return false;
-  }
-
-  return true;
+  const authAvailable = Boolean(expectedToken) || Boolean(authService?.isDatabaseAvailable());
+  res.writeHead(authAvailable ? 401 : 503, {
+    'Content-Type': 'application/json',
+    ...(authAvailable ? { 'WWW-Authenticate': 'Bearer' } : {})
+  });
+  res.end(JSON.stringify({
+    success: false,
+    error: authAvailable
+      ? 'Sessão administrativa inválida ou expirada.'
+      : 'Admin API authentication is not configured.'
+  }));
+  return false;
 }
 
 function applyCorsHeaders(
@@ -92,7 +103,7 @@ function applyCorsHeaders(
   }
 
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Admin-Bootstrap');
 }
 
 /**
@@ -118,9 +129,19 @@ export async function handleApiRoutes(
     return true;
   }
 
+  if (pathname.startsWith('/api/auth/')) {
+    if (!ctx.authService) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Serviço de autenticação administrativa indisponível.' }));
+      return true;
+    }
+    const handledAuth = await handleAdminAuthRoutes(req, res, ctx.authService);
+    if (handledAuth) return true;
+  }
+
   if (isProtectedMutation(pathname, method)) {
     const adminToken = ctx.adminToken ?? process.env.NEXUS_ADMIN_TOKEN;
-    if (!authorizeMutation(req, res, adminToken)) {
+    if (!authorizeMutation(req, res, adminToken, ctx.authService)) {
       return true;
     }
   }
@@ -152,6 +173,17 @@ export async function handleApiRoutes(
   // 2. Rota de Estado Global da Máquina Quant (Estrutura Completa & Padronizada)
   if (pathname === '/api/status' && method === 'GET') {
     const s = ctx.latestState;
+    if (ctx.authService) {
+      try {
+        const authStatus = await ctx.authService.getStatus();
+        s.auth = {
+          configured: authStatus.configured,
+          needsBootstrap: authStatus.needsBootstrap
+        };
+      } catch {
+        s.auth = { configured: false, needsBootstrap: false };
+      }
+    }
     const formattedPositions = (s.positions || []).map(p => ({
       mint: p.mint,
       symbol: p.symbol,
@@ -230,6 +262,12 @@ export async function handleApiRoutes(
       walletHoldings: s.walletHoldings || [],
       totalRealizedPnlSol: s.totalRealizedPnlSol,
       totalNetworkFeesSolEst: s.totalNetworkFeesSolEst,
+      operational: {
+        executionMode: s.dryRun ? 'DRY_RUN' : 'REAL_ON_CHAIN',
+        adminAuth: s.auth || { configured: false, needsBootstrap: false },
+        rentRecovery: s.rentRecovery || null,
+        laya: s.laya || null
+      },
 
       // Campos legados mantidos para retrocompatibilidade
       agent: s.agent,
@@ -342,15 +380,55 @@ export async function handleApiRoutes(
     }
 
     if (ctx.getAllOpenPositions && ctx.executeExitOrder) {
+      // Primeiro bloqueia novas entradas. O breaker permanece armado mesmo se uma liquidação falhar.
+      ctx.latestState.circuitBreakerActive = true;
+
       const positions = ctx.getAllOpenPositions();
-      const results = [];
+      const results: any[] = [];
+      const processedMints = new Set<string>();
+
       for (const pos of positions) {
+        processedMints.add(pos.mint);
         const exitResult = await ctx.executeExitOrder(pos.mint, 'MANUAL', 0, 0, { shouldCloseAta: true });
-        results.push({ mint: pos.mint, symbol: pos.symbol, ...exitResult });
+        results.push({ scope: 'POSITION', mint: pos.mint, symbol: pos.symbol, ...exitResult });
       }
 
+      // Zera holdings positivos que existam na carteira mas não estejam no positionEngine.
+      // SOL/wSOL e stablecoins-base são preservados como reserva/colateral.
+      const baseMints = new Set([
+        'So11111111111111111111111111111111111111112',
+        'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+      ]);
+      if (ctx.liquidateHolding) {
+        for (const holding of ctx.latestState.walletHoldings || []) {
+          if (
+            !holding?.mint ||
+            processedMints.has(holding.mint) ||
+            baseMints.has(holding.mint) ||
+            Number(holding.tokenAmount || 0) <= 0
+          ) {
+            continue;
+          }
+          processedMints.add(holding.mint);
+          const holdingResult = await ctx.liquidateHolding({
+            mint: holding.mint,
+            symbol: holding.symbol,
+            amount: holding.tokenAmount,
+            decimals: holding.decimals
+          });
+          results.push({ scope: 'WALLET_HOLDING', mint: holding.mint, symbol: holding.symbol, ...holdingResult });
+        }
+      }
+
+      let rentSweep: any = null;
       if (ctx.sweepRent) {
-        await ctx.sweepRent().catch(() => {});
+        rentSweep = await ctx.sweepRent().catch((err: any) => ({
+          closedCount: 0,
+          reclaimedSolEst: 0,
+          reclaimedSolActual: 0,
+          errors: [err?.message || String(err)]
+        }));
       }
 
       const failures = results.filter((result: any) =>
@@ -358,13 +436,14 @@ export async function handleApiRoutes(
       );
       const liquidationsCount = results.length - failures.length;
 
-      ctx.latestState.circuitBreakerActive = true;
       res.writeHead(failures.length === 0 ? 200 : 207, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         success: failures.length === 0,
+        circuitBreakerActive: true,
         liquidationsCount,
         failureCount: failures.length,
-        message: `${liquidationsCount} posições liquidadas; ${failures.length} falha(s).`,
+        rentSweep,
+        message: `${liquidationsCount} exposição(ões) liquidada(s); ${failures.length} falha(s).`,
         results
       }));
       return true;

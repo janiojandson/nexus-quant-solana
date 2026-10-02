@@ -38,6 +38,31 @@ export interface DashboardState {
   activeRpcUrl: string;
   totalRealizedPnlSol: number;
   totalNetworkFeesSolEst: number;
+  auth?: {
+    configured: boolean;
+    needsBootstrap: boolean;
+  };
+  rentRecovery?: {
+    autoEnabled: boolean;
+    intervalMs: number;
+    inFlight: boolean;
+    lastRunAt?: string;
+    lastClosedCount: number;
+    lastReclaimedSolEst: number;
+    lastReclaimedSolActual: number;
+    totalClosedCount: number;
+    totalReclaimedSolEst: number;
+    totalReclaimedSolActual: number;
+    lastErrors: string[];
+  };
+  laya?: {
+    tacticalMode: string;
+    privateService: boolean;
+    health: 'OK' | 'DEGRADED' | 'UNKNOWN';
+    loaded: string[];
+    latencyMs?: number;
+    lastCheckedAt?: string;
+  };
   incubator?: {
     waiting: number;
     mature: number;
@@ -248,13 +273,55 @@ export function renderDashboardHtml(state: DashboardState): string {
           </div>
         </div>
 
-        <!-- Ações administrativas exigem autenticação segura no servidor. -->
-        <button disabled title="Ação administrativa protegida por NEXUS_ADMIN_TOKEN. Use API/CLI autenticada até existir sessão web segura." class="bg-slate-800 text-slate-500 font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl border border-slate-700 flex items-center gap-2 cursor-not-allowed">
-          <span class="text-base">🔒</span>
-          <span>AÇÕES ADMIN PROTEGIDAS</span>
+        <button id="admin-login-button" onclick="openAdminModal()" class="bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl border border-cyan-500/30 flex items-center gap-2 transition">
+          <span class="text-base">🔐</span>
+          <span id="admin-login-label">ENTRAR ADMIN</span>
         </button>
+        <div id="admin-session-controls" class="hidden flex items-center gap-2">
+          <span id="admin-session-name" class="text-xs text-emerald-300 font-mono"></span>
+          <button id="panic-all-button" onclick="panicAll()" class="bg-rose-600 hover:bg-rose-500 text-white font-black text-xs px-4 py-2.5 rounded-xl border border-rose-400/40 shadow-lg shadow-rose-950/30">
+            🚨 PÂNICO GERAL
+          </button>
+          <button onclick="logoutAdmin()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-2.5 rounded-xl border border-slate-700">SAIR</button>
+        </div>
       </div>
     </header>
+
+    <!-- ESTADO OPERACIONAL REAL -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Execução</div>
+        <div id="op-execution-mode" class="mt-1 font-bold ${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">
+          ${state.dryRun ? 'DRY-RUN' : 'REAL ON-CHAIN'}
+        </div>
+        <div class="text-[10px] text-slate-500 mt-1">RPC: ${state.activeRpcUrl || 'n/a'}</div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1</div>
+        <div id="op-laya-status" class="mt-1 font-bold ${state.laya?.health === 'OK' ? 'text-emerald-400' : 'text-amber-400'}">
+          ${state.laya?.health || 'UNKNOWN'} · ${state.laya?.tacticalMode || 'UNKNOWN'}
+        </div>
+        <div id="op-laya-detail" class="text-[10px] text-slate-500 mt-1">
+          ${(state.laya?.loaded || []).join(',') || 'checkpoint não confirmado'}
+        </div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Rent Recovery</div>
+        <div id="op-rent-status" class="mt-1 font-bold ${state.rentRecovery?.autoEnabled ? 'text-emerald-400' : 'text-slate-400'}">
+          ${state.rentRecovery?.autoEnabled ? 'AUTO ATIVO' : 'AUTO DESLIGADO'}
+        </div>
+        <div id="op-rent-detail" class="text-[10px] text-slate-500 mt-1">
+          ${(state.rentRecovery?.totalReclaimedSolActual || 0).toFixed(9)} SOL de rent bruto observados nesta execução
+        </div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Admin</div>
+        <div id="op-auth-status" class="mt-1 font-bold ${state.auth?.configured ? 'text-cyan-400' : 'text-rose-400'}">
+          ${state.auth?.configured ? (state.auth.needsBootstrap ? 'CADASTRO INICIAL NECESSÁRIO' : 'LOGIN DISPONÍVEL') : 'AUTH INDISPONÍVEL'}
+        </div>
+        <div id="op-auth-detail" class="text-[10px] text-slate-500 mt-1">Pânico e ações manuais exigem sessão ADMIN</div>
+      </div>
+    </section>
 
     <!-- GRID DE MÉTRICAS DO FUNIL DE MATURAÇÃO -->
     <section class="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -319,9 +386,9 @@ export function renderDashboardHtml(state: DashboardState): string {
           </h2>
           <p class="text-xs text-slate-400 mt-0.5">Sensor DexScreener 1.5s · SL inicial: -6% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
         </div>
-        <button disabled title="Requer autenticação administrativa via API/CLI." class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
-          <span>🔒</span>
-          <span>Varrer ATAs via API autenticada</span>
+        <button id="sweep-rent-button" disabled onclick="sweepRentManual()" title="Requer sessão ADMIN." class="admin-action text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
+          <span>🧹</span>
+          <span>Varrer contas SPL vazias</span>
         </button>
       </div>
 
@@ -369,8 +436,8 @@ export function renderDashboardHtml(state: DashboardState): string {
                   </span>
                 </td>
                 <td class="py-4 px-4 md:px-6 text-right font-sans">
-                  <button disabled title="Venda manual exige API/CLI autenticada." class="bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">
-                    VENDA MANUAL PROTEGIDA
+                  <button disabled data-admin-action="true" onclick="panicToken('${p.mint}', '${p.symbol.replace(/\'/g, '')}')" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">
+                    LIQUIDAR POSIÇÃO
                   </button>
                 </td>
               </tr>
@@ -413,14 +480,199 @@ export function renderDashboardHtml(state: DashboardState): string {
 
   </div>
 
+  <!-- MODAL ADMIN: cadastro inicial ou login -->
+  <div id="admin-auth-modal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm items-center justify-center p-4">
+    <div class="w-full max-w-md bg-slate-950 border border-slate-700 rounded-2xl shadow-2xl p-5 space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-white font-black text-lg">Admin Nexus Solana</h3>
+          <p id="admin-modal-subtitle" class="text-xs text-slate-400 mt-1">Autenticação obrigatória para ações on-chain manuais.</p>
+        </div>
+        <button onclick="closeAdminModal()" class="text-slate-400 hover:text-white text-xl">×</button>
+      </div>
+
+      <div id="admin-login-panel" class="space-y-3">
+        <input id="admin-login-email" type="email" autocomplete="username" placeholder="Email admin" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-cyan-500">
+        <input id="admin-login-password" type="password" autocomplete="current-password" placeholder="Senha" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-cyan-500">
+        <button onclick="submitAdminLogin()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold rounded-xl py-2.5">ENTRAR</button>
+      </div>
+
+      <div id="admin-register-panel" class="hidden space-y-3 border-t border-slate-800 pt-4">
+        <div class="text-xs text-amber-300">Primeiro acesso: crie o administrador. O código mestre é usado uma única vez e não é salvo no navegador.</div>
+        <input id="admin-register-name" type="text" autocomplete="name" placeholder="Nome do administrador" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-cyan-500">
+        <input id="admin-register-email" type="email" autocomplete="username" placeholder="Email admin" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-cyan-500">
+        <input id="admin-register-password" type="password" autocomplete="new-password" placeholder="Senha (mín. 8 caracteres)" class="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-cyan-500">
+        <input id="admin-register-bootstrap" type="password" autocomplete="off" placeholder="Código mestre NEXUS_ADMIN_TOKEN" class="w-full bg-slate-900 border border-amber-700/60 rounded-xl px-3 py-2.5 text-sm text-white outline-none focus:border-amber-500">
+        <button onclick="submitAdminRegistration()" class="w-full bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-xl py-2.5">CADASTRAR ADMIN</button>
+      </div>
+
+      <div id="admin-auth-message" class="hidden text-xs rounded-lg p-2.5"></div>
+    </div>
+  </div>
+
   <!-- SCRIPT DE AÇÕES & POLLING NATIVO A CADA 2.5s -->
   <script>
+    const ADMIN_TOKEN_KEY = 'nexusSolanaAdminJwt';
+    let adminSession = null;
+    let adminAuthStatus = { configured: false, needsBootstrap: false };
+
+    function getAdminToken() {
+      return sessionStorage.getItem(ADMIN_TOKEN_KEY) || '';
+    }
+
+    function setAdminMessage(message, isError) {
+      const el = document.getElementById('admin-auth-message');
+      if (!el) return;
+      el.textContent = message || '';
+      el.className = message
+        ? 'text-xs rounded-lg p-2.5 ' + (isError ? 'bg-rose-500/10 text-rose-300 border border-rose-500/30' : 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30')
+        : 'hidden';
+    }
+
+    function applyAdminUi() {
+      const logged = Boolean(adminSession && adminSession.role === 'ADMIN' && getAdminToken());
+      const loginButton = document.getElementById('admin-login-button');
+      const controls = document.getElementById('admin-session-controls');
+      const nameEl = document.getElementById('admin-session-name');
+      if (loginButton) loginButton.classList.toggle('hidden', logged);
+      if (controls) {
+        controls.classList.toggle('hidden', !logged);
+        controls.classList.toggle('flex', logged);
+      }
+      if (nameEl) nameEl.textContent = logged ? (adminSession.name || adminSession.email || 'ADMIN') : '';
+
+      document.querySelectorAll('.admin-action').forEach(function (button) {
+        button.disabled = !logged;
+        button.classList.toggle('cursor-not-allowed', !logged);
+        button.classList.toggle('text-slate-600', !logged);
+        button.classList.toggle('bg-slate-800', !logged);
+        if (logged) {
+          button.classList.add('text-white', 'bg-cyan-700', 'hover:bg-cyan-600');
+        } else {
+          button.classList.remove('text-white', 'bg-cyan-700', 'hover:bg-cyan-600');
+        }
+      });
+    }
+
+    async function adminFetch(url, options) {
+      const token = getAdminToken();
+      if (!token) throw new Error('Faça login como ADMIN para executar esta ação.');
+      const opts = Object.assign({}, options || {});
+      opts.headers = Object.assign({}, opts.headers || {}, { Authorization: 'Bearer ' + token });
+      const res = await fetch(url, opts);
+      if (res.status === 401) {
+        logoutAdmin(false);
+        throw new Error('Sessão administrativa expirada. Faça login novamente.');
+      }
+      return res;
+    }
+
+    function openAdminModal() {
+      const modal = document.getElementById('admin-auth-modal');
+      if (!modal) return;
+      modal.classList.remove('hidden');
+      modal.classList.add('flex');
+      const registerPanel = document.getElementById('admin-register-panel');
+      const loginPanel = document.getElementById('admin-login-panel');
+      if (registerPanel) registerPanel.classList.toggle('hidden', !adminAuthStatus.needsBootstrap);
+      if (loginPanel) loginPanel.classList.toggle('hidden', adminAuthStatus.needsBootstrap);
+      setAdminMessage('', false);
+    }
+
+    function closeAdminModal() {
+      const modal = document.getElementById('admin-auth-modal');
+      if (!modal) return;
+      modal.classList.add('hidden');
+      modal.classList.remove('flex');
+    }
+
+    async function submitAdminLogin() {
+      try {
+        setAdminMessage('Validando credenciais...', false);
+        const email = document.getElementById('admin-login-email')?.value || '';
+        const password = document.getElementById('admin-login-password')?.value || '';
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email, password: password })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.token) throw new Error(data.error || 'Falha no login.');
+        sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        adminSession = data.user;
+        const pwd = document.getElementById('admin-login-password');
+        if (pwd) pwd.value = '';
+        closeAdminModal();
+        applyAdminUi();
+      } catch (err) {
+        setAdminMessage(err.message || String(err), true);
+      }
+    }
+
+    async function submitAdminRegistration() {
+      try {
+        setAdminMessage('Criando administrador...', false);
+        const name = document.getElementById('admin-register-name')?.value || '';
+        const email = document.getElementById('admin-register-email')?.value || '';
+        const password = document.getElementById('admin-register-password')?.value || '';
+        const bootstrapToken = document.getElementById('admin-register-bootstrap')?.value || '';
+        const res = await fetch('/api/auth/register-admin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, email: email, password: password, bootstrapToken: bootstrapToken })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.token) throw new Error(data.error || 'Falha no cadastro.');
+        sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+        adminSession = data.user;
+        adminAuthStatus.needsBootstrap = false;
+        ['admin-register-password', 'admin-register-bootstrap'].forEach(function (id) {
+          const el = document.getElementById(id);
+          if (el) el.value = '';
+        });
+        closeAdminModal();
+        applyAdminUi();
+      } catch (err) {
+        setAdminMessage(err.message || String(err), true);
+      }
+    }
+
+    function logoutAdmin(showMessage) {
+      sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+      adminSession = null;
+      applyAdminUi();
+      if (showMessage !== false) alert('Sessão administrativa encerrada.');
+    }
+
+    async function refreshAuthState() {
+      try {
+        const statusRes = await fetch('/api/auth/status');
+        if (statusRes.ok) adminAuthStatus = await statusRes.json();
+      } catch (_) {}
+
+      const token = getAdminToken();
+      if (token) {
+        try {
+          const meRes = await fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+          const me = await meRes.json();
+          if (meRes.ok && me.success && me.user?.role === 'ADMIN') {
+            adminSession = me.user;
+          } else {
+            sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+          }
+        } catch (_) {
+          adminSession = null;
+        }
+      }
+      applyAdminUi();
+    }
+
     async function panicToken(mint, symbol) {
-      if (!confirm('⚡ CONFIRMAR VENDA DE EMERGÊNCIA:\nDeseja liquidar 100% de ' + symbol + ' a mercado via Jupiter V6 e resgatar o aluguel da conta ATA (~0.00204 SOL)?')) {
+      if (!confirm('⚡ CONFIRMAR LIQUIDAÇÃO ADMIN:\nLiquidar 100% da posição ' + (symbol || mint) + ' pelo executor seguro. Após confirmação on-chain, o sistema tentará fechar a conta SPL vazia e devolver o rent real à carteira.')) {
         return;
       }
       try {
-        const res = await fetch('/api/panic/' + encodeURIComponent(mint), { method: 'POST' });
+        const res = await adminFetch('/api/positions/' + encodeURIComponent(mint) + '/exit', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
           alert('✅ ' + (data.message || 'Moeda liquidada com sucesso!'));
@@ -434,11 +686,11 @@ export function renderDashboardHtml(state: DashboardState): string {
     }
 
     async function panicAll() {
-      if (!confirm('🚨 ATENÇÃO: PÂNICO GERAL / ZERAR TUDO!\n\nEsta ação irá:\n1. Desarmar o disjuntor do Sentinel e vetar novas compras;\n2. Interromper todos os monitores ativos;\n3. Liquidar 100% de todos os tokens da carteira a mercado para SOL;\n4. Fechar todas as contas de token (ATAs) e resgatar os aluguéis.\n\nDeseja prosseguir?')) {
+      if (!confirm('🚨 PÂNICO GERAL ADMIN\n\nEsta ação arma o circuit breaker, liquida posições rastreadas e holdings SPL positivos não-base, preserva SOL/USDC/USDT e depois varre contas SPL vazias.\n\nDeseja prosseguir?')) {
         return;
       }
       try {
-        const res = await fetch('/api/panic/all', { method: 'POST' });
+        const res = await adminFetch('/api/positions/liquidate-all', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
           alert('🚨 PÂNICO GERAL EXECUTADO COM SUCESSO!\n' + (data.message || ''));
@@ -453,10 +705,10 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     async function sweepRentManual() {
       try {
-        const res = await fetch('/api/wallet/sweep-rent', { method: 'POST' });
+        const res = await adminFetch('/api/wallet/sweep-rent', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
-          alert('🧹 Varredura de aluguel concluída! Contas fechadas: ' + data.closedCount + ' | SOL recuperado: ~' + data.reclaimedSolEst);
+          alert('🧹 Rent recovery concluído. Contas SPL vazias fechadas: ' + data.closedCount + ' | Rent bruto observado: ' + Number(data.reclaimedSolActual || 0).toFixed(9) + ' SOL');
           pollDashboard();
         } else {
           alert('⚠️ Erro na varredura: ' + (data.error || 'Falha'));
@@ -496,6 +748,51 @@ export function renderDashboardHtml(state: DashboardState): string {
         }
         if (sentinelDotEl) {
           sentinelDotEl.className = 'h-2.5 w-2.5 rounded-full ' + (isBreaker ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500 animate-pulse');
+        }
+
+        // Estado operacional real vindo exclusivamente do backend.
+        const operational = data.operational || {};
+        const auth = operational.adminAuth || {};
+        const rent = operational.rentRecovery || {};
+        const laya = operational.laya || {};
+
+        adminAuthStatus.configured = Boolean(auth.configured);
+        adminAuthStatus.needsBootstrap = Boolean(auth.needsBootstrap);
+
+        const execEl = document.getElementById('op-execution-mode');
+        if (execEl) {
+          execEl.textContent = operational.executionMode === 'REAL_ON_CHAIN' ? 'REAL ON-CHAIN' : 'DRY-RUN';
+          execEl.className = 'mt-1 font-bold ' + (operational.executionMode === 'REAL_ON_CHAIN' ? 'text-emerald-400' : 'text-amber-400');
+        }
+
+        const layaEl = document.getElementById('op-laya-status');
+        const layaDetail = document.getElementById('op-laya-detail');
+        if (layaEl) {
+          layaEl.textContent = (laya.health || 'UNKNOWN') + ' · ' + (laya.tacticalMode || 'UNKNOWN');
+          layaEl.className = 'mt-1 font-bold ' + (laya.health === 'OK' ? 'text-emerald-400' : 'text-amber-400');
+        }
+        if (layaDetail) layaDetail.textContent = (laya.loaded || []).join(',') || 'checkpoint não confirmado';
+
+        const rentEl = document.getElementById('op-rent-status');
+        const rentDetail = document.getElementById('op-rent-detail');
+        if (rentEl) {
+          rentEl.textContent = rent.autoEnabled ? (rent.inFlight ? 'AUTO EXECUTANDO' : 'AUTO ATIVO') : 'AUTO DESLIGADO';
+          rentEl.className = 'mt-1 font-bold ' + (rent.autoEnabled ? 'text-emerald-400' : 'text-slate-400');
+        }
+        if (rentDetail) {
+          rentDetail.textContent =
+            Number(rent.totalReclaimedSolActual || 0).toFixed(9) +
+            ' SOL de rent bruto observados nesta execução · ' +
+            Number(rent.totalClosedCount || 0) +
+            ' conta(s) fechada(s)';
+        }
+
+        const authEl = document.getElementById('op-auth-status');
+        if (authEl) {
+          authEl.textContent = auth.configured
+            ? (auth.needsBootstrap ? 'CADASTRO INICIAL NECESSÁRIO' : (adminSession ? 'SESSÃO ADMIN ATIVA' : 'LOGIN DISPONÍVEL'))
+            : 'AUTH INDISPONÍVEL';
+          authEl.className = 'mt-1 font-bold ' + (auth.configured ? 'text-cyan-400' : 'text-rose-400');
         }
 
         // 3. Atualiza Cards do Funil
@@ -546,8 +843,8 @@ export function renderDashboardHtml(state: DashboardState): string {
                     '</span>') +
                 '</td>' +
                 '<td class="py-4 px-4 md:px-6 text-right font-sans">' +
-                  '<button disabled title="Venda manual exige API/CLI autenticada." class="bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">' +
-                    'VENDA MANUAL PROTEGIDA' +
+                  '<button disabled data-admin-action="true" onclick="panicToken(\'' + p.mint + '\')" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">' +
+                    'LIQUIDAR POSIÇÃO' +
                   '</button>' +
                 '</td>' +
               '</tr>';
@@ -631,12 +928,16 @@ export function renderDashboardHtml(state: DashboardState): string {
           logsContainer.scrollTop = logsContainer.scrollHeight;
         }
 
+        // A tabela de posições é recriada a cada polling; reaplica o estado da sessão aos botões novos.
+        applyAdminUi();
       } catch (err) {
         // Silencioso em caso de latência momentânea
       }
     }
 
-    // Inicia polling
+    // Inicializa sessão e estado real imediatamente, depois mantém polling.
+    void refreshAuthState();
+    void pollDashboard();
     setInterval(pollDashboard, POLL_INTERVAL_MS);
   </script>
 </body>

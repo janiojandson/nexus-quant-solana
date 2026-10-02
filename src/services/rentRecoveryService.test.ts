@@ -18,6 +18,8 @@ test('RentRecoveryService: deve retornar zero contas fechadas no sweep quando n√
   const sweep = await service.sweepOrphanAccounts();
   assert.strictEqual(sweep.closedCount, 0);
   assert.strictEqual(sweep.reclaimedSolEst, 0);
+  assert.strictEqual(sweep.reclaimedSolActual, 0);
+  assert.deepStrictEqual(sweep.txSignatures, []);
   assert.strictEqual(sweep.errors.length, 0);
 });
 

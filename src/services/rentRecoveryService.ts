@@ -4,6 +4,8 @@ import { getAssociatedTokenAddressSync, createCloseAccountInstruction, TOKEN_PRO
 export interface SweepResult {
   closedCount: number;
   reclaimedSolEst: number;
+  reclaimedSolActual: number;
+  txSignatures: string[];
   errors: string[];
 }
 
@@ -24,25 +26,19 @@ export class RentRecoveryService {
     this.keypair = keypair;
   }
 
-  /**
-   * Constrói e envia instrução de fechamento de Associated Token Account (ATA)
-   * transferindo a caução (~0.00204 SOL) de volta para o dono da carteira.
-   */
-  public async closeTokenAccount(mintAddress: string, destinationAddress?: string): Promise<{ success: boolean; txSignature?: string | null; error?: string }> {
+  private async closeAccountAddress(
+    tokenAccountAddress: PublicKey,
+    destinationAddress?: string
+  ): Promise<{ success: boolean; txSignature?: string | null; error?: string }> {
     if (!this.keypair) {
-      // Modo Simulado (Dry-Run / Sem Keypair)
-      console.log(`🧹 [RentRecoveryService: SIMULAÇÃO] ATA de ${mintAddress} fechada virtualmente (~0.00204 SOL devolvidos).`);
       return { success: true, txSignature: 'DRY_RUN_ATA_CLOSED' };
     }
 
     try {
-      const mintPubkey = new PublicKey(mintAddress);
       const ownerPubkey = this.keypair.publicKey;
-      const ataAddress = getAssociatedTokenAddressSync(mintPubkey, ownerPubkey);
       const destination = destinationAddress ? new PublicKey(destinationAddress) : ownerPubkey;
-
       const instruction = createCloseAccountInstruction(
-        ataAddress,
+        tokenAccountAddress,
         destination,
         ownerPubkey,
         [],
@@ -54,24 +50,54 @@ export class RentRecoveryService {
       transaction.recentBlockhash = latestBlockhash.blockhash;
       transaction.feePayer = ownerPubkey;
 
-      const txid = await sendAndConfirmTransaction(this.connection, transaction, [this.keypair]);
-      console.log(`💰 [RentRecoveryService] ATA de ${mintAddress} encerrada. ~0.00204 SOL devolvidos! Tx: ${txid}`);
+      const txid = await sendAndConfirmTransaction(this.connection, transaction, [this.keypair], {
+        commitment: 'confirmed'
+      });
       return { success: true, txSignature: txid };
     } catch (err: any) {
-      const msg = err?.message || String(err);
-      console.warn(`⚠️ [RentRecoveryService] Falha ao fechar ATA de ${mintAddress}: ${msg}`);
-      return { success: false, txSignature: null, error: msg };
+      return { success: false, txSignature: null, error: err?.message || String(err) };
     }
   }
 
   /**
-   * Sweeper de Inicialização & Manutenção:
-   * Varre todas as contas SPL da carteira Phantom.
-   * Se o saldo for 0 (órfã/vazia), dispara automaticamente a instrução de fechamento para resgatar aluguéis antigos esquecidos.
+   * Fecha a ATA associada ao mint informado e devolve o rent para a carteira.
+   * Usado após liquidações em que conhecemos o mint da posição.
+   */
+  public async closeTokenAccount(
+    mintAddress: string,
+    destinationAddress?: string
+  ): Promise<{ success: boolean; txSignature?: string | null; error?: string }> {
+    if (!this.keypair) {
+      console.log(`🧹 [RentRecoveryService: SIMULAÇÃO] ATA de ${mintAddress} fechada virtualmente.`);
+      return { success: true, txSignature: 'DRY_RUN_ATA_CLOSED' };
+    }
+
+    const mintPubkey = new PublicKey(mintAddress);
+    const ataAddress = getAssociatedTokenAddressSync(mintPubkey, this.keypair.publicKey);
+    const result = await this.closeAccountAddress(ataAddress, destinationAddress);
+
+    if (result.success) {
+      console.log(`💰 [RentRecoveryService] ATA de ${mintAddress} encerrada. Tx: ${result.txSignature}`);
+    } else {
+      console.warn(`⚠️ [RentRecoveryService] Falha ao fechar ATA de ${mintAddress}: ${result.error}`);
+    }
+    return result;
+  }
+
+  /**
+   * Varre contas SPL com saldo token = 0. Fecha a conta real retornada pelo RPC
+   * (ATA ou conta SPL auxiliar) e soma os lamports efetivamente presentes nela.
+   * Contas com qualquer saldo token são sempre preservadas.
    */
   public async sweepOrphanAccounts(destinationAddress?: string): Promise<SweepResult> {
     if (!this.keypair) {
-      return { closedCount: 0, reclaimedSolEst: 0, errors: [] };
+      return {
+        closedCount: 0,
+        reclaimedSolEst: 0,
+        reclaimedSolActual: 0,
+        txSignatures: [],
+        errors: []
+      };
     }
 
     try {
@@ -81,43 +107,61 @@ export class RentRecoveryService {
       );
 
       let closedCount = 0;
+      let reclaimedLamportsActual = 0;
+      const txSignatures: string[] = [];
       const errors: string[] = [];
 
       for (const account of response.value) {
         const info = account.account.data.parsed?.info;
         if (!info) continue;
 
-        const amount = Number(info.tokenAmount?.uiAmount || 0);
-        const mint = info.mint as string;
+        const amountRaw = String(info.tokenAmount?.amount ?? '0');
+        const mint = String(info.mint || '');
+        // Nunca arredondar uiAmount para decidir fechamento. Só fecha amount atômico == 0.
+        if (amountRaw !== '0' || !mint) continue;
 
-        if (amount === 0 && mint) {
-          try {
-            const res = await this.closeTokenAccount(mint, destinationAddress);
-            if (res.success && res.txSignature) {
-              closedCount++;
-            } else if (res.error) {
-              errors.push(`${mint}: ${res.error}`);
-            }
-          } catch (e: any) {
-            errors.push(`${mint}: ${e?.message || e}`);
+        try {
+          const rentLamports = Number(account.account.lamports || 0);
+          const res = await this.closeAccountAddress(account.pubkey, destinationAddress);
+          if (res.success && res.txSignature) {
+            closedCount++;
+            reclaimedLamportsActual += rentLamports;
+            txSignatures.push(res.txSignature);
+          } else if (res.error) {
+            errors.push(`${mint}/${account.pubkey.toBase58()}: ${res.error}`);
           }
+        } catch (e: any) {
+          errors.push(`${mint}/${account.pubkey.toBase58()}: ${e?.message || e}`);
         }
       }
 
-      const reclaimedSolEst = Number((closedCount * RentRecoveryService.RENT_EXEMPTION_EST_SOL).toFixed(6));
+      const reclaimedSolEst = Number(
+        (closedCount * RentRecoveryService.RENT_EXEMPTION_EST_SOL).toFixed(9)
+      );
+      const reclaimedSolActual = Number((reclaimedLamportsActual / 1e9).toFixed(9));
+
       if (closedCount > 0) {
-        console.log(`🧹 [RentRecoveryService: Sweeper Concluído] ${closedCount} conta(s) órfã(s) fechada(s). ~${reclaimedSolEst} SOL recuperados!`);
+        console.log(
+          `🧹 [RentRecoveryService] ${closedCount} conta(s) SPL vazia(s) fechada(s). ` +
+          `${reclaimedSolActual.toFixed(9)} SOL de rent observados on-chain foram devolvidos à carteira.`
+        );
       }
-      return { closedCount, reclaimedSolEst, errors };
+
+      return { closedCount, reclaimedSolEst, reclaimedSolActual, txSignatures, errors };
     } catch (err: any) {
-      console.warn(`⚠️ [RentRecoveryService] Erro ao varrer contas órfãs: ${err?.message || err}`);
-      return { closedCount: 0, reclaimedSolEst: 0, errors: [err?.message || String(err)] };
+      const message = err?.message || String(err);
+      console.warn(`⚠️ [RentRecoveryService] Erro ao varrer contas órfãs: ${message}`);
+      return {
+        closedCount: 0,
+        reclaimedSolEst: 0,
+        reclaimedSolActual: 0,
+        txSignatures: [],
+        errors: [message]
+      };
     }
   }
 
-  /**
-   * Varre todas as contas SPL com saldo > 0 da carteira
-   */
+  /** Varre todas as contas SPL com saldo > 0 da carteira. */
   public async getSplAccountsWithBalance(): Promise<SplAccountInfo[]> {
     if (!this.keypair) return [];
 

@@ -27,6 +27,7 @@ import { DrawdownBreaker } from './risk/drawdownBreaker.js';
 import { assertAtomicAmountToNumber } from './execution/atomicAmount.js';
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
 import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
+import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 
 
 dotenv.config();
@@ -56,6 +57,8 @@ const SOLANA_LAYA_TACTICAL_MODE = (() => {
   return (['OFF', 'SHADOW', 'ACTIVE'].includes(raw) ? raw : 'SHADOW') as SolanaLayaTacticalMode;
 })();
 const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLANA_LAYA_POSITION_INTERVAL_MS || 10_000));
+const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
+const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
@@ -75,13 +78,6 @@ const gatekeeper = new MemeRiskGatekeeper({
   macroSentinelUrl: MACRO_SENTINEL_URL
 });
 const solanaLayaAdapter = new SolanaLayaAdapter();
-void solanaLayaAdapter.checkHealth().then((health) => {
-  console.log(
-    `🧠 [Laya:Health] ok=${health.ok} loaded=${health.loaded.join(',') || 'none'} latencyMs=${health.latencyMs}`
-  );
-}).catch((err: any) => {
-  console.warn(`⚠️ [Laya:Health] indisponível no startup: ${err?.message || err}`);
-});
 const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
 /** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
@@ -96,6 +92,7 @@ const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
 const postgresRepo = new SolanaPostgresRepository();
 const pgPool = postgresRepo.getPool();
+const adminAuthService = new SolanaAdminAuthService(pgPool);
 const journal = new DecisionLogger(pgPool, {
   flushIntervalMs: 5000,
   maxBufferSize: 100
@@ -116,6 +113,25 @@ const latestState: DashboardState = {
   activeRpcUrl: ACTIVE_SOLANA_RPC_URL.split('?')[0],
   totalRealizedPnlSol: 0,
   totalNetworkFeesSolEst: 0,
+  auth: { configured: Boolean(pgPool), needsBootstrap: true },
+  rentRecovery: {
+    autoEnabled: AUTO_RENT_RECOVERY_ENABLED,
+    intervalMs: AUTO_RENT_RECOVERY_INTERVAL_MS,
+    inFlight: false,
+    lastClosedCount: 0,
+    lastReclaimedSolEst: 0,
+    lastReclaimedSolActual: 0,
+    totalClosedCount: 0,
+    totalReclaimedSolEst: 0,
+    totalReclaimedSolActual: 0,
+    lastErrors: []
+  },
+  laya: {
+    tacticalMode: SOLANA_LAYA_TACTICAL_MODE,
+    privateService: process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true',
+    health: 'UNKNOWN',
+    loaded: []
+  },
   positions: [],
   walletHoldings: [],
   closedTrades: [],
@@ -124,6 +140,117 @@ const latestState: DashboardState = {
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   lastUpdated: new Date().toISOString()
 };
+
+void adminAuthService.initSchema()
+  .then(async () => {
+    await adminAuthService.bootstrapAdministratorFromEnvironment();
+    const authStatus = await adminAuthService.getStatus();
+    latestState.auth = {
+      configured: authStatus.configured,
+      needsBootstrap: authStatus.needsBootstrap
+    };
+    console.log(
+      `🔐 [AdminAuth] configured=${authStatus.configured} needsBootstrap=${authStatus.needsBootstrap}`
+    );
+  })
+  .catch((err: any) => {
+    latestState.auth = { configured: false, needsBootstrap: false };
+    console.warn(`⚠️ [AdminAuth] inicialização falhou: ${err?.message || err}`);
+  });
+
+async function refreshLayaHealth(): Promise<void> {
+  try {
+    const health = await solanaLayaAdapter.checkHealth();
+    latestState.laya = {
+      tacticalMode: SOLANA_LAYA_TACTICAL_MODE,
+      privateService: process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true',
+      health: health.ok ? 'OK' : 'DEGRADED',
+      loaded: health.loaded,
+      latencyMs: health.latencyMs,
+      lastCheckedAt: new Date().toISOString()
+    };
+    console.log(
+      `🧠 [Laya:Health] ok=${health.ok} loaded=${health.loaded.join(',') || 'none'} latencyMs=${health.latencyMs}`
+    );
+  } catch (err: any) {
+    if (latestState.laya) {
+      latestState.laya.health = 'DEGRADED';
+      latestState.laya.lastCheckedAt = new Date().toISOString();
+    }
+    console.warn(`⚠️ [Laya:Health] probe falhou: ${err?.message || err}`);
+  }
+}
+
+void refreshLayaHealth();
+setInterval(() => {
+  void refreshLayaHealth();
+}, 60_000);
+
+let rentRecoverySweepInFlight = false;
+async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<ReturnType<RentRecoveryService['sweepOrphanAccounts']>>> {
+  if (rentRecoverySweepInFlight) {
+    throw new Error('Varredura de rent já está em execução.');
+  }
+  if (source === 'AUTO' && (!AUTO_RENT_RECOVERY_ENABLED || IS_DRY_RUN)) {
+    return {
+      closedCount: 0,
+      reclaimedSolEst: 0,
+      reclaimedSolActual: 0,
+      txSignatures: [],
+      errors: []
+    };
+  }
+
+  rentRecoverySweepInFlight = true;
+  if (latestState.rentRecovery) latestState.rentRecovery.inFlight = true;
+
+  try {
+    const result = await rentRecovery.sweepOrphanAccounts();
+    if (latestState.rentRecovery) {
+      latestState.rentRecovery.lastRunAt = new Date().toISOString();
+      latestState.rentRecovery.lastClosedCount = result.closedCount;
+      latestState.rentRecovery.lastReclaimedSolEst = result.reclaimedSolEst;
+      latestState.rentRecovery.lastReclaimedSolActual = result.reclaimedSolActual;
+      latestState.rentRecovery.totalClosedCount += result.closedCount;
+      latestState.rentRecovery.totalReclaimedSolEst = Number(
+        (latestState.rentRecovery.totalReclaimedSolEst + result.reclaimedSolEst).toFixed(9)
+      );
+      latestState.rentRecovery.totalReclaimedSolActual = Number(
+        (latestState.rentRecovery.totalReclaimedSolActual + result.reclaimedSolActual).toFixed(9)
+      );
+      latestState.rentRecovery.lastErrors = result.errors.slice(-10);
+    }
+    if (result.closedCount > 0 || result.errors.length > 0) {
+      console.log(
+        `🧹 [RentRecovery:${source}] fechadas=${result.closedCount} ` +
+        `rentReal=${result.reclaimedSolActual.toFixed(9)} SOL erros=${result.errors.length}`
+      );
+    }
+    return result;
+  } finally {
+    rentRecoverySweepInFlight = false;
+    if (latestState.rentRecovery) latestState.rentRecovery.inFlight = false;
+  }
+}
+
+if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN) {
+  const firstSweepDelayMs = Math.min(60_000, Math.max(15_000, Math.floor(AUTO_RENT_RECOVERY_INTERVAL_MS / 4)));
+  setTimeout(() => {
+    void runRentRecoverySweep('AUTO').catch((err: any) => {
+      console.warn(`⚠️ [RentRecovery:AUTO] sweep inicial falhou: ${err?.message || err}`);
+    });
+  }, firstSweepDelayMs);
+  setInterval(() => {
+    void runRentRecoverySweep('AUTO').catch((err: any) => {
+      console.warn(`⚠️ [RentRecovery:AUTO] sweep agendado falhou: ${err?.message || err}`);
+    });
+  }, AUTO_RENT_RECOVERY_INTERVAL_MS);
+  console.log(`🧹 [RentRecovery:AUTO] habilitado a cada ${Math.round(AUTO_RENT_RECOVERY_INTERVAL_MS / 60000)} min.`);
+} else {
+  console.log(
+    `🧹 [RentRecovery:AUTO] desabilitado (config=${AUTO_RENT_RECOVERY_ENABLED}, dryRun=${IS_DRY_RUN}).`
+  );
+}
 
 /**
  * Executa o encerramento seguro e imediato de uma posição aberta:
@@ -526,8 +653,8 @@ const server = http.createServer(async (req, res) => {
   const handled = await handleApiRoutes(req, res, {
     latestState,
     drawdownState: drawdownBreaker.getState(),
-    executeExitOrder: (mint, reason, pnlPct, exitSolValue) =>
-      executeExitOrder(mint, reason as any, pnlPct, exitSolValue),
+    executeExitOrder: (mint, reason, pnlPct, exitSolValue, options) =>
+      executeExitOrder(mint, reason as any, pnlPct, exitSolValue, options),
     liquidateHolding: async (payload: { mint: string; symbol: string; amount: number; decimals: number }) => {
       const { mint, symbol } = payload;
       console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint})`);
@@ -575,7 +702,7 @@ const server = http.createServer(async (req, res) => {
       };
     },
     getAllOpenPositions: () => positionEngine.getAllPositions(),
-    sweepRent: () => rentRecovery.sweepOrphanAccounts(),
+    sweepRent: () => runRentRecoverySweep('MANUAL'),
     panicToken: async (mint: string) => {
       console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter V6...`);
       positionEngine.removePosition(mint);
@@ -666,7 +793,8 @@ const server = http.createServer(async (req, res) => {
       return res.rows;
     },
     pgPool,
-    journal
+    journal,
+    authService: adminAuthService
   });
 
   if (!handled) {

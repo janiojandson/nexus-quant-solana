@@ -37,7 +37,7 @@ const state: DashboardState = {
   lastUpdated: new Date().toISOString()
 };
 
-test('Dashboard reflete a estratégia operacional atual e permanece read-only para ações admin', () => {
+test('Dashboard reflete a estratégia operacional atual e só habilita ações após login admin', () => {
   const html = renderDashboardHtml(state);
 
   assert.match(html, /EXECUÇÃO REAL ON-CHAIN/);
@@ -49,9 +49,13 @@ test('Dashboard reflete a estratégia operacional atual e permanece read-only pa
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
   assert.match(html, /Stop Ativo: Trailing Momentum/);
 
-  assert.match(html, /AÇÕES ADMIN PROTEGIDAS/);
-  assert.match(html, /VENDA MANUAL PROTEGIDA/);
-  assert.doesNotMatch(html, /VENDER AGORA \(PÂNICO\)/);
+  assert.match(html, /ENTRAR ADMIN/);
+  assert.match(html, /PÂNICO GERAL/);
+  assert.match(html, /LIQUIDAR POSIÇÃO/);
+  assert.match(html, /adminFetch\('\/api\/positions\//);
+  assert.match(html, /sessionStorage/);
+  assert.match(html, /disabled data-admin-action="true"/);
+  assert.doesNotMatch(html, /localStorage/);
   assert.doesNotMatch(html, /Ultra-Fast 1\.5s quote loop/);
   assert.doesNotMatch(html, /Stop Loss: -8%/);
 
