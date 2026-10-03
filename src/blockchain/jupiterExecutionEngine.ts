@@ -1,6 +1,10 @@
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
+import {
+  JupiterTrafficCoordinator,
+  type JupiterPriority
+} from './jupiterTrafficCoordinator.js';
 
 const MAX_SLIPPAGE_BPS = 750;
 
@@ -20,6 +24,7 @@ export interface SwapExecutionRequest {
   /** Mantido por compatibilidade. V2 /execute gerencia o landing. */
   skipPreflight?: boolean;
   maxPriorityFeeLamports?: number;
+  trafficPriority?: JupiterPriority;
 }
 
 export interface SwapExecutionResponse {
@@ -46,6 +51,7 @@ export interface JupiterEngineConfig {
   confirmationTimeoutMs?: number;
   apiKey?: string;
   v2BaseUrl?: string;
+  trafficCoordinator?: JupiterTrafficCoordinator;
   // Mantidos apenas para compatibilidade com configuração antiga.
   buyMaxPriorityFeeLamports?: number;
   sellMaxPriorityFeeLamports?: number;
@@ -89,6 +95,7 @@ export class JupiterExecutionEngine {
   private apiKey?: string;
   private v2BaseUrl: string;
   private executeTimeoutMs: number;
+  private trafficCoordinator: JupiterTrafficCoordinator;
 
   constructor(config: JupiterEngineConfig = {}) {
     this.connection = config.connection ||
@@ -97,6 +104,7 @@ export class JupiterExecutionEngine {
       ? config.isDryRun
       : (process.env.DRY_RUN_MODE !== 'false');
     this.dexAggregator = config.dexAggregator || new DexAggregatorService();
+    this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
     this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
     this.v2BaseUrl = (
       config.v2BaseUrl ||
@@ -121,13 +129,15 @@ export class JupiterExecutionEngine {
     inputMint: string,
     outputMint: string,
     amountLamports: number,
-    slippageBps = 400
+    slippageBps = 400,
+    trafficPriority: JupiterPriority = 3
   ) {
     return this.dexAggregator.getQuote({
       inputMint,
       outputMint,
       amountLamports,
-      slippageBps
+      slippageBps,
+      trafficPriority
     });
   }
 
@@ -158,15 +168,17 @@ export class JupiterExecutionEngine {
     const slippageBps = this.orderSlippage(req);
     if (slippageBps !== undefined) params.slippageBps = slippageBps;
 
-    await this.dexAggregator.waitForRateSlot();
-
     let response: any;
     try {
-      response = await axios.get(`${this.v2BaseUrl}/order`, {
-        params,
-        timeout: 10_000,
-        headers: { 'x-api-key': this.apiKey }
-      });
+      response = await this.trafficCoordinator.schedule(
+        req.trafficPriority ?? 4,
+        () => axios.get(`${this.v2BaseUrl}/order`, {
+          params,
+          timeout: 10_000,
+          headers: { 'x-api-key': this.apiKey }
+        }),
+        'general'
+      );
     } catch (err: any) {
       const detail =
         err?.response?.data?.error ??
@@ -281,23 +293,27 @@ export class JupiterExecutionEngine {
     signedTransaction: string;
     requestId: string;
     lastValidBlockHeight?: string | number;
-  }): Promise<{ response?: JupiterV2ExecuteResponse; uncertainError?: string }> {
+  }, priority: JupiterPriority): Promise<{ response?: JupiterV2ExecuteResponse; uncertainError?: string }> {
     let lastError: any;
 
     // Retry somente do MESMO requestId + MESMA transação assinada.
     // Nunca cria uma segunda ordem em caso de timeout.
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const response = await axios.post(
-          `${this.v2BaseUrl}/execute`,
-          payload,
-          {
-            timeout: this.executeTimeoutMs,
-            headers: {
-              'Content-Type': 'application/json',
-              ...(this.apiKey ? { 'x-api-key': this.apiKey } : {})
+        const response = await this.trafficCoordinator.schedule(
+          priority,
+          () => axios.post(
+            `${this.v2BaseUrl}/execute`,
+            payload,
+            {
+              timeout: this.executeTimeoutMs,
+              headers: {
+                'Content-Type': 'application/json',
+                ...(this.apiKey ? { 'x-api-key': this.apiKey } : {})
+              }
             }
-          }
+          ),
+          'execute'
         );
         return { response: response.data as JupiterV2ExecuteResponse };
       } catch (err: any) {
@@ -343,7 +359,8 @@ export class JupiterExecutionEngine {
           slippageBps: req.slippageBps ?? 400,
           autoSlippage: req.autoSlippage,
           maxAutoSlippageBps: req.maxAutoSlippageBps,
-          poolLiquidityUsd: req.poolLiquidityUsd
+          poolLiquidityUsd: req.poolLiquidityUsd,
+          trafficPriority: req.trafficPriority ?? 5
         });
 
         return {
@@ -410,7 +427,7 @@ export class JupiterExecutionEngine {
           : {})
       };
 
-      const executed = await this.postExecute(payload);
+      const executed = await this.postExecute(payload, req.trafficPriority ?? 4);
 
       if (!executed.response) {
         return {

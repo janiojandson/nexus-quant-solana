@@ -145,6 +145,39 @@ function mockExecuteSuccess(
     };
   }) as any;
 }
+test('Jupiter V2 uses injected coordinator for general order and separate execute bucket', async () => {
+  mockOrder();
+  mockExecuteSuccess();
+  const { conn } = makeConnection({ err: null });
+  const seen: Array<{ priority: number; bucket: string }> = [];
+  const coordinator: any = {
+    async schedule(priority: number, op: () => Promise<unknown>, bucket = 'general') {
+      seen.push({ priority, bucket });
+      return op();
+    }
+  };
+  const engine = new JupiterExecutionEngine({
+    connection: conn,
+    isDryRun: false,
+    dexAggregator: new OkAggregator(),
+    apiKey: 'test-key',
+    v2BaseUrl: V2_BASE,
+    confirmationTimeoutMs: 20_000,
+    trafficCoordinator: coordinator
+  } as any);
+
+  const result = await engine.executeSwap({
+    ...baseRequest,
+    trafficPriority: 1
+  } as any);
+
+  assert.strictEqual(result.status, 'SUCCESS');
+  assert.deepStrictEqual(seen, [
+    { priority: 1, bucket: 'general' },
+    { priority: 1, bucket: 'execute' }
+  ]);
+});
+
 test('Jupiter V2: DRY_RUN usa quote V2 sem executar /execute', async () => {
   let postCalls = 0;
   axios.post = (async () => {
