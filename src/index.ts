@@ -28,6 +28,7 @@ import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
 import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
+import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 
 
 dotenv.config();
@@ -60,9 +61,19 @@ const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLA
 const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
 const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
 const NEXUS_MAINTENANCE_MODE = process.env.NEXUS_MAINTENANCE_MODE === 'true';
+const PUMP_OBSERVATORY_ENABLED = process.env.PUMP_OBSERVATORY_ENABLED === 'true';
+const PUMP_OBSERVATORY_REFRESH_MS = Math.max(
+  5_000,
+  Number(process.env.PUMP_OBSERVATORY_REFRESH_MS || 15_000)
+);
+const PUMP_OBSERVATORY_BATCH_SIZE = Math.max(
+  1,
+  Math.min(100, Number(process.env.PUMP_OBSERVATORY_BATCH_SIZE || 50))
+);
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
+let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
 
@@ -73,6 +84,15 @@ const wallet = new SolanaWalletService({
 });
 
 const rentRecovery = new RentRecoveryService(wallet.getConnection(), wallet.getKeypair());
+const pumpObservatory = new PumpObservatory(
+  wallet.getConnection() as unknown as PumpRpc,
+  {
+    enabled: PUMP_OBSERVATORY_ENABLED,
+    refreshIntervalMs: PUMP_OBSERVATORY_REFRESH_MS,
+    refreshBatchSize: PUMP_OBSERVATORY_BATCH_SIZE,
+    maxRecent: 200
+  }
+);
 
 const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
@@ -198,6 +218,7 @@ const latestState: DashboardState = {
   recentAudits: [],
   quarantineCount: 0,
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
+  pumpObservatory: pumpObservatory.snapshot(),
   lastUpdated: new Date().toISOString()
 };
 
@@ -2555,6 +2576,23 @@ async function main() {
   await journal.initSchema();
   startCalibrationCron(pgPool);
   runMaintenance(pgPool).catch(() => {});
+
+  // Observatório Pump.fun: estritamente READ-ONLY. Não assina transações e não
+  // altera a decisão de BUY/SELL nesta fase; apenas antecipa descoberta e mede timing.
+  await pumpObservatory.start();
+  latestState.pumpObservatory = pumpObservatory.snapshot();
+  if (PUMP_OBSERVATORY_ENABLED) {
+    console.log(
+      `🧪 [Pump Observatory] ${latestState.pumpObservatory.running ? 'STREAM ATIVO' : 'STREAM INDISPONÍVEL'} ` +
+      `| refresh=${PUMP_OBSERVATORY_REFRESH_MS}ms batch=${PUMP_OBSERVATORY_BATCH_SIZE} | READ-ONLY`
+    );
+    pumpStateSyncTimer = setInterval(() => {
+      latestState.pumpObservatory = pumpObservatory.snapshot();
+    }, 2_500);
+    pumpStateSyncTimer.unref?.();
+  } else {
+    console.log('🧪 [Pump Observatory] desabilitado por configuração.');
+  }
   setInterval(() => {
     runMaintenance(pgPool).catch(() => {});
   }, 24 * 60 * 60 * 1000);
@@ -2601,12 +2639,16 @@ async function main() {
 // 🛑 SHUTDOWN GRACIOSO (SIGTERM / SIGINT) — Esvazia o buffer do Decision Journal antes de sair
 process.on('SIGTERM', async () => {
   console.log('🛑 [SIGTERM] Encerrando serviço e esvaziando buffer do Decision Journal...');
+  if (pumpStateSyncTimer) clearInterval(pumpStateSyncTimer);
+  await pumpObservatory.stop();
   await journal.shutdown();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('🛑 [SIGINT] Encerrando serviço e esvaziando buffer do Decision Journal...');
+  if (pumpStateSyncTimer) clearInterval(pumpStateSyncTimer);
+  await pumpObservatory.stop();
   await journal.shutdown();
   process.exit(0);
 });

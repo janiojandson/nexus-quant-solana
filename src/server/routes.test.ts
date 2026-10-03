@@ -26,7 +26,16 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
       agent: 'NexusQuant-Solana-01',
       balanceSol: 0.15,
       positions: [],
-      closedTrades: []
+      closedTrades: [],
+      pumpObservatory: {
+        enabled: true,
+        running: true,
+        readOnly: true,
+        totalCreatedObserved: 7,
+        activeCurves: 5,
+        graduatedCount: 2,
+        recent: []
+      }
     }
   } as any;
 
@@ -34,6 +43,9 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   assert.strictEqual(handled, true);
   assert.strictEqual(statusCode, 200);
   assert.ok(responseData.includes('NexusQuant-Solana-01'));
+  const payload = JSON.parse(responseData);
+  assert.strictEqual(payload.pump.readOnly, true);
+  assert.strictEqual(payload.pump.totalCreatedObserved, 7);
 });
 
 test('handleApiRoutes: deve responder 200 OK na rota /health', async () => {

@@ -255,6 +255,15 @@ export async function handleApiRoutes(
         technicalDiscards: s.incubator?.technicalDiscards ?? 0,
         entryEligible: s.incubator?.entryEligible ?? 0
       },
+      pump: s.pumpObservatory || {
+        enabled: false,
+        running: false,
+        readOnly: true,
+        totalCreatedObserved: 0,
+        activeCurves: 0,
+        graduatedCount: 0,
+        recent: []
+      },
       positions: formattedPositions,
       recentLogs: formattedLogs,
       closedTrades: formattedClosedTrades,

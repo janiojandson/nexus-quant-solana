@@ -1,4 +1,5 @@
 import { renderJournalSection } from './dashboardJournal.js';
+import type { PumpObservatorySnapshot } from '../pump/pumpObservatory.js';
 
 export interface ClosedTradeView {
   mint: string;
@@ -70,6 +71,7 @@ export interface DashboardState {
     technicalDiscards: number;
     entryEligible: number;
   };
+  pumpObservatory?: PumpObservatorySnapshot;
   positions: Array<{
     mint: string;
     symbol: string;
@@ -101,6 +103,73 @@ export interface DashboardState {
   quarantineCount: number;
   scannerLogs?: Array<{ timestamp: string; message: string; type?: 'info' | 'warn' | 'success' | 'fallback' }>;
   lastUpdated: string;
+}
+
+
+function escapeDashboardHtml(value: unknown): string {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function formatPumpLag(ms?: number): string {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  if (Math.abs(ms) < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function renderPumpObservatorySection(state: DashboardState): string {
+  const pump = state.pumpObservatory;
+  const recent = pump?.recent || [];
+  const rows = recent.slice(0, 12).map(token => {
+    const progress = token.progressPct == null ? '—' : `${token.progressPct.toFixed(2)}%`;
+    const status = token.complete ? 'GRADUADA' : 'CURVA ATIVA';
+    return `
+      <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
+        <td class="py-3 px-4">
+          <div class="font-semibold text-slate-200 flex items-center gap-2">
+            <span>${escapeDashboardHtml(token.symbol || 'UNKNOWN')}</span>
+            <a href="${escapeDashboardHtml(token.solscanUrl)}" target="_blank" rel="noopener" class="text-cyan-400 hover:underline text-xs">Solscan↗</a>
+            <a href="${escapeDashboardHtml(token.pumpUrl)}" target="_blank" rel="noopener" class="text-fuchsia-400 hover:underline text-xs">Pump↗</a>
+          </div>
+          <div class="text-[10px] text-slate-500 font-mono">${escapeDashboardHtml(token.mint.slice(0, 8))}...${escapeDashboardHtml(token.mint.slice(-6))}</div>
+        </td>
+        <td class="py-3 px-4 font-mono text-xs text-slate-300">${progress}</td>
+        <td class="py-3 px-4 text-xs ${token.complete ? 'text-emerald-400' : 'text-amber-300'}">${status}</td>
+        <td class="py-3 px-4 font-mono text-xs text-slate-400">${formatPumpLag(token.createToObserverLagMs)}</td>
+        <td class="py-3 px-4 font-mono text-xs text-slate-400">${token.slot}</td>
+        <td class="py-3 px-4">
+          <a href="${escapeDashboardHtml(token.transactionUrl)}" target="_blank" rel="noopener" class="text-cyan-400 hover:underline font-mono text-[11px]">${escapeDashboardHtml(token.signature.slice(0, 10))}...↗</a>
+        </td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <section class="bg-slate-900/70 border border-fuchsia-900/40 rounded-2xl overflow-hidden shadow-xl">
+      <div class="p-4 md:px-6 border-b border-slate-800/80 bg-slate-900/90 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="text-base md:text-lg font-bold text-white">🧪 Pump.fun Observatory <span class="text-[10px] px-2 py-0.5 rounded bg-fuchsia-500/15 text-fuchsia-300 border border-fuchsia-500/30">READ-ONLY</span></h2>
+          <p class="text-xs text-slate-400 mt-1">Nascimento on-chain → bonding curve → graduação. Sensor informacional; não envia ordens Pump.</p>
+        </div>
+        <div id="pump-observatory-status" class="text-xs font-mono ${pump?.running ? 'text-emerald-400' : 'text-slate-500'}">${pump?.running ? 'STREAM ATIVO' : pump?.enabled ? 'AGUARDANDO STREAM' : 'DESABILITADO'}</div>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 p-4">
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3"><div class="text-[10px] uppercase text-slate-500">Criações observadas</div><div id="pump-created-count" class="text-xl font-black font-mono text-fuchsia-300">${pump?.totalCreatedObserved ?? 0}</div></div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3"><div class="text-[10px] uppercase text-slate-500">Curvas ativas</div><div id="pump-active-count" class="text-xl font-black font-mono text-amber-300">${pump?.activeCurves ?? 0}</div></div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3"><div class="text-[10px] uppercase text-slate-500">Graduações</div><div id="pump-graduated-count" class="text-xl font-black font-mono text-emerald-300">${pump?.graduatedCount ?? 0}</div></div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3"><div class="text-[10px] uppercase text-slate-500">Create → Nexus</div><div id="pump-last-lag" class="text-xl font-black font-mono text-cyan-300">${formatPumpLag(pump?.lastCreateToObserverLagMs)}</div></div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left">
+          <thead><tr class="border-y border-slate-800 text-[10px] uppercase tracking-wider text-slate-500"><th class="py-2 px-4">Token</th><th class="py-2 px-4">Curva</th><th class="py-2 px-4">Estado</th><th class="py-2 px-4">Lag</th><th class="py-2 px-4">Slot</th><th class="py-2 px-4">TX</th></tr></thead>
+          <tbody id="pump-observatory-tbody">${rows || '<tr><td colspan="6" class="py-8 text-center text-slate-500 text-sm">Aguardando CreateEvent oficial da Pump.fun...</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${pump?.lastError ? `<div class="p-3 text-xs text-amber-300 border-t border-slate-800">Último erro de leitura: ${escapeDashboardHtml(pump.lastError)}</div>` : ''}
+    </section>`;
 }
 
 const EXIT_REASON_LABELS: Record<string, { label: string; cls: string }> = {
@@ -375,6 +444,9 @@ export function renderDashboardHtml(state: DashboardState): string {
       </div>
     </section>
 
+    <!-- OBSERVATÓRIO PUMP.FUN READ-ONLY -->
+    ${renderPumpObservatorySection(state)}
+
     <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
       <div class="p-4 md:px-6 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/90">
@@ -514,6 +586,18 @@ export function renderDashboardHtml(state: DashboardState): string {
   <!-- SCRIPT DE AÇÕES & POLLING NATIVO A CADA 2.5s -->
   <script>
     let adminSession = null;
+
+    function escapePumpHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[ch];
+      });
+    }
+
+    function pumpLagText(ms) {
+      const n = Number(ms);
+      if (!Number.isFinite(n)) return '—';
+      return Math.abs(n) < 1000 ? Math.round(n) + ' ms' : (n / 1000).toFixed(1) + ' s';
+    }
     let adminAuthStatus = { configured: false, needsBootstrap: false };
 
     function setAdminMessage(message, isError) {
@@ -801,6 +885,53 @@ export function renderDashboardHtml(state: DashboardState): string {
         if (elMature && incubator.mature !== undefined) elMature.textContent = incubator.mature;
         if (elDiscards && incubator.technicalDiscards !== undefined) elDiscards.textContent = incubator.technicalDiscards;
         if (elAyla && incubator.entryEligible !== undefined) elAyla.textContent = incubator.entryEligible;
+
+        // 3.1 Observatório Pump.fun — apenas leitura.
+        const pump = data.pump || {};
+        const pumpStatus = document.getElementById('pump-observatory-status');
+        const pumpCreated = document.getElementById('pump-created-count');
+        const pumpActive = document.getElementById('pump-active-count');
+        const pumpGraduated = document.getElementById('pump-graduated-count');
+        const pumpLag = document.getElementById('pump-last-lag');
+        if (pumpStatus) {
+          pumpStatus.textContent = pump.running ? 'STREAM ATIVO' : (pump.enabled ? 'AGUARDANDO STREAM' : 'DESABILITADO');
+          pumpStatus.className = 'text-xs font-mono ' + (pump.running ? 'text-emerald-400' : 'text-slate-500');
+        }
+        if (pumpCreated) pumpCreated.textContent = String(Number(pump.totalCreatedObserved || 0));
+        if (pumpActive) pumpActive.textContent = String(Number(pump.activeCurves || 0));
+        if (pumpGraduated) pumpGraduated.textContent = String(Number(pump.graduatedCount || 0));
+        if (pumpLag) pumpLag.textContent = pumpLagText(pump.lastCreateToObserverLagMs);
+
+        const pumpTbody = document.getElementById('pump-observatory-tbody');
+        if (pumpTbody) {
+          const recentPump = Array.isArray(pump.recent) ? pump.recent.slice(0, 12) : [];
+          if (recentPump.length === 0) {
+            pumpTbody.innerHTML = '<tr><td colspan="6" class="py-8 text-center text-slate-500 text-sm">Aguardando CreateEvent oficial da Pump.fun...</td></tr>';
+          } else {
+            pumpTbody.innerHTML = recentPump.map(function (p) {
+              const mint = String(p.mint || '');
+              const signature = String(p.signature || '');
+              const symbol = escapePumpHtml(p.symbol || 'UNKNOWN');
+              const progress = p.progressPct == null ? '—' : Number(p.progressPct).toFixed(2) + '%';
+              const status = p.complete ? 'GRADUADA' : 'CURVA ATIVA';
+              const tokenUrl = 'https://solscan.io/token/' + encodeURIComponent(mint);
+              const pumpUrl = 'https://pump.fun/coin/' + encodeURIComponent(mint);
+              const txUrl = 'https://solscan.io/tx/' + encodeURIComponent(signature);
+              return '<tr class="border-b border-slate-800/60 hover:bg-slate-800/30">' +
+                '<td class="py-3 px-4"><div class="font-semibold text-slate-200 flex items-center gap-2">' +
+                '<span>' + symbol + '</span>' +
+                '<a href="' + tokenUrl + '" target="_blank" rel="noopener" class="text-cyan-400 hover:underline text-xs">Solscan↗</a>' +
+                '<a href="' + pumpUrl + '" target="_blank" rel="noopener" class="text-fuchsia-400 hover:underline text-xs">Pump↗</a>' +
+                '</div><div class="text-[10px] text-slate-500 font-mono">' + escapePumpHtml(mint.slice(0, 8)) + '...' + escapePumpHtml(mint.slice(-6)) + '</div></td>' +
+                '<td class="py-3 px-4 font-mono text-xs text-slate-300">' + progress + '</td>' +
+                '<td class="py-3 px-4 text-xs ' + (p.complete ? 'text-emerald-400' : 'text-amber-300') + '">' + status + '</td>' +
+                '<td class="py-3 px-4 font-mono text-xs text-slate-400">' + pumpLagText(p.createToObserverLagMs) + '</td>' +
+                '<td class="py-3 px-4 font-mono text-xs text-slate-400">' + Number(p.slot || 0) + '</td>' +
+                '<td class="py-3 px-4"><a href="' + txUrl + '" target="_blank" rel="noopener" class="text-cyan-400 hover:underline font-mono text-[11px]">' + escapePumpHtml(signature.slice(0, 10)) + '...↗</a></td>' +
+                '</tr>';
+            }).join('');
+          }
+        }
 
         // 4. Atualiza Tabela de Posições
         const positions = data.positions || [];

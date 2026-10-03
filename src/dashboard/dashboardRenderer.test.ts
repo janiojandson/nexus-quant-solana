@@ -15,6 +15,36 @@ const state: DashboardState = {
   totalRealizedPnlSol: 0,
   totalNetworkFeesSolEst: 0,
   incubator: { waiting: 0, mature: 19, technicalDiscards: 3, entryEligible: 1 },
+  pumpObservatory: {
+    enabled: true,
+    running: true,
+    readOnly: true,
+    totalCreatedObserved: 12,
+    activeCurves: 9,
+    graduatedCount: 3,
+    lastCreateToObserverLagMs: 2400,
+    maxCreateToObserverLagMs: 5100,
+    lastObservedAt: new Date().toISOString(),
+    recent: [{
+      mint: 'PumpMint111111111111111111111111111111111111',
+      symbol: 'PUMPX',
+      name: 'Pump Nexus',
+      creator: 'Creator11111111111111111111111111111111111',
+      bondingCurve: 'Curve111111111111111111111111111111111111',
+      slot: 300123456,
+      signature: 'PumpTx111111111111111111111111111111111111111111111111',
+      eventTimestampMs: Date.now() - 2400,
+      observedAtMs: Date.now(),
+      createToObserverLagMs: 2400,
+      initialRealTokenReserves: '800',
+      currentRealTokenReserves: '320',
+      progressPct: 60,
+      complete: false,
+      solscanUrl: 'https://solscan.io/token/PumpMint111111111111111111111111111111111111',
+      transactionUrl: 'https://solscan.io/tx/PumpTx111111111111111111111111111111111111111111111111',
+      pumpUrl: 'https://pump.fun/coin/PumpMint111111111111111111111111111111111111'
+    }]
+  },
   positions: [{
     mint: 'Mint111111111111111111111111111111111111111',
     symbol: 'TEST',
@@ -49,6 +79,12 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /SL inicial: -6%/);
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
   assert.match(html, /Stop Ativo: Trailing Momentum/);
+  assert.match(html, /Pump\.fun Observatory/);
+  assert.match(html, /READ-ONLY/);
+  assert.match(html, /PUMPX/);
+  assert.match(html, /60\.00%/);
+  assert.match(html, /pump\.fun\/coin\/PumpMint/);
+  assert.match(html, /solscan\.io\/token\/PumpMint/);
 
   assert.match(html, /ENTRAR ADMIN/);
   assert.match(html, /PÂNICO GERAL/);
@@ -81,4 +117,23 @@ test('todos os scripts inline gerados pelo dashboard têm sintaxe JavaScript vá
       `script inline #${index} deve compilar sem SyntaxError`
     );
   });
+});
+
+
+test('Pump Observatory escapa nome/símbolo não confiável antes de renderizar HTML', () => {
+  const pump = state.pumpObservatory!;
+  const maliciousState: DashboardState = {
+    ...state,
+    pumpObservatory: {
+      ...pump,
+      recent: [{
+        ...pump.recent[0],
+        symbol: '<img src=x onerror=alert(1)>',
+        name: '<script>alert(1)</script>'
+      }]
+    }
+  };
+  const html = renderDashboardHtml(maliciousState);
+  assert.doesNotMatch(html, /<img src=x onerror=alert\(1\)>/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
 });
