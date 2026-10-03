@@ -75,3 +75,11 @@ test('replay ignora marcas sem saída executável e ordena o caminho', () => {
     { atMs: 31_000, valueSol: 1.5 }
   ]);
 });
+
+
+test('janela de graduação não impede a janela temporal do mesmo mint no tick seguinte', () => {
+  const seen = new Set<any>();
+  assert.deepEqual(dueEntryWindows({ ageMs: 180_000, progressPct: 70, complete: false, seen }), ['NEAR_GRAD_60_80']);
+  seen.add('NEAR_GRAD_60_80');
+  assert.deepEqual(dueEntryWindows({ ageMs: 180_001, progressPct: 70, complete: false, seen }), ['ENTRY_3M']);
+});
