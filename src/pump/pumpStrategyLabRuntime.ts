@@ -17,9 +17,7 @@ import {
   type PumpEntryWindow
 } from './pumpMultiEntryLab.js';
 import {
-  BASELINE_CURRENT,
-  PARTIAL_HARVEST_EARLIER,
-  TIERED_PROFIT_LOCK,
+  SHADOW_EXIT_POLICIES,
   replayExitPolicy,
   type ExitReplayResult
 } from './exitPolicyReplay.js';
@@ -48,6 +46,7 @@ export interface PumpStrategyHorizon {
 
 export interface PumpStrategyLabSnapshot {
   mode: 'SHADOW';
+  lastError?: 'SAMPLE_FAILED';
   totalSamples: number;
   preferredJupiterPlan: string;
   preferredPlanNetAfterCostSol?: number;
@@ -111,6 +110,8 @@ export class PumpStrategyLabRuntime {
   private readonly trackedMints = new Map<string, TrackedMintState>();
   private readonly shadows = new Map<string, ShadowState>();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private sampling = false;
+  private lastError?: 'SAMPLE_FAILED';
   private currentSnapshot: PumpStrategyLabSnapshot = {
     mode: 'SHADOW',
     totalSamples: 0,
@@ -158,13 +159,28 @@ export class PumpStrategyLabRuntime {
   snapshot(): PumpStrategyLabSnapshot {
     return {
       ...this.currentSnapshot,
+      lastError: this.lastError,
       strategies: this.currentSnapshot.strategies.map(item => ({ ...item }))
     };
   }
 
   async sample(): Promise<void> {
-    if (!this.enabled || !this.canRunResearch()) return;
+    if (!this.enabled || this.sampling) return;
+    this.sampling = true;
+    try {
+      if (!this.canRunResearch()) return;
+      await this.sampleOnce();
+      this.lastError = undefined;
+    } catch {
+      // A research sensor/store outage must not become an unhandled timer rejection.
+      // Keep diagnostics free of connection strings or other provider secrets.
+      this.lastError = 'SAMPLE_FAILED';
+    } finally {
+      this.sampling = false;
+    }
+  }
 
+  private async sampleOnce(): Promise<void> {
     const now = this.now();
     const observations = this.source.snapshot().recent;
     this.trackObservations(observations, now);
@@ -266,11 +282,21 @@ export class PumpStrategyLabRuntime {
     });
     if (!timing.routeAvailable || !timing.outAmount || timing.outAmount <= 0) return false;
 
+    const entryAtMs = this.now();
+    const tracked = this.trackedMints.get(mint);
+    if (!tracked || !dueEntryWindows({
+      ageMs: entryAtMs - eventTimestampMs,
+      progressPct: tracked.progressPct,
+      complete: tracked.complete,
+      sinceGraduationMs: tracked.graduatedAtMs == null ? undefined : entryAtMs - tracked.graduatedAtMs,
+      seen: tracked.attemptedWindows
+    }).includes(entryWindow)) return false;
+
     const trade = createShadowTrade({
       mint,
       cohort,
       venue: 'JUPITER_ROUTE',
-      entryAtMs: now,
+      entryAtMs,
       entryPrincipalSol: this.entryLamports / 1e9,
       entryFeeBps: 0,
       entrySlippageBps: 0,
@@ -278,6 +304,21 @@ export class PumpStrategyLabRuntime {
       networkFeeLamports: this.networkFeeLamports
     });
     const shadowKey = `${mint}:${entryWindow}`;
+    await this.store?.appendShadowTrade({
+      mint,
+      cohort,
+      venue: trade.venue,
+      entryAtMs,
+      payload: {
+        trade,
+        entryWindow,
+        entryAgeMs: entryAtMs - eventTimestampMs,
+        quoteRequestedAtMs: now,
+        firstRouteLagMs: timing.firstRouteLagMs,
+        router: timing.router,
+        tokenAmountAtomic: timing.outAmount
+      }
+    });
     this.shadows.set(shadowKey, {
       mint,
       entryWindow,
@@ -285,20 +326,6 @@ export class PumpStrategyLabRuntime {
       tokenAmountAtomic: timing.outAmount,
       trade,
       markedHorizons: new Set()
-    });
-    await this.store?.appendShadowTrade({
-      mint,
-      cohort,
-      venue: trade.venue,
-      entryAtMs: now,
-      payload: {
-        trade,
-        entryWindow,
-        entryAgeMs: now - eventTimestampMs,
-        firstRouteLagMs: timing.firstRouteLagMs,
-        router: timing.router,
-        tokenAmountAtomic: timing.outAmount
-      }
     });
     return true;
   }
@@ -321,14 +348,16 @@ export class PumpStrategyLabRuntime {
         trafficPriority: 6
       });
       grossExitValueSol = Math.max(0, quote.outAmount / 1e9);
-      executable = grossExitValueSol > 0;
+      executable = Number.isFinite(grossExitValueSol) && grossExitValueSol > 0;
     } catch (err: any) {
-      error = err?.message || String(err);
+      error = 'QUOTE_UNAVAILABLE';
     }
 
-    const mark = recordShadowExitMark(state.trade, {
+    const observedAtMs = this.now();
+    const candidateTrade = { ...state.trade, exitMarks: [...state.trade.exitMarks] };
+    const mark = recordShadowExitMark(candidateTrade, {
       horizon: horizon.label,
-      observedAtMs: now,
+      observedAtMs,
       grossExitValueSol,
       executable,
       exitFeeBps: 0,
@@ -336,30 +365,43 @@ export class PumpStrategyLabRuntime {
       priorityFeeLamports: this.priorityFeeLamports,
       networkFeeLamports: this.networkFeeLamports
     });
-    state.markedHorizons.add(horizon.label);
 
-    const replayPath = buildExecutableReplayPath(
-      state.trade.entryPrincipalSol,
-      state.trade.entryAtMs,
-      state.trade.exitMarks
-    );
-    const exitPolicyReplays = replayPath.length > 1
-      ? [BASELINE_CURRENT, TIERED_PROFIT_LOCK, PARTIAL_HARVEST_EARLIER]
-          .map(policy => replayExitPolicy(replayPath, policy, { feeBps: 0, slippageBps: 0 }))
-      : [];
+    const exitPolicyReplays = this.replayPolicies(candidateTrade, candidateTrade.exitMarks);
 
     await this.store?.appendMarketSample({
       mint,
-      sampledAtMs: now,
+      sampledAtMs: observedAtMs,
       cohort: state.trade.cohort,
       venue: state.trade.venue,
       payload: {
         mark,
         error,
+        quoteRequestedAtMs: now,
         entryWindow: state.entryWindow,
         exitPolicyReplays
       }
     });
+    state.trade.exitMarks.push(mark);
+    state.markedHorizons.add(horizon.label);
+  }
+
+  private replayPolicies(
+    trade: PumpShadowTrade,
+    marks: PumpShadowTrade['exitMarks']
+  ): ExitReplayResult[] {
+    // Closing at the horizon requires a current executable quote. An earlier
+    // quote cannot stand in for a missing exit at this horizon.
+    if (!marks.at(-1)?.executable) return [];
+    const path = buildExecutableReplayPath(trade.entryPrincipalSol, trade.entryAtMs, marks);
+    if (path.length < 2) return [];
+    const costs = {
+      // Quote output already incorporates route fees and price impact.
+      feeBps: 0,
+      slippageBps: 0,
+      entryCostSol: (trade.networkFeeLamports + trade.priorityFeeLamports) / 1e9,
+      exitCostSol: (this.networkFeeLamports + this.priorityFeeLamports) / 1e9
+    };
+    return SHADOW_EXIT_POLICIES.map(policy => replayExitPolicy(path, policy, costs));
   }
 
   private async refreshSummary(): Promise<void> {
@@ -404,18 +446,10 @@ export class PumpStrategyLabRuntime {
           entryLatencyMs: state.trade.entryAtMs - state.eventTimestampMs
         });
 
-        const replayPath = buildExecutableReplayPath(
-          state.trade.entryPrincipalSol,
-          state.trade.entryAtMs,
-          state.trade.exitMarks.slice(0, markIndex + 1)
-        );
-        if (replayPath.length > 1) {
-          for (const policy of [BASELINE_CURRENT, TIERED_PROFIT_LOCK, PARTIAL_HARVEST_EARLIER]) {
-            const result = replayExitPolicy(replayPath, policy, { feeBps: 0, slippageBps: 0 });
-            const aggregate = group.replays.get(policy.name) ?? { policy: policy.name, rows: [] };
-            aggregate.rows.push(result);
-            group.replays.set(policy.name, aggregate);
-          }
+        for (const result of this.replayPolicies(state.trade, state.trade.exitMarks.slice(0, markIndex + 1))) {
+          const aggregate = group.replays.get(result.policy) ?? { policy: result.policy, rows: [] };
+          aggregate.rows.push(result);
+          group.replays.set(result.policy, aggregate);
         }
         grouped.set(key, group);
       }

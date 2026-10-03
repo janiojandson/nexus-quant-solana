@@ -6,6 +6,7 @@ export type PumpEntryWindow =
   | 'ENTRY_30S'
   | 'ENTRY_3M'
   | 'ENTRY_5M'
+  | 'CURVE_5_15M'
   | 'NEAR_GRAD_60_80'
   | 'NEAR_GRAD_80_95'
   | 'NEAR_GRAD_95_100'
@@ -48,7 +49,8 @@ export function dueEntryWindows(input: EntryWindowInput): PumpEntryWindow[] {
   if (ageMs < 15_000) return unseen('LAUNCH_0_15S') ? ['LAUNCH_0_15S'] : [];
   if (ageMs >= 30_000 && ageMs < 60_000) return unseen('ENTRY_30S') ? ['ENTRY_30S'] : [];
   if (ageMs >= 180_000 && ageMs < 300_000) return unseen('ENTRY_3M') ? ['ENTRY_3M'] : [];
-  if (ageMs >= 300_000 && ageMs <= 900_000) return unseen('ENTRY_5M') ? ['ENTRY_5M'] : [];
+  if (ageMs >= 300_000 && ageMs < 360_000 && unseen('ENTRY_5M')) return ['ENTRY_5M'];
+  if (ageMs >= 300_000 && ageMs <= 900_000 && unseen('CURVE_5_15M')) return ['CURVE_5_15M'];
   return [];
 }
 

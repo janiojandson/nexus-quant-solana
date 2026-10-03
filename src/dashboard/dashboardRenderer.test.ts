@@ -187,6 +187,21 @@ test('Strategy Lab possui atualização dinâmica via /api/status', () => {
   assert.match(html, /data\.pumpStrategyLab/);
 });
 
+test('Strategy Lab exposes a temporary collection failure and sampled replay scope', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpStrategyLab: {
+      mode: 'SHADOW',
+      lastError: 'SAMPLE_FAILED',
+      totalSamples: 0,
+      strategies: []
+    } as any
+  });
+  assert.match(html, /Coleta temporariamente indisponível/);
+  assert.match(html, /cotações amostradas/);
+  assert.match(html, /strategyLab\.lastError/);
+});
+
 
 test('Dashboard deixa explícito que Pump SELL fallback está desabilitado por padrão', () => {
   const html = renderDashboardHtml({

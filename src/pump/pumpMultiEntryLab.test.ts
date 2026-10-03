@@ -83,3 +83,12 @@ test('janela de graduação não impede a janela temporal do mesmo mint no tick 
   seen.add('NEAR_GRAD_60_80');
   assert.deepEqual(dueEntryWindows({ ageMs: 180_001, progressPct: 70, complete: false, seen }), ['ENTRY_3M']);
 });
+
+test('entrada de minuto 5 e faixa de 5-15m geram evidências distintas sem retroagir', () => {
+  const seen = new Set<any>(['ENTRY_5M']);
+  assert.deepEqual(dueEntryWindows({ ageMs: 360_000, progressPct: 20, complete: false, seen }), ['CURVE_5_15M']);
+  assert.deepEqual(dueEntryWindows({ ageMs: 720_000, progressPct: 20, complete: false, seen: new Set() }), ['CURVE_5_15M']);
+  assert.equal(entryWindowToCohort('CURVE_5_15M' as any), 'CURVE_5_15M');
+  seen.add('CURVE_5_15M');
+  assert.deepEqual(dueEntryWindows({ ageMs: 900_000, progressPct: 20, complete: false, seen }), []);
+});

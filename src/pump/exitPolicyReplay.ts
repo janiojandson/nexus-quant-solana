@@ -22,6 +22,8 @@ export interface ExitReplayPolicy {
 export interface ExitReplayCosts {
   feeBps: number;
   slippageBps: number;
+  entryCostSol?: number;
+  exitCostSol?: number;
 }
 
 export interface ExitReplayResult {
@@ -48,11 +50,13 @@ export const BASELINE_CURRENT: ExitReplayPolicy = {
 export const TIERED_PROFIT_LOCK: ExitReplayPolicy = {
   ...BASELINE_CURRENT,
   name: 'TIERED_PROFIT_LOCK',
+  // Shadow candidates: at activation these floors are tighter than the 10%
+  // runner, so this policy can produce evidence distinct from the baseline.
   profitLocks: [
-    { peakPct: 0.50, floorPct: 0.25 },
-    { peakPct: 1.00, floorPct: 0.60 },
-    { peakPct: 2.00, floorPct: 1.40 },
-    { peakPct: 3.00, floorPct: 2.20 }
+    { peakPct: 0.50, floorPct: 0.40 },
+    { peakPct: 1.00, floorPct: 0.85 },
+    { peakPct: 2.00, floorPct: 1.80 },
+    { peakPct: 3.00, floorPct: 2.70 }
   ]
 };
 
@@ -63,11 +67,38 @@ export const PARTIAL_HARVEST_EARLIER: ExitReplayPolicy = {
   partialFraction: 0.35
 };
 
+// Research-only alternatives: these do not alter the live position exit engine.
+export const STOP_ONLY: ExitReplayPolicy = {
+  ...BASELINE_CURRENT,
+  name: 'STOP_ONLY',
+  earlyTrailingTriggerPct: Infinity,
+  partialTakeProfitPct: Infinity,
+  partialFraction: 0
+};
+
+export const RUNNER_ONLY: ExitReplayPolicy = {
+  ...BASELINE_CURRENT,
+  name: 'RUNNER_ONLY',
+  earlyTrailingTriggerPct: BASELINE_CURRENT.partialTakeProfitPct,
+  earlyTrailingDistance: BASELINE_CURRENT.runnerTrailingDistance,
+  partialTakeProfitPct: Infinity,
+  partialFraction: 0
+};
+
+export const SHADOW_EXIT_POLICIES: readonly ExitReplayPolicy[] = [
+  STOP_ONLY,
+  BASELINE_CURRENT,
+  PARTIAL_HARVEST_EARLIER,
+  RUNNER_ONLY,
+  TIERED_PROFIT_LOCK
+];
+
 function netSale(grossSol: number, fraction: number, costs: ExitReplayCosts): { net: number; slip: number } {
   const gross = Math.max(0, grossSol) * Math.max(0, Math.min(1, fraction));
   const slip = gross * Math.max(0, costs.slippageBps) / 10_000;
   const fee = gross * Math.max(0, costs.feeBps) / 10_000;
-  return { net: Math.max(0, gross - slip - fee), slip };
+  const transactionCost = Math.max(0, costs.exitCostSol ?? 0);
+  return { net: Math.max(0, gross - slip - fee) - transactionCost, slip };
 }
 
 export function replayExitPolicy(
@@ -83,7 +114,7 @@ export function replayExitPolicy(
   let peak = entry;
   let partialTaken = false;
   let remainingFraction = 1;
-  let capturedNetSol = 0;
+  let capturedNetSol = -Math.max(0, costs.entryCostSol ?? 0);
   let realizedSlippageSol = 0;
   let exitIndex = path.length - 1;
   let exitReason: ExitReplayResult['exitReason'] = 'END_OF_PATH';
@@ -95,7 +126,7 @@ export function replayExitPolicy(
     const pnlPct = (point.valueSol - entry) / entry;
     const peakPct = (peak - entry) / entry;
 
-    if (!partialTaken && pnlPct >= policy.partialTakeProfitPct) {
+    if (!partialTaken && policy.partialFraction > 0 && pnlPct >= policy.partialTakeProfitPct) {
       const sale = netSale(point.valueSol, policy.partialFraction, costs);
       capturedNetSol += sale.net;
       realizedSlippageSol += sale.slip;

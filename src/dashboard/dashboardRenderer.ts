@@ -74,6 +74,7 @@ export interface DashboardState {
   pumpObservatory?: PumpObservatorySnapshot;
   pumpStrategyLab?: {
     mode: 'SHADOW';
+    lastError?: string;
     totalSamples: number;
     preferredJupiterPlan?: string;
     preferredPlanNetAfterCostSol?: number;
@@ -244,9 +245,11 @@ function renderPumpStrategyLabSection(state: DashboardState): string {
         <div>
           <h2 class="text-base md:text-lg font-bold text-white">📐 Pump Strategy Lab <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">SHADOW</span></h2>
           <p class="text-xs text-slate-400 mt-1">Compara cohort, venue, custos e saída executável. Nenhuma estratégia é promovida sem evidência suficiente.</p>
+          <p class="text-xs text-slate-400 mt-1">Replays sobre cotações amostradas, com custos de rede/prioridade estimados por transação.</p>
         </div>
         <div id="pump-strategy-lab-samples" class="text-xs font-mono text-slate-400">Amostras: ${lab?.totalSamples ?? 0}</div>
       </div>
+      <div id="pump-strategy-lab-error" ${lab?.lastError ? '' : 'hidden'} class="p-3 text-xs text-amber-300 border-b border-slate-800">${lab?.lastError ? 'Coleta temporariamente indisponível; aguardando recuperação.' : ''}</div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-4">
         <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
           <div class="text-[10px] uppercase text-slate-500">Jupiter economicamente preferido</div>
@@ -1101,6 +1104,13 @@ export function renderDashboardHtml(state: DashboardState): string {
         const labPlan = document.getElementById('pump-strategy-lab-plan');
         const labNet = document.getElementById('pump-strategy-lab-net');
         const labTbody = document.getElementById('pump-strategy-lab-tbody');
+        const labError = document.getElementById('pump-strategy-lab-error');
+        if (labError) {
+          labError.hidden = !strategyLab.lastError;
+          labError.textContent = strategyLab.lastError
+            ? 'Coleta temporariamente indisponível; aguardando recuperação.'
+            : '';
+        }
         if (labSamples) labSamples.textContent = 'Amostras: ' + Number(strategyLab.totalSamples || 0);
         if (labPlan) labPlan.textContent = String(strategyLab.preferredJupiterPlan || 'INSUFFICIENT_DATA');
         if (labNet) {
