@@ -20,12 +20,35 @@ export interface PositionTracking {
   trailingActive?: boolean;
   trailingStopSolValue?: number;
   stopStatusText?: string;
+  /** Legado: pico executável usado pelo trailing. */
   peakSolValue?: number;
+  /** Maior valor observado por sensor de alta frequência, mesmo sem rota executável. */
+  observablePeakSolValue?: number;
+  /** Maior valor confirmado como executável/localmente vendável. */
+  executablePeakSolValue?: number;
+  /** Última cotação executável Jupiter; pode cair sem reduzir o pico executável. */
+  lastJupiterExecutableSolValue?: number;
+  /** Epoch ms da última rota de saída comprovadamente saudável. */
+  lastHealthyExitRouteAt?: number;
 }
 
 export interface PositionInput extends Omit<PositionTracking, 'stopLossPct' | 'takeProfitPct'> {
   stopLossPct?: number;
   takeProfitPct?: number;
+}
+
+export interface ExitRouteObservation {
+  observableSolValue?: number;
+  executableSolValue?: number;
+  jupiterExecutableSolValue?: number;
+  healthyAtMs?: number;
+}
+
+export interface ExitWatermarks {
+  observablePeakSolValue: number;
+  executablePeakSolValue: number;
+  lastJupiterExecutableSolValue?: number;
+  lastHealthyExitRouteAt?: number;
 }
 
 export interface ClosedTrade {
@@ -38,7 +61,7 @@ export interface ClosedTrade {
   exitTimestamp: number;
   pnlPct: number;
   pnlUsdEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
   txSignature?: string;
   pnlSolEst?: number;
 }
@@ -123,11 +146,73 @@ export class PositionExitEngine {
     // Inicializa/reidrata o pico. Em restart de um runner, nunca devemos
     // esquecer o watermark já persistido e afrouxar o trailing silenciosamente.
     const entrySol = fullPosition.entrySol || 0.015;
-    const restoredPeak = Number(fullPosition.peakSolValue || 0);
-    this.peakSolValues.set(
-      fullPosition.mint,
-      Number.isFinite(restoredPeak) && restoredPeak > entrySol ? restoredPeak : entrySol
+    const restoredExecutablePeak = Number(
+      fullPosition.executablePeakSolValue ?? fullPosition.peakSolValue ?? 0
     );
+    const executablePeak = Number.isFinite(restoredExecutablePeak) && restoredExecutablePeak > entrySol
+      ? restoredExecutablePeak
+      : entrySol;
+    const restoredObservablePeak = Number(fullPosition.observablePeakSolValue ?? 0);
+    const observablePeak = Number.isFinite(restoredObservablePeak) && restoredObservablePeak > executablePeak
+      ? restoredObservablePeak
+      : executablePeak;
+
+    fullPosition.executablePeakSolValue = executablePeak;
+    fullPosition.observablePeakSolValue = observablePeak;
+    fullPosition.peakSolValue = executablePeak;
+    this.peakSolValues.set(fullPosition.mint, executablePeak);
+  }
+
+  public recordExitRouteObservation(mint: string, observation: ExitRouteObservation): boolean {
+    const position = this.activePositions.get(mint);
+    if (!position) return false;
+
+    const entrySol = position.entrySol || 0.015;
+    const currentExecutablePeak = this.peakSolValues.get(mint) || entrySol;
+    const currentObservablePeak = Number(position.observablePeakSolValue || currentExecutablePeak);
+
+    const observable = Number(observation.observableSolValue);
+    if (Number.isFinite(observable) && observable > 0) {
+      position.observablePeakSolValue = Math.max(currentObservablePeak, observable);
+    }
+
+    const executable = Number(observation.executableSolValue);
+    if (Number.isFinite(executable) && executable > 0) {
+      const nextExecutablePeak = Math.max(currentExecutablePeak, executable);
+      this.peakSolValues.set(mint, nextExecutablePeak);
+      position.executablePeakSolValue = nextExecutablePeak;
+      position.peakSolValue = nextExecutablePeak;
+      position.observablePeakSolValue = Math.max(
+        Number(position.observablePeakSolValue || nextExecutablePeak),
+        nextExecutablePeak
+      );
+    }
+
+    const jupiterValue = Number(observation.jupiterExecutableSolValue);
+    if (Number.isFinite(jupiterValue) && jupiterValue > 0) {
+      position.lastJupiterExecutableSolValue = jupiterValue;
+    }
+
+    const healthyAtMs = Number(observation.healthyAtMs);
+    if (Number.isFinite(healthyAtMs) && healthyAtMs > 0) {
+      position.lastHealthyExitRouteAt = Math.max(
+        Number(position.lastHealthyExitRouteAt || 0),
+        healthyAtMs
+      );
+    }
+
+    return true;
+  }
+
+  public getExitWatermarks(mint: string): ExitWatermarks {
+    const position = this.activePositions.get(mint);
+    const executablePeak = this.peakSolValues.get(mint) || position?.entrySol || 0;
+    return {
+      observablePeakSolValue: Number(position?.observablePeakSolValue || executablePeak),
+      executablePeakSolValue: Number(position?.executablePeakSolValue || executablePeak),
+      lastJupiterExecutableSolValue: position?.lastJupiterExecutableSolValue,
+      lastHealthyExitRouteAt: position?.lastHealthyExitRouteAt
+    };
   }
 
   public getPosition(mint: string): PositionTracking | undefined {
@@ -171,7 +256,14 @@ export class PositionExitEngine {
     // Sem isto, 50% dos tokens eram comparados contra 100% do SOL investido.
     position.entrySol = (position.entrySol || 0.015) * remainingRatio;
     position.stopLossPct = 0.01;
-    this.peakSolValues.set(mint, currentSolValue * remainingRatio);
+    const reducedPeak = currentSolValue * remainingRatio;
+    this.peakSolValues.set(mint, reducedPeak);
+    position.peakSolValue = reducedPeak;
+    position.executablePeakSolValue = reducedPeak;
+    position.observablePeakSolValue = reducedPeak;
+    if (position.lastJupiterExecutableSolValue != null) {
+      position.lastJupiterExecutableSolValue *= remainingRatio;
+    }
     return true;
   }
 
@@ -252,10 +344,14 @@ export class PositionExitEngine {
       return { shouldExit: false, type: 'HOLD', pnlPct: 0, currentPriceUsd: 0 };
     }
 
-    // Atualiza pico máximo se valor atual superou o anterior
+    // O valor fornecido aqui é executável/localmente vendável. Atualiza o
+    // watermark executável sem jamais permitir que uma leitura menor reduza o topo.
     const previousPeak = this.peakSolValues.get(mint) || entrySol;
-    const newPeak = Math.max(previousPeak, currentSolValue);
-    this.peakSolValues.set(mint, newPeak);
+    this.recordExitRouteObservation(mint, {
+      observableSolValue: currentSolValue,
+      executableSolValue: currentSolValue
+    });
+    const newPeak = this.peakSolValues.get(mint) || previousPeak;
 
     const pnlPct = Math.round(((currentSolValue - entrySol) / entrySol) * 100000) / 100000;
     const peakPnlPct = Math.round(((newPeak - entrySol) / entrySol) * 100000) / 100000;

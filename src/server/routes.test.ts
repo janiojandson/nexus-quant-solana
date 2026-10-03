@@ -27,6 +27,21 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
       balanceSol: 0.15,
       positions: [],
       closedTrades: [],
+      exitCapacity: {
+        admit: false,
+        requiredRps: 1.333,
+        availableRps: 1,
+        reason: 'Exit protection capacity exceeded'
+      },
+      exitPathHealth: {
+        state: 'DEGRADED',
+        canOpenNewPosition: false,
+        canRunResearch: false,
+        maxFailures: 2,
+        affectedMints: ['MintA'],
+        reason: 'Jupiter /order unavailable',
+        lastChangedAt: new Date().toISOString()
+      },
       pumpObservatory: {
         enabled: true,
         running: true,
@@ -35,6 +50,13 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
         activeCurves: 5,
         graduatedCount: 2,
         recent: []
+      },
+      pumpDirectSellFallback: {
+        enabled: false,
+        selectedPath: 'NONE',
+        confirmationState: 'IDLE',
+        estimatedCostSol: null,
+        fallbackReason: null
       }
     }
   } as any;
@@ -46,6 +68,13 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   const payload = JSON.parse(responseData);
   assert.strictEqual(payload.pump.readOnly, true);
   assert.strictEqual(payload.pump.totalCreatedObserved, 7);
+  assert.strictEqual(payload.operational.exitCapacity.admit, false);
+  assert.strictEqual(payload.operational.exitCapacity.requiredRps, 1.333);
+  assert.strictEqual(payload.operational.exitPathHealth.state, 'DEGRADED');
+  assert.strictEqual(payload.operational.exitPathHealth.canOpenNewPosition, false);
+  assert.strictEqual(payload.operational.pumpDirectSellFallback.enabled, false);
+  assert.strictEqual(payload.operational.pumpDirectSellFallback.selectedPath, 'NONE');
+  assert.strictEqual(payload.operational.pumpDirectSellFallback.confirmationState, 'IDLE');
 });
 
 test('handleApiRoutes: deve responder 200 OK na rota /health', async () => {

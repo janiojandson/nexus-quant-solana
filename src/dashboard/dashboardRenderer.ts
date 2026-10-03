@@ -11,7 +11,7 @@ export interface ClosedTradeView {
   exitTimestamp: number;
   pnlPct: number;
   pnlSolEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
@@ -72,6 +72,42 @@ export interface DashboardState {
     entryEligible: number;
   };
   pumpObservatory?: PumpObservatorySnapshot;
+  pumpStrategyLab?: {
+    mode: 'SHADOW';
+    totalSamples: number;
+    preferredJupiterPlan?: string;
+    preferredPlanNetAfterCostSol?: number;
+    strategies: Array<{
+      cohort: string;
+      venue: string;
+      state: string;
+      sampleCount: number;
+      meanNetReturnPct?: number;
+      executableExitRate: number;
+    }>;
+  };
+  pumpDirectSellFallback?: {
+    enabled: boolean;
+    selectedPath: 'NONE' | 'JUPITER' | 'PUMP_DIRECT';
+    confirmationState: 'IDLE' | 'PENDING' | 'CONFIRMED' | 'UNCERTAIN' | 'FAILED';
+    estimatedCostSol: number | null;
+    fallbackReason: string | null;
+  };
+  exitCapacity?: {
+    admit: boolean;
+    requiredRps: number;
+    availableRps: number;
+    reason?: string;
+  };
+  exitPathHealth?: {
+    state: 'HEALTHY' | 'DEGRADED' | 'EMERGENCY';
+    canOpenNewPosition: boolean;
+    canRunResearch: boolean;
+    maxFailures: number;
+    affectedMints: string[];
+    reason?: string;
+    lastChangedAt: string;
+  };
   positions: Array<{
     mint: string;
     symbol: string;
@@ -172,8 +208,77 @@ function renderPumpObservatorySection(state: DashboardState): string {
     </section>`;
 }
 
+function renderPumpStrategyLabSection(state: DashboardState): string {
+  const lab = state.pumpStrategyLab;
+  const rows = (lab?.strategies || []).map(item => `
+    <tr class="border-b border-slate-800/60">
+      <td class="py-2 px-3 font-mono text-xs text-slate-300">${escapeDashboardHtml(item.cohort)}</td>
+      <td class="py-2 px-3 text-xs text-slate-300">${escapeDashboardHtml(item.venue)}</td>
+      <td class="py-2 px-3 text-xs text-cyan-300">${escapeDashboardHtml(item.state)}</td>
+      <td class="py-2 px-3 font-mono text-xs text-slate-400">${item.sampleCount}</td>
+      <td class="py-2 px-3 font-mono text-xs text-slate-400">${item.meanNetReturnPct == null ? '—' : item.meanNetReturnPct.toFixed(2) + '%'}</td>
+      <td class="py-2 px-3 font-mono text-xs text-slate-400">${(item.executableExitRate * 100).toFixed(1)}%</td>
+    </tr>`).join('');
+
+  return `
+    <section class="bg-slate-900/70 border border-cyan-900/40 rounded-2xl overflow-hidden shadow-xl">
+      <div class="p-4 md:px-6 border-b border-slate-800/80 bg-slate-900/90 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="text-base md:text-lg font-bold text-white">📐 Pump Strategy Lab <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">SHADOW</span></h2>
+          <p class="text-xs text-slate-400 mt-1">Compara cohort, venue, custos e saída executável. Nenhuma estratégia é promovida sem evidência suficiente.</p>
+        </div>
+        <div id="pump-strategy-lab-samples" class="text-xs font-mono text-slate-400">Amostras: ${lab?.totalSamples ?? 0}</div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-4">
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
+          <div class="text-[10px] uppercase text-slate-500">Jupiter economicamente preferido</div>
+          <div id="pump-strategy-lab-plan" class="text-lg font-black font-mono text-cyan-300">${escapeDashboardHtml(lab?.preferredJupiterPlan || 'INSUFFICIENT_DATA')}</div>
+        </div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
+          <div class="text-[10px] uppercase text-slate-500">Resultado líquido após custo do plano</div>
+          <div id="pump-strategy-lab-net" class="text-lg font-black font-mono text-emerald-300">${lab?.preferredPlanNetAfterCostSol == null ? '—' : lab.preferredPlanNetAfterCostSol.toFixed(6) + ' SOL'}</div>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left">
+          <thead><tr class="border-y border-slate-800 text-[10px] uppercase tracking-wider text-slate-500"><th class="py-2 px-3">Cohort</th><th class="py-2 px-3">Venue</th><th class="py-2 px-3">Estado</th><th class="py-2 px-3">N</th><th class="py-2 px-3">Retorno líquido</th><th class="py-2 px-3">Saída executável</th></tr></thead>
+          <tbody id="pump-strategy-lab-tbody">${rows || '<tr><td colspan="6" class="py-6 text-center text-slate-500 text-sm">INSUFFICIENT_DATA — coletando evidência shadow.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+function renderPumpSellFallbackSection(state: DashboardState): string {
+  const fallback = state.pumpDirectSellFallback || {
+    enabled: false,
+    selectedPath: 'NONE' as const,
+    confirmationState: 'IDLE' as const,
+    estimatedCostSol: null,
+    fallbackReason: null
+  };
+  const status = fallback.enabled ? 'ARMADO' : 'DESABILITADO';
+  const cost = fallback.estimatedCostSol == null ? 'N/D' : fallback.estimatedCostSol.toFixed(9) + ' SOL';
+  return `
+    <section class="bg-slate-900/70 border border-rose-900/40 rounded-2xl p-4 shadow-xl">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="text-base font-bold text-white">🛟 Pump SELL Fallback <span class="text-[10px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">SELL-only</span></h2>
+          <p class="text-xs text-slate-400 mt-1">Fallback direto de proteção; nunca autoriza BUY direto.</p>
+        </div>
+        <div id="pump-sell-fallback-enabled" class="text-xs font-mono ${fallback.enabled ? 'text-emerald-400' : 'text-slate-500'}">${status}</div>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
+        <div><div class="text-[10px] uppercase text-slate-500">Última rota</div><div id="pump-sell-fallback-path" class="font-mono text-sm text-cyan-300">${escapeDashboardHtml(fallback.selectedPath)}</div></div>
+        <div><div class="text-[10px] uppercase text-slate-500">Confirmação</div><div id="pump-sell-fallback-confirmation" class="font-mono text-sm text-amber-300">${escapeDashboardHtml(fallback.confirmationState)}</div></div>
+        <div><div class="text-[10px] uppercase text-slate-500">Custo estimado</div><div id="pump-sell-fallback-cost" class="font-mono text-sm text-slate-300">${cost}</div></div>
+        <div><div class="text-[10px] uppercase text-slate-500">Motivo fallback</div><div id="pump-sell-fallback-reason" class="font-mono text-xs text-slate-400">${escapeDashboardHtml(fallback.fallbackReason || '—')}</div></div>
+      </div>
+    </section>`;
+}
+
 const EXIT_REASON_LABELS: Record<string, { label: string; cls: string }> = {
   STOP_LOSS: { label: 'Stop Loss', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
+  WATCHDOG_EXIT: { label: 'Watchdog Exit', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
   PARTIAL_TAKE_PROFIT_50: { label: 'Colheita Parcial +35%', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
   TRAILING_STOP: { label: 'Trailing Stop', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
   TIME_STOP: { label: 'Time-Stop', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
@@ -358,13 +463,31 @@ export function renderDashboardHtml(state: DashboardState): string {
     </header>
 
     <!-- ESTADO OPERACIONAL REAL -->
-    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
         <div class="text-[10px] uppercase tracking-wider text-slate-500">Execução</div>
         <div id="op-execution-mode" class="mt-1 font-bold ${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">
           ${state.dryRun ? 'DRY-RUN' : 'REAL ON-CHAIN'}
         </div>
         <div class="text-[10px] text-slate-500 mt-1">RPC: ${state.activeRpcUrl || 'n/a'}</div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Proteção de Saída</div>
+        <div id="op-exit-health-status" class="mt-1 font-bold ${
+          state.exitPathHealth?.state === 'HEALTHY'
+            ? 'text-emerald-400'
+            : state.exitPathHealth?.state === 'EMERGENCY'
+              ? 'text-rose-400'
+              : 'text-amber-400'
+        }">
+          ${state.exitPathHealth?.state || 'HEALTHY'}
+        </div>
+        <div id="op-exit-health-detail" class="text-[10px] text-slate-500 mt-1">
+          ${escapeDashboardHtml(
+            state.exitPathHealth?.reason ||
+            `Falhas: ${state.exitPathHealth?.maxFailures ?? 0} · novas entradas ${state.exitPathHealth?.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'}`
+          )}
+        </div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
         <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1</div>
@@ -446,6 +569,12 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     <!-- OBSERVATÓRIO PUMP.FUN READ-ONLY -->
     ${renderPumpObservatorySection(state)}
+
+    <!-- LABORATÓRIO ECONÔMICO PUMP / JUPITER -->
+    ${renderPumpStrategyLabSection(state)}
+
+    <!-- FALLBACK DIRETO PUMP SELL-ONLY -->
+    ${renderPumpSellFallbackSection(state)}
 
     <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
@@ -834,6 +963,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         const auth = operational.adminAuth || {};
         const rent = operational.rentRecovery || {};
         const laya = operational.laya || {};
+        const exitHealth = operational.exitPathHealth || {};
 
         adminAuthStatus.configured = Boolean(auth.configured);
         adminAuthStatus.needsBootstrap = Boolean(auth.needsBootstrap);
@@ -851,6 +981,20 @@ export function renderDashboardHtml(state: DashboardState): string {
           layaEl.className = 'mt-1 font-bold ' + (laya.health === 'OK' ? 'text-emerald-400' : 'text-amber-400');
         }
         if (layaDetail) layaDetail.textContent = (laya.loaded || []).join(',') || 'checkpoint não confirmado';
+
+        const exitHealthEl = document.getElementById('op-exit-health-status');
+        const exitHealthDetail = document.getElementById('op-exit-health-detail');
+        if (exitHealthEl) {
+          const state = exitHealth.state || 'HEALTHY';
+          exitHealthEl.textContent = state;
+          exitHealthEl.className = 'mt-1 font-bold ' +
+            (state === 'HEALTHY' ? 'text-emerald-400' : (state === 'EMERGENCY' ? 'text-rose-400' : 'text-amber-400'));
+        }
+        if (exitHealthDetail) {
+          exitHealthDetail.textContent = exitHealth.reason ||
+            ('Falhas: ' + Number(exitHealth.maxFailures || 0) +
+             ' · novas entradas ' + (exitHealth.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'));
+        }
 
         const rentEl = document.getElementById('op-rent-status');
         const rentDetail = document.getElementById('op-rent-detail');
@@ -932,6 +1076,52 @@ export function renderDashboardHtml(state: DashboardState): string {
             }).join('');
           }
         }
+
+        // 3.2 Strategy Lab Pump/Jupiter — shadow, sem execução real.
+        const strategyLab = data.pumpStrategyLab || {};
+        const labSamples = document.getElementById('pump-strategy-lab-samples');
+        const labPlan = document.getElementById('pump-strategy-lab-plan');
+        const labNet = document.getElementById('pump-strategy-lab-net');
+        const labTbody = document.getElementById('pump-strategy-lab-tbody');
+        if (labSamples) labSamples.textContent = 'Amostras: ' + Number(strategyLab.totalSamples || 0);
+        if (labPlan) labPlan.textContent = String(strategyLab.preferredJupiterPlan || 'INSUFFICIENT_DATA');
+        if (labNet) {
+          labNet.textContent = strategyLab.preferredPlanNetAfterCostSol == null
+            ? '—'
+            : Number(strategyLab.preferredPlanNetAfterCostSol).toFixed(6) + ' SOL';
+        }
+        if (labTbody) {
+          const strategies = Array.isArray(strategyLab.strategies) ? strategyLab.strategies : [];
+          labTbody.innerHTML = strategies.length === 0
+            ? '<tr><td colspan="6" class="py-6 text-center text-slate-500 text-sm">INSUFFICIENT_DATA — coletando evidência shadow.</td></tr>'
+            : strategies.map(function (item) {
+                return '<tr class="border-b border-slate-800/60">' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-300">' + escapePumpHtml(item.cohort || '') + '</td>' +
+                  '<td class="py-2 px-3 text-xs text-slate-300">' + escapePumpHtml(item.venue || '') + '</td>' +
+                  '<td class="py-2 px-3 text-xs text-cyan-300">' + escapePumpHtml(item.state || '') + '</td>' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-400">' + Number(item.sampleCount || 0) + '</td>' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-400">' +
+                    (item.meanNetReturnPct == null ? '—' : Number(item.meanNetReturnPct).toFixed(2) + '%') + '</td>' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-400">' +
+                    (Number(item.executableExitRate || 0) * 100).toFixed(1) + '%</td>' +
+                  '</tr>';
+              }).join('');
+        }
+
+        // 3.3 Pump direct SELL fallback — proteção de capital, nunca BUY.
+        const pumpSellFallback = (data.operational && data.operational.pumpDirectSellFallback) || {};
+        const fallbackEnabled = document.getElementById('pump-sell-fallback-enabled');
+        const fallbackPath = document.getElementById('pump-sell-fallback-path');
+        const fallbackConfirmation = document.getElementById('pump-sell-fallback-confirmation');
+        const fallbackCost = document.getElementById('pump-sell-fallback-cost');
+        const fallbackReason = document.getElementById('pump-sell-fallback-reason');
+        if (fallbackEnabled) fallbackEnabled.textContent = pumpSellFallback.enabled ? 'ARMADO' : 'DESABILITADO';
+        if (fallbackPath) fallbackPath.textContent = String(pumpSellFallback.selectedPath || 'NONE');
+        if (fallbackConfirmation) fallbackConfirmation.textContent = String(pumpSellFallback.confirmationState || 'IDLE');
+        if (fallbackCost) fallbackCost.textContent = pumpSellFallback.estimatedCostSol == null
+          ? 'N/D'
+          : Number(pumpSellFallback.estimatedCostSol).toFixed(9) + ' SOL';
+        if (fallbackReason) fallbackReason.textContent = String(pumpSellFallback.fallbackReason || '—');
 
         // 4. Atualiza Tabela de Posições
         const positions = data.positions || [];

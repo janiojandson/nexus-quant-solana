@@ -336,3 +336,52 @@ test('PositionExitEngine: deve reidratar watermark persistido do trailing após 
   assert.strictEqual(signal.type, 'TRAILING_STOP');
   assert.ok((signal.trailingStopSolValue || 0) >= 0.027 - 1e-12);
 });
+
+
+test('PositionExitEngine: separa pico observado do executável e outage Jupiter não apaga watermarks', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'SovereignWatermark';
+  engine.addPosition({
+    mint,
+    symbol: 'SOV',
+    tokenAmount: 1000,
+    entryPriceUsd: 1,
+    entryTimestamp: Date.now(),
+    entrySol: 0.015
+  });
+
+  engine.recordExitRouteObservation(mint, {
+    observableSolValue: 0.040,
+    executableSolValue: 0.030,
+    jupiterExecutableSolValue: 0.030,
+    healthyAtMs: 1000
+  });
+
+  engine.recordExitRouteObservation(mint, {
+    observableSolValue: 0.050
+  });
+
+  const beforeFailure = engine.getExitWatermarks(mint);
+  assert.strictEqual(beforeFailure.observablePeakSolValue, 0.050);
+  assert.strictEqual(beforeFailure.executablePeakSolValue, 0.030);
+  assert.strictEqual(beforeFailure.lastJupiterExecutableSolValue, 0.030);
+  assert.strictEqual(beforeFailure.lastHealthyExitRouteAt, 1000);
+  assert.strictEqual(engine.getPeakSolValue(mint), 0.030);
+
+  engine.recordQuoteFailure(mint);
+
+  assert.deepStrictEqual(engine.getExitWatermarks(mint), beforeFailure);
+
+  engine.recordExitRouteObservation(mint, {
+    executableSolValue: 0.025,
+    jupiterExecutableSolValue: 0.025,
+    healthyAtMs: 2000
+  });
+
+  const afterRecovery = engine.getExitWatermarks(mint);
+  assert.strictEqual(afterRecovery.observablePeakSolValue, 0.050);
+  assert.strictEqual(afterRecovery.executablePeakSolValue, 0.030);
+  assert.strictEqual(afterRecovery.lastJupiterExecutableSolValue, 0.025);
+  assert.strictEqual(afterRecovery.lastHealthyExitRouteAt, 2000);
+  assert.strictEqual(engine.getPeakSolValue(mint), 0.030);
+});

@@ -195,8 +195,12 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
   net_pnl_sol         NUMERIC(10,6),
 
   -- Estado durável do trailing / watermark
-  peak_sol_value       NUMERIC(18,9),
-  peak_updated_at      TIMESTAMPTZ,
+  peak_sol_value                    NUMERIC(18,9),
+  observable_peak_sol_value         NUMERIC(18,9),
+  executable_peak_sol_value         NUMERIC(18,9),
+  last_jupiter_executable_sol_value NUMERIC(18,9),
+  last_healthy_exit_route_at        TIMESTAMPTZ,
+  peak_updated_at                   TIMESTAMPTZ,
 
   -- Timing (para análise de latência vs EV)
   detection_to_send_ms    INTEGER,
@@ -213,6 +217,10 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
 
 -- Migração idempotente para bancos criados antes do watermark persistente.
 ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS observable_peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS executable_peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS last_jupiter_executable_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS last_healthy_exit_route_at TIMESTAMPTZ;
 ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS peak_updated_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_to_mint       ON trade_outcomes (mint);
@@ -253,6 +261,57 @@ CREATE TABLE IF NOT EXISTS calibration_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_cs_gate        ON calibration_snapshots (gate_name);
 CREATE INDEX IF NOT EXISTS idx_cs_computed_at ON calibration_snapshots (computed_at);
+
+-- ──────────────────────────────────────────────
+-- PUMP STRATEGY LAB — observabilidade e shadow economics
+-- ──────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS solana_pump_observations (
+  id                  BIGSERIAL PRIMARY KEY,
+  mint                VARCHAR(64) NOT NULL,
+  event_timestamp_ms  BIGINT NOT NULL,
+  observed_at         TIMESTAMPTZ NOT NULL,
+  slot                BIGINT NOT NULL,
+  signature           VARCHAR(128) NOT NULL,
+  payload             JSONB NOT NULL DEFAULT '{}',
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pump_obs_mint_time
+  ON solana_pump_observations (mint, observed_at);
+
+CREATE TABLE IF NOT EXISTS solana_pump_market_samples (
+  id                  BIGSERIAL PRIMARY KEY,
+  mint                VARCHAR(64) NOT NULL,
+  sampled_at          TIMESTAMPTZ NOT NULL,
+  cohort              VARCHAR(32),
+  venue               VARCHAR(32),
+  payload             JSONB NOT NULL DEFAULT '{}',
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pump_market_mint_time
+  ON solana_pump_market_samples (mint, sampled_at);
+
+CREATE TABLE IF NOT EXISTS solana_pump_shadow_trades (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mint                VARCHAR(64) NOT NULL,
+  cohort              VARCHAR(32) NOT NULL,
+  venue               VARCHAR(32) NOT NULL,
+  entry_at            TIMESTAMPTZ NOT NULL,
+  payload             JSONB NOT NULL DEFAULT '{}',
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pump_shadow_cohort_venue
+  ON solana_pump_shadow_trades (cohort, venue, created_at);
+
+CREATE TABLE IF NOT EXISTS solana_pump_strategy_summary (
+  cohort              VARCHAR(32) NOT NULL,
+  venue               VARCHAR(32) NOT NULL,
+  state               VARCHAR(32) NOT NULL,
+  sample_count        INTEGER NOT NULL DEFAULT 0,
+  metrics             JSONB NOT NULL DEFAULT '{}',
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (cohort, venue)
+);
 
 -- ──────────────────────────────────────────────
 -- PARTIÇÕES MENSAIS INICIAIS

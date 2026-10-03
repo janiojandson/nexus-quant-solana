@@ -178,6 +178,38 @@ describe('DexAggregatorService - Jupiter', () => {
   });
 });
 
+it('DexAggregatorService routes quote traffic through injected coordinator priority', async () => {
+  const originalGet = axios.get;
+  const seen: Array<{ priority: number; bucket: string }> = [];
+  try {
+    axios.get = (async () => ({
+      data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' }
+    })) as any;
+    const coordinator: any = {
+      async schedule(priority: number, op: () => Promise<unknown>, bucket = 'general') {
+        seen.push({ priority, bucket });
+        return op();
+      }
+    };
+    const dex = new DexAggregatorService('https://fake.invalid', {
+      rateLimitMs: 0,
+      cacheTtlMs: 0,
+      trafficCoordinator: coordinator
+    } as any);
+
+    await dex.getQuote({
+      inputMint: 'So11111111111111111111111111111111111111112',
+      outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+      amountLamports: 100,
+      trafficPriority: 3
+    } as any);
+
+    assert.deepStrictEqual(seen, [{ priority: 3, bucket: 'general' }]);
+  } finally {
+    axios.get = originalGet;
+  }
+});
+
 it('DexAggregatorService: faz um único retry após 429 e reaproveita sucesso', async () => {
   const SOL_MINT = 'So11111111111111111111111111111111111111112';
   const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';

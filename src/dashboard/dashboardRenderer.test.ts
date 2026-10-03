@@ -15,6 +15,15 @@ const state: DashboardState = {
   totalRealizedPnlSol: 0,
   totalNetworkFeesSolEst: 0,
   incubator: { waiting: 0, mature: 19, technicalDiscards: 3, entryEligible: 1 },
+  exitPathHealth: {
+    state: 'DEGRADED',
+    canOpenNewPosition: false,
+    canRunResearch: false,
+    maxFailures: 2,
+    affectedMints: ['Mint111111111111111111111111111111111111111'],
+    reason: 'Jupiter /order unavailable',
+    lastChangedAt: new Date().toISOString()
+  },
   pumpObservatory: {
     enabled: true,
     running: true,
@@ -22,6 +31,8 @@ const state: DashboardState = {
     totalCreatedObserved: 12,
     activeCurves: 9,
     graduatedCount: 3,
+    dexIndexedCount: 0,
+    dexReadyCount: 0,
     lastCreateToObserverLagMs: 2400,
     maxCreateToObserverLagMs: 5100,
     lastObservedAt: new Date().toISOString(),
@@ -79,6 +90,9 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /SL inicial: -6%/);
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
   assert.match(html, /Stop Ativo: Trailing Momentum/);
+  assert.match(html, /Proteção de Saída/);
+  assert.match(html, /DEGRADED/);
+  assert.match(html, /Jupiter \/order unavailable/);
   assert.match(html, /Pump\.fun Observatory/);
   assert.match(html, /READ-ONLY/);
   assert.match(html, /PUMPX/);
@@ -136,4 +150,59 @@ test('Pump Observatory escapa nome/símbolo não confiável antes de renderizar 
   const html = renderDashboardHtml(maliciousState);
   assert.doesNotMatch(html, /<img src=x onerror=alert\(1\)>/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+});
+
+
+test('Dashboard expõe Strategy Lab econômico sem promover dados insuficientes', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpStrategyLab: {
+      mode: 'SHADOW',
+      totalSamples: 40,
+      preferredJupiterPlan: 'Developer',
+      preferredPlanNetAfterCostSol: 0.275,
+      strategies: [{
+        cohort: 'BIRTH_0_15S',
+        venue: 'JUPITER_ROUTE',
+        state: 'PROMISING_SHADOW',
+        sampleCount: 40,
+        meanNetReturnPct: 4.2,
+        executableExitRate: 0.95
+      }]
+    }
+  });
+
+  assert.match(html, /Pump Strategy Lab/);
+  assert.match(html, /Developer/);
+  assert.match(html, /PROMISING_SHADOW/);
+  assert.match(html, /BIRTH_0_15S/);
+  assert.match(html, /95\.0%/);
+});
+
+
+test('Strategy Lab possui atualização dinâmica via /api/status', () => {
+  const html = renderDashboardHtml(state);
+  assert.match(html, /id="pump-strategy-lab-tbody"/);
+  assert.match(html, /id="pump-strategy-lab-samples"/);
+  assert.match(html, /data\.pumpStrategyLab/);
+});
+
+
+test('Dashboard deixa explícito que Pump SELL fallback está desabilitado por padrão', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpDirectSellFallback: {
+      enabled: false,
+      selectedPath: 'NONE',
+      confirmationState: 'IDLE',
+      estimatedCostSol: null,
+      fallbackReason: null
+    }
+  });
+
+  assert.match(html, /Pump SELL Fallback/);
+  assert.match(html, /DESABILITADO/);
+  assert.match(html, /SELL-only/);
+  assert.match(html, /Última rota/);
+  assert.match(html, /Confirmação/);
 });

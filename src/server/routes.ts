@@ -264,6 +264,12 @@ export async function handleApiRoutes(
         graduatedCount: 0,
         recent: []
       },
+      pumpStrategyLab: s.pumpStrategyLab || {
+        mode: 'SHADOW',
+        totalSamples: 0,
+        preferredJupiterPlan: 'INSUFFICIENT_DATA',
+        strategies: []
+      },
       positions: formattedPositions,
       recentLogs: formattedLogs,
       closedTrades: formattedClosedTrades,
@@ -277,6 +283,15 @@ export async function handleApiRoutes(
         adminAuth: s.auth || { configured: false, needsBootstrap: false },
         rentRecovery: s.rentRecovery || null,
         laya: s.laya || null,
+        exitCapacity: s.exitCapacity || null,
+        exitPathHealth: s.exitPathHealth || null,
+        pumpDirectSellFallback: s.pumpDirectSellFallback || {
+          enabled: false,
+          selectedPath: 'NONE',
+          confirmationState: 'IDLE',
+          estimatedCostSol: null,
+          fallbackReason: null
+        },
         jupiter: {
           version: 'V2',
           mode: 'META_AGGREGATOR',

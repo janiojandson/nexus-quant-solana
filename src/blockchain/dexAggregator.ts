@@ -4,6 +4,11 @@ import {
   describeSlippageParams,
   HARD_CAP_SLIPPAGE_BPS
 } from './slippageCalibration.js';
+import {
+  JupiterTrafficCoordinator,
+  getGlobalJupiterTrafficCoordinator,
+  type JupiterPriority
+} from './jupiterTrafficCoordinator.js';
 
 export interface SwapQuoteParams {
   inputMint: string;
@@ -14,6 +19,7 @@ export interface SwapQuoteParams {
   autoSlippageCollisionUsdValue?: number;
   maxAutoSlippageBps?: number;
   poolLiquidityUsd?: number | null;
+  trafficPriority?: JupiterPriority;
 }
 
 export interface SwapQuoteResult {
@@ -36,6 +42,7 @@ export interface DexAggregatorConfig {
   apiKey?: string;
   rateLimitMs?: number;
   cacheTtlMs?: number;
+  trafficCoordinator?: JupiterTrafficCoordinator;
 }
 
 export class JupiterQuoteException extends Error {
@@ -63,8 +70,7 @@ export class DexAggregatorService {
   private apiKey?: string;
   private rateLimitMs: number;
   private cacheTtlMs: number;
-  private lastRequestStartedAt = 0;
-  private requestQueue: Promise<void> = Promise.resolve();
+  private trafficCoordinator: JupiterTrafficCoordinator;
   private quoteCache = new Map<string, { expiresAt: number; result: SwapQuoteResult }>();
 
   public static readonly MAX_ALLOWED_SLIPPAGE_BPS = HARD_CAP_SLIPPAGE_BPS;
@@ -83,6 +89,10 @@ export class DexAggregatorService {
     this.rateLimitMs = isTestEndpoint
       ? configuredRateLimitMs
       : (this.apiKey ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
+    this.trafficCoordinator = config.trafficCoordinator ??
+      ((isTestEndpoint || config.rateLimitMs !== undefined)
+        ? new JupiterTrafficCoordinator({ generalIntervalMs: this.rateLimitMs, executeIntervalMs: 0 })
+        : getGlobalJupiterTrafficCoordinator());
     this.cacheTtlMs = config.cacheTtlMs ??
       (isTestEndpoint ? 0 : Number(process.env.JUPITER_QUOTE_CACHE_TTL_MS || 750));
   }
@@ -91,20 +101,12 @@ export class DexAggregatorService {
     return this.jupiterApiBaseUrl;
   }
 
-  public async waitForRateSlot(): Promise<void> {
-    let release!: () => void;
-    const previous = this.requestQueue;
-    this.requestQueue = new Promise<void>(resolve => { release = resolve; });
-    await previous;
+  public getTrafficCoordinator(): JupiterTrafficCoordinator {
+    return this.trafficCoordinator;
+  }
 
-    try {
-      const elapsed = Date.now() - this.lastRequestStartedAt;
-      const waitMs = Math.max(0, this.rateLimitMs - elapsed);
-      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-      this.lastRequestStartedAt = Date.now();
-    } finally {
-      release();
-    }
+  public async waitForRateSlot(priority: JupiterPriority = 5): Promise<void> {
+    await this.trafficCoordinator.schedule(priority, async () => undefined, 'general');
   }
 
   private resolveRequestedSlippage(params: SwapQuoteParams): number {
@@ -164,13 +166,16 @@ export class DexAggregatorService {
     let lastError: any;
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      await this.waitForRateSlot();
       try {
-        response = await axios.get(`${this.jupiterApiBaseUrl}/order`, {
-          params: queryParams,
-          timeout: 8000,
-          headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
-        });
+        response = await this.trafficCoordinator.schedule(
+          params.trafficPriority ?? 5,
+          () => axios.get(`${this.jupiterApiBaseUrl}/order`, {
+            params: queryParams,
+            timeout: 8000,
+            headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
+          }),
+          'general'
+        );
         break;
       } catch (err: any) {
         lastError = err;

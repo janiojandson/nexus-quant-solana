@@ -4,6 +4,7 @@ import axios from 'axios';
 import { VitalityState, getAgentVitalityState } from './core/vitalityEngine.js';
 import { SolanaWalletService } from './blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
+import { priorityForJupiterWork } from './blockchain/jupiterPriorityPolicy.js';
 import {
   AdaptivePositionSizer,
   MAX_TRADE_AMOUNT_SOL,
@@ -13,9 +14,15 @@ import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
+import { PumpStrategyRepository } from './database/pumpStrategyRepository.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
+import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
+import { ExitPathHealth } from './execution/exitPathHealth.js';
+import { buildWatchdogExitPlan } from './execution/watchdogExitPolicy.js';
+import { ExitRouter, type RoutedExitAttempt } from './execution/exitRouter.js';
+import { PumpSellExecutor } from './pump/pumpSellExecutor.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
@@ -29,6 +36,9 @@ import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution
 import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
+import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
+import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
+import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
 
 
 dotenv.config();
@@ -38,6 +48,7 @@ const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
 const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
+const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 1));
 const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
 const TRADE_AMOUNT_SOL = MAX_TRADE_AMOUNT_SOL; // Teto do lote por trade (o lote real é dimensionado adaptativamente)
 const GAS_RESERVE_SOL = 0.05;       // Reserva mínima intocável em 0.05 SOL (gás de saída)
@@ -61,6 +72,8 @@ const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLA
 const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
 const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
 const NEXUS_MAINTENANCE_MODE = process.env.NEXUS_MAINTENANCE_MODE === 'true';
+const PUMP_DIRECT_SELL_FALLBACK_ENABLED =
+  process.env.PUMP_DIRECT_SELL_FALLBACK_ENABLED === 'true';
 const PUMP_OBSERVATORY_ENABLED = process.env.PUMP_OBSERVATORY_ENABLED === 'true';
 const PUMP_OBSERVATORY_REFRESH_MS = Math.max(
   5_000,
@@ -70,12 +83,44 @@ const PUMP_OBSERVATORY_BATCH_SIZE = Math.max(
   1,
   Math.min(100, Number(process.env.PUMP_OBSERVATORY_BATCH_SIZE || 50))
 );
+const PUMP_DEX_TIMING_INTERVAL_MS = Math.max(
+  2_000,
+  Number(process.env.PUMP_DEX_TIMING_INTERVAL_MS || 5_000)
+);
+const PUMP_DEX_TIMING_BATCH_SIZE = Math.max(
+  1,
+  Math.min(30, Number(process.env.PUMP_DEX_TIMING_BATCH_SIZE || 30))
+);
+const PUMP_DEX_TIMING_MAX_AGE_MS = Math.max(
+  60_000,
+  Number(process.env.PUMP_DEX_TIMING_MAX_AGE_MS || 15 * 60_000)
+);
+const PUMP_STRATEGY_LAB_ENABLED = process.env.PUMP_STRATEGY_LAB_ENABLED !== 'false';
+const PUMP_STRATEGY_LAB_INTERVAL_MS = Math.max(
+  2_000,
+  Number(process.env.PUMP_STRATEGY_LAB_INTERVAL_MS || 5_000)
+);
+const PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS = Math.max(
+  10_000,
+  Math.floor(Number(process.env.PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS || 1_000_000))
+);
+const PUMP_STRATEGY_NETWORK_FEE_LAMPORTS = Math.max(
+  0,
+  Math.floor(Number(process.env.PUMP_STRATEGY_NETWORK_FEE_LAMPORTS || 5_000))
+);
+const PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS = Math.max(
+  0,
+  Math.floor(Number(process.env.PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS || 0))
+);
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
 let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
+const exitPathHealth = new ExitPathHealth({
+  emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
+});
 
 // Instâncias Globais dos Serviços Operacionais
 const wallet = new SolanaWalletService({
@@ -93,6 +138,14 @@ const pumpObservatory = new PumpObservatory(
     maxRecent: 200
   }
 );
+const pumpDexTimingTracker = new PumpDexTimingTracker(pumpObservatory, {
+  batchSize: PUMP_DEX_TIMING_BATCH_SIZE,
+  maxAgeMs: PUMP_DEX_TIMING_MAX_AGE_MS
+});
+const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
+  enabled: PUMP_OBSERVATORY_ENABLED,
+  intervalMs: PUMP_DEX_TIMING_INTERVAL_MS
+});
 
 const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
@@ -111,6 +164,35 @@ let executionUncertainReason: string | null = null;
 const jupiterEngine = new JupiterExecutionEngine({
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
   isDryRun: IS_DRY_RUN
+});
+
+const pumpSellExecutor = new PumpSellExecutor(
+  wallet.getConnection() as any,
+  {
+    reconcileRecentSell: async (mintAddress, sinceTimestampMs, expectedAmountAtomic) => {
+      const found = await wallet.findRecentTokenDeltaTransaction(
+        mintAddress,
+        sinceTimestampMs,
+        'OUT'
+      );
+      if (!found) return null;
+      const soldAtomic = BigInt(found.deltaAtomic) < 0n
+        ? -BigInt(found.deltaAtomic)
+        : BigInt(found.deltaAtomic);
+      if (soldAtomic < (expectedAmountAtomic * 99n) / 100n) return null;
+      const grossReceivedLamports = found.walletLamportDelta + found.feeLamports;
+      return {
+        signature: found.signature,
+        soldAtomic,
+        receivedLamports: grossReceivedLamports > 0
+          ? BigInt(grossReceivedLamports)
+          : undefined
+      };
+    }
+  }
+);
+const exitRouter = new ExitRouter({
+  pumpFallbackEnabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED
 });
 
 async function reconcileUncertainV2Execution(
@@ -137,6 +219,25 @@ const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
 const postgresRepo = new SolanaPostgresRepository();
 const pgPool = postgresRepo.getPool();
+const pumpStrategyRepository = new PumpStrategyRepository(pgPool as any);
+const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
+  pumpObservatory,
+  jupiterEngine.getAggregator(),
+  pumpStrategyRepository,
+  {
+    enabled: PUMP_OBSERVATORY_ENABLED && PUMP_STRATEGY_LAB_ENABLED,
+    intervalMs: PUMP_STRATEGY_LAB_INTERVAL_MS,
+    entryLamports: PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS,
+    networkFeeLamports: PUMP_STRATEGY_NETWORK_FEE_LAMPORTS,
+    priorityFeeLamports: PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS,
+    canRunResearch: () => {
+      if (!exitPathHealth.snapshot().canRunResearch) return false;
+      // No Free, capital exposto tem prioridade total sobre pesquisa P6.
+      if (JUPITER_GENERAL_RPS <= 1 && positionEngine.getAllPositions().length > 0) return false;
+      return true;
+    }
+  }
+);
 const adminAuthService = new SolanaAdminAuthService(pgPool);
 const journal = new DecisionLogger(pgPool, {
   flushIntervalMs: 5000,
@@ -163,14 +264,34 @@ function persistPeakWatermark(
   const peakExpression = resetForReducedPosition
     ? '$1'
     : 'GREATEST(COALESCE(peak_sol_value, 0), $1)';
+  const executableExpression = resetForReducedPosition
+    ? '$1'
+    : 'GREATEST(COALESCE(executable_peak_sol_value, peak_sol_value, 0), $1)';
+  const observablePeakSolValue = Number(pos.observablePeakSolValue || peakSolValue);
+  const observableExpression = resetForReducedPosition
+    ? '$3'
+    : 'GREATEST(COALESCE(observable_peak_sol_value, 0), $3)';
+  const lastJupiterExecutableSolValue = Number.isFinite(Number(pos.lastJupiterExecutableSolValue))
+    ? Number(pos.lastJupiterExecutableSolValue)
+    : null;
+  const lastHealthyExitRouteAt = Number.isFinite(Number(pos.lastHealthyExitRouteAt))
+    ? Number(pos.lastHealthyExitRouteAt)
+    : null;
 
   void pgPool.query(
     `UPDATE trade_outcomes
        SET peak_sol_value = ${peakExpression},
+           executable_peak_sol_value = ${executableExpression},
+           observable_peak_sol_value = ${observableExpression},
+           last_jupiter_executable_sol_value = COALESCE($4, last_jupiter_executable_sol_value),
+           last_healthy_exit_route_at = CASE
+             WHEN $5::BIGINT IS NULL THEN last_healthy_exit_route_at
+             ELSE to_timestamp($5::DOUBLE PRECISION / 1000.0)
+           END,
            peak_updated_at = now()
      WHERE trace_id = $2
        AND status IN ('OPEN', 'PARTIAL_CLOSED')`,
-    [peakSolValue, pos.traceId]
+    [peakSolValue, pos.traceId, observablePeakSolValue, lastJupiterExecutableSolValue, lastHealthyExitRouteAt]
   ).catch((err: any) => {
     console.warn(`⚠️ [TRAILING:Persistência] ${pos.symbol}: falha ao persistir pico: ${err?.message || err}`);
   });
@@ -219,6 +340,21 @@ const latestState: DashboardState = {
   quarantineCount: 0,
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   pumpObservatory: pumpObservatory.snapshot(),
+  pumpStrategyLab: pumpStrategyLabRuntime.snapshot(),
+  pumpDirectSellFallback: {
+    enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
+    selectedPath: 'NONE',
+    confirmationState: 'IDLE',
+    estimatedCostSol: null,
+    fallbackReason: null
+  },
+  exitCapacity: evaluateExitCapacity({
+    generalRps: JUPITER_GENERAL_RPS,
+    monitorIntervalMs: FAST_EXIT_INTERVAL_MS,
+    openPositions: 1,
+    hasLocalExitSensor: false
+  }),
+  exitPathHealth: exitPathHealth.snapshot(),
   lastUpdated: new Date().toISOString()
 };
 
@@ -340,8 +476,13 @@ if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN && !NEXUS_MAINTENANCE_MODE) {
  * 3. Quarentena severa de 24 horas no AntiSpamMemory se for STOP_LOSS ou MANUAL
  * 4. Registro no histórico de trades fechados e atualização no Dashboard
  */
-type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT';
-type ExitOrderOptions = { exitTokenAmount?: number; shouldCloseAta?: boolean };
+type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT';
+type ExitOrderOptions = {
+  exitTokenAmount?: number;
+  shouldCloseAta?: boolean;
+  trafficPriority?: ReturnType<typeof priorityForJupiterWork>;
+  initialSlippageBps?: number;
+};
 type ExitOrderResult = { success: boolean; txSignature?: string; error?: string };
 
 async function executeExitOrder(
@@ -383,6 +524,8 @@ async function executeExitOrderUnlocked(
   const tokenAmountToSell = options?.exitTokenAmount || pos.tokenAmount;
   const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50';
   const shouldCloseAta = options?.shouldCloseAta ?? !isPartial;
+  const trafficPriority = options?.trafficPriority ?? priorityForJupiterWork('PROTECTIVE_EXIT');
+  const initialSlippageBps = Math.min(750, Math.max(250, options?.initialSlippageBps ?? 500));
 
   // Validação atômica ANTES de qualquer cotação. `tokenAmount` vem de
   // `swapSim.outAmount` (inteiro do Jupiter), mas um refactor futuro poderia
@@ -409,7 +552,8 @@ async function executeExitOrderUnlocked(
         pos.mint,
         'So11111111111111111111111111111111111111112',
         exitAmountAtomic,
-        500
+        initialSlippageBps,
+        trafficPriority
       );
       const quotedSolValue = (manualQuote.outAmount || 0) / 1e9;
       if (!Number.isFinite(quotedSolValue) || quotedSolValue <= 0) {
@@ -424,24 +568,36 @@ async function executeExitOrderUnlocked(
       );
     } catch (err: any) {
       const reason = err?.message || String(err);
-      console.error(`🚫 [SAÍDA MANUAL SEM QUOTE] ${pos.symbol}: ${reason}`);
-      return { success: false, error: `Falha ao cotar saída manual: ${reason}` };
+      if (!exitRouter.isPumpFallbackEnabled()) {
+        console.error(`🚫 [SAÍDA MANUAL SEM QUOTE] ${pos.symbol}: ${reason}`);
+        return { success: false, error: `Falha ao cotar saída manual: ${reason}` };
+      }
+      // Com fallback Pump explicitamente armado, a ausência de quote Jupiter
+      // não impede a tentativa de saída. O valor contábil será substituído pelo
+      // resultado da rota confirmada; jamais usamos este placeholder como lucro.
+      exitSolValue = pos.entrySol || 0.015;
+      pnlPct = 0;
+      console.warn(
+        `⚠️ [SAÍDA MANUAL SEM QUOTE JUPITER] ${pos.symbol}: ${reason} | ` +
+        'seguindo para ExitRouter com Pump SELL fallback elegível.'
+      );
     }
   }
 
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
-  console.log(`⚡ [Jupiter Swap V2] Saída com slippage 500bps (5.0%) e landing gerenciado...`);
+  console.log(`⚡ [Jupiter Swap V2] Saída com slippage ${initialSlippageBps}bps e landing gerenciado...`);
 
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
   const exitAttemptStartedAt = Date.now();
-  let exitSwap = await jupiterEngine.executeSwap({
+  let exitSwap: RoutedExitAttempt = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
     amountLamports: exitAmountAtomic,
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
     keypair: wallet.getKeypair(),
-    slippageBps: 500,       // 5.0% — Saídas/Stops
-    priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
+    slippageBps: initialSlippageBps,
+    priorityLevel: 'high',
+    trafficPriority
   });
 
   // Segunda tentativa ainda fail-closed: amplia até o hard-cap de 7,5%,
@@ -458,7 +614,8 @@ async function executeExitOrderUnlocked(
       keypair: wallet.getKeypair(),
       slippageBps: 750,
       priorityLevel: 'veryHigh',
-      skipPreflight: false
+      skipPreflight: false,
+      trafficPriority
     });
 
     if (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') {
@@ -510,6 +667,95 @@ async function executeExitOrderUnlocked(
     }
   }
 
+  let selectedExitPath: 'JUPITER' | 'PUMP_DIRECT' = 'JUPITER';
+  const jupiterFallbackReason = exitSwap.status === 'FAILED'
+    ? (exitSwap.error || 'Jupiter exit failed definitively')
+    : null;
+  latestState.pumpDirectSellFallback = {
+    enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
+    selectedPath: 'JUPITER',
+    confirmationState: 'PENDING',
+    estimatedCostSol: null,
+    fallbackReason: jupiterFallbackReason
+  };
+  const routedExit = await exitRouter.routeAfterJupiter(
+    exitSwap,
+    async (): Promise<RoutedExitAttempt> => {
+      console.warn(
+        `🛟 [ExitRouter] Jupiter falhou definitivamente para ${pos.symbol}; ` +
+        'avaliando Pump sell_v2 direto (SELL-only).'
+      );
+
+      if (IS_DRY_RUN) {
+        const simulated = await pumpSellExecutor.simulateSell({
+          mint: new (await import('@solana/web3.js')).PublicKey(pos.mint),
+          userKeypair: wallet.getKeypair(),
+          tokenAmountAtomic: BigInt(exitAmountAtomic),
+          slippageBps: 750
+        });
+        if (!simulated.success || !simulated.built) {
+          return {
+            status: 'FAILED',
+            txSignature: '',
+            inAmount: exitAmountAtomic,
+            outAmount: 0,
+            error: simulated.error || 'Pump direct sell simulation failed.'
+          };
+        }
+        return {
+          status: 'DRY_RUN_SUCCESS',
+          txSignature: `dry_run_pump_sell_${Date.now()}`,
+          inAmount: exitAmountAtomic,
+          outAmount: Number(simulated.built.quote.netSolLamports)
+        };
+      }
+
+      const direct = await pumpSellExecutor.executeSell({
+        mint: new (await import('@solana/web3.js')).PublicKey(pos.mint),
+        userKeypair: wallet.getKeypair(),
+        tokenAmountAtomic: BigInt(exitAmountAtomic),
+        slippageBps: 750
+      });
+      return {
+        status: direct.status,
+        txSignature: direct.txSignature || '',
+        inAmount: exitAmountAtomic,
+        outAmount: Number(
+          direct.actualReceivedLamports ??
+          direct.expectedNetSolLamports ??
+          0n
+        ),
+        error: direct.error
+      };
+    }
+  );
+  selectedExitPath = routedExit.path;
+  exitSwap = routedExit.result;
+  latestState.pumpDirectSellFallback = {
+    enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
+    selectedPath: selectedExitPath,
+    confirmationState:
+      exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS'
+        ? 'CONFIRMED'
+        : exitSwap.status === 'SUBMITTED_UNCONFIRMED'
+          ? 'UNCERTAIN'
+          : 'FAILED',
+    estimatedCostSol: null,
+    fallbackReason: selectedExitPath === 'PUMP_DIRECT' ? jupiterFallbackReason : null
+  };
+
+  if (
+    selectedExitPath === 'PUMP_DIRECT' &&
+    exitSwap.status === 'SUBMITTED_UNCONFIRMED'
+  ) {
+    uncertainExitMints.add(pos.mint);
+    executionUncertainReason =
+      `Pump direct sell inconclusivo em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
+    console.error(
+      `🛑 [Pump sell_v2: ESTADO INCERTO] ${pos.symbol}: nenhuma segunda venda será criada até reconciliação.`
+    );
+  }
+
   // 2. Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
   // foi de fato confirmado. Sem esta trava, uma saída falha fechava a ATA
   // (prendendo os tokens), gravava PnLperformed fictício e notificava "Saída Executada".
@@ -559,7 +805,7 @@ async function executeExitOrderUnlocked(
     : exitSolValue;
 
   console.log(
-    `💵 [Jupiter V2: Realizado] ${pos.symbol} | recebido=${actualExitSolValue.toFixed(9)} SOL ` +
+    `💵 [ExitRouter:${selectedExitPath}] ${pos.symbol} | recebido=${actualExitSolValue.toFixed(9)} SOL ` +
     `| custo-base=${costBasisSoldSol.toFixed(9)} SOL | PnL=${(realizedPnlPct * 100).toFixed(2)}%`
   );
 
@@ -604,13 +850,19 @@ async function executeExitOrderUnlocked(
       STOP_LOSS:     3 * 60 * 60 * 1000,  // 3 horas
       TIME_STOP:     30 * 60 * 1000,       // 30 minutos
       MANUAL:        24 * 60 * 60 * 1000,  // 24 horas
+      WATCHDOG_EXIT: 24 * 60 * 60 * 1000,  // 24 horas após perda prolongada de rota
       TRAILING_STOP: 0,
       TAKE_PROFIT:   0,
       LAYA_EXIT:     0
     };
     const quarantineMs = QUARANTINE_MS[exitReason] ?? 0;
     if (quarantineMs > 0) {
-      const labels: Record<string, string> = { STOP_LOSS: '3h', TIME_STOP: '30min', MANUAL: '24h' };
+      const labels: Record<string, string> = {
+        STOP_LOSS: '3h',
+        TIME_STOP: '30min',
+        MANUAL: '24h',
+        WATCHDOG_EXIT: '24h'
+      };
       const label = labels[exitReason] || '?h';
       const reasonText = `Quarentena Pós-${exitReason}: cooldown de ${label}`;
       antiSpamMemory.recordVeto(pos.mint, reasonText, quarantineMs);
@@ -656,6 +908,7 @@ async function executeExitOrderUnlocked(
     MANUAL: 'EXIT_PANIC',
     TAKE_PROFIT: 'EXIT_PARTIAL',
     LAYA_EXIT: 'EXIT_LAYA',
+    WATCHDOG_EXIT: 'EXIT_WATCHDOG',
   };
 
   const rentRecovered = rentRecoveredActualSol;
@@ -679,7 +932,9 @@ async function executeExitOrderUnlocked(
     rentRecoveredSol: rentRecovered,
     netPnlSol,
     totalTradeDurationS: tradeDurationS,
-    status: shouldCloseAta ? (exitReason === 'MANUAL' ? 'PANIC_CLOSED' : 'FULLY_CLOSED') : 'PARTIAL_CLOSED'
+    status: shouldCloseAta
+      ? (exitReason === 'MANUAL' ? 'PANIC_CLOSED' : exitReason === 'WATCHDOG_EXIT' ? 'WATCHDOG_CLOSED' : 'FULLY_CLOSED')
+      : 'PARTIAL_CLOSED'
   });
 
   // Se for liquidação total, remove do Gestor de Posições
@@ -764,7 +1019,8 @@ async function maybeRunLayaTacticalPositionDecision(
       freshPosition.mint,
       'So11111111111111111111111111111111111111112',
       tokenAtomicAmount,
-      500
+      500,
+      priorityForJupiterWork('EXIT_CONFIRMATION')
     );
     const executableSolValue = (executableQuote.outAmount || 0) / 1e9;
     if (!Number.isFinite(executableSolValue) || executableSolValue <= 0) {
@@ -870,7 +1126,8 @@ const server = http.createServer(async (req, res) => {
         userPublicKey: OFFICIAL_PHANTOM_WALLET,
         keypair: wallet.getKeypair(),
         slippageBps: 500,
-        priorityLevel: 'high'
+        priorityLevel: 'high',
+        trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
       });
 
       if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
@@ -918,7 +1175,8 @@ const server = http.createServer(async (req, res) => {
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair(),
           slippageBps: 500,
-          priorityLevel: 'high'
+          priorityLevel: 'high',
+          trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
         });
         txSignature = swapRes.txSignature;
       }
@@ -959,7 +1217,8 @@ const server = http.createServer(async (req, res) => {
             userPublicKey: OFFICIAL_PHANTOM_WALLET,
             keypair: wallet.getKeypair(),
             slippageBps: 500,
-            priorityLevel: 'high'
+            priorityLevel: 'high',
+            trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
           });
           await rentRecovery.closeTokenAccount(spl.mint);
           liquidationsCount++;
@@ -1047,7 +1306,8 @@ async function runUltraFastExitMonitor() {
           pos.mint,
           'So11111111111111111111111111111111111111112',
           tokenAtomicAmount,
-          500
+          500,
+          priorityForJupiterWork('EXIT_CONFIRMATION')
         );
         const marketSnapshot = await marketSnapshotPromise;
         const dexPriceUsd = marketSnapshot?.priceUsd ?? null;
@@ -1055,6 +1315,14 @@ async function runUltraFastExitMonitor() {
         if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
           throw new Error('Jupiter sem valor executável válido para monitor de saída');
         }
+        positionEngine.recordExitRouteObservation(pos.mint, {
+          observableSolValue: currentSolValue,
+          executableSolValue: currentSolValue,
+          jupiterExecutableSolValue: currentSolValue,
+          healthyAtMs: Date.now()
+        });
+        exitPathHealth.recordSuccess(pos.mint);
+        latestState.exitPathHealth = exitPathHealth.snapshot();
         const pnlPct = (currentSolValue - entrySol) / entrySol;
         const sensorSource = 'JUPITER_EXECUTABLE';
         const sensorPriceUsd = dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0
@@ -1185,6 +1453,8 @@ async function runUltraFastExitMonitor() {
         }
       } catch (quoteErr: any) {
         const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);
+        exitPathHealth.recordFailure(pos.mint, failures, quoteErr?.message || String(quoteErr));
+        latestState.exitPathHealth = exitPathHealth.snapshot();
         if (failures === 1) {
           console.warn(
             `⚠️ [ExitMonitor:Falha Crítica] ${pos.symbol} (${pos.mint}) | ` +
@@ -1202,43 +1472,25 @@ async function runUltraFastExitMonitor() {
             } catch (amountErr: any) {
               throw new Error(`Watchdog recusou quantidade n?o at?mica: ${amountErr?.message || amountErr}`);
             }
-            const emergencySwap = await jupiterEngine.executeSwap({
-              inputMint: pos.mint,
-              outputMint: 'So11111111111111111111111111111111111111112',
-              amountLamports: rawLamports,
-              userPublicKey: OFFICIAL_PHANTOM_WALLET,
-              keypair: wallet.getKeypair(),
-              slippageBps: 600, // 6.0% slippage defensivo
-              priorityLevel: 'high'
+            const watchdogPlan = buildWatchdogExitPlan({
+              entrySol: pos.entrySol || 0.015,
+              tokenAmountAtomic: rawLamports
             });
-            if (emergencySwap.status !== 'SUCCESS' && emergencySwap.status !== 'DRY_RUN_SUCCESS') {
-              throw new Error(`Swap do watchdog não confirmado (${emergencySwap.status}): ${emergencySwap.error || 'sem detalhe'}. Posição e ATA preservadas.`);
+            const emergencyResult = await executeExitOrder(
+              pos.mint,
+              watchdogPlan.exitReason,
+              watchdogPlan.pnlPct,
+              watchdogPlan.exitSolValue,
+              watchdogPlan.options
+            );
+            if (!emergencyResult.success) {
+              throw new Error(
+                `Saída segura do watchdog não confirmada: ${emergencyResult.error || 'sem detalhe'}. ` +
+                'Posição preservada; nenhuma nova ordem é criada se a execução ficou incerta.'
+              );
             }
-            if (emergencySwap.status === 'SUCCESS') {
-              const closeResult = await rentRecovery.closeTokenAccount(pos.mint);
-              if (!closeResult.success) {
-                console.warn(
-                  `⚠️ [WATCHDOG] Swap de ${pos.symbol} confirmado, mas ATA permaneceu aberta; ` +
-                  'posição financeira será encerrada e o rent ficará para o sweep automático.'
-                );
-              }
-            }
-            antiSpamMemory.recordVeto(pos.mint, 'Watchdog de Perda de Sinal (12s sem cotação)', 24 * 60 * 60 * 1000);
-            positionEngine.removePosition(pos.mint);
-            positionEngine.recordClosedTrade({
-              mint: pos.mint,
-              symbol: pos.symbol,
-              tokenAmount: pos.tokenAmount,
-              entryPriceUsd: pos.entryPriceUsd,
-              exitPriceUsd: 0,
-              entryTimestamp: pos.entryTimestamp,
-              exitTimestamp: Date.now(),
-              pnlPct: -0.20,
-              pnlUsdEst: 0,
-              exitReason: 'MANUAL',
-              txSignature: emergencySwap.txSignature
-            });
-            updateDashboardViews();
+            exitPathHealth.recordSuccess(pos.mint);
+            latestState.exitPathHealth = exitPathHealth.snapshot();
           } catch (emergencyErr: any) {
             console.error(`❌ [WATCHDOG ERRO] Falha ao executar liquidação defensiva de ${pos.symbol}:`, emergencyErr?.message || emergencyErr);
           }
@@ -1338,8 +1590,34 @@ async function executeAutonomousCycle() {
 
     // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (MAX_CONCURRENT_POSITIONS = 2, máx 0.10 SOL)
     const activePositions = positionEngine.getAllPositions();
+    exitPathHealth.retainOpenPositions(activePositions.map(position => position.mint));
+    const currentExitHealth = exitPathHealth.snapshot();
+    latestState.exitPathHealth = currentExitHealth;
+    if (!currentExitHealth.canOpenNewPosition) {
+      console.log(
+        `🛑 [EXIT PATH ${currentExitHealth.state}] Novas entradas pausadas: ` +
+        `${currentExitHealth.reason || 'rota de saída degradada'} ` +
+        `(falhas=${currentExitHealth.maxFailures}).`
+      );
+      return;
+    }
     if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
       console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
+      return;
+    }
+
+    const exitCapacity = evaluateExitCapacity({
+      generalRps: JUPITER_GENERAL_RPS,
+      monitorIntervalMs: FAST_EXIT_INTERVAL_MS,
+      openPositions: activePositions.length + 1,
+      hasLocalExitSensor: false
+    });
+    latestState.exitCapacity = exitCapacity;
+    if (!exitCapacity.admit) {
+      console.log(
+        `🛑 [EXIT CAPACITY] Nova entrada bloqueada: ${exitCapacity.reason} ` +
+        `Posições após entrada=${activePositions.length + 1}; monitor=${FAST_EXIT_INTERVAL_MS}ms.`
+      );
       return;
     }
 
@@ -1839,7 +2117,8 @@ async function executeAutonomousCycle() {
           poolLiquidityUsd: topCandidate.liquidityUsd,
           // Colisao calibrada pela profundidade real da pool, em vez do valor
           // fixo de 1000 USD que apertava demais o slippage em pools de 15k-100k.
-          maxAutoSlippageBps: 750
+          maxAutoSlippageBps: 750,
+          trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
         };
 
         console.log(`⚡ [3/3 Motor Jupiter V2] Dimensionando lote economico com RTSE e validacao pre-voo (max. 2 tentativas | hard-cap 750bps)...`);
@@ -1869,7 +2148,8 @@ async function executeAutonomousCycle() {
                 skipPreflight: false,
                 userPublicKey: OFFICIAL_PHANTOM_WALLET,
                 keypair: wallet.getKeypair(),
-                priorityLevel: 'medium'
+                priorityLevel: 'medium',
+                trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
               }, _quote);
               if (sim.success) {
                 console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao APROVADA (CU=${sim.unitsConsumed ?? 'n/d'})`);
@@ -1990,7 +2270,8 @@ async function executeAutonomousCycle() {
           maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
           skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: wallet.getKeypair()
+          keypair: wallet.getKeypair(),
+          trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
         });
 
         txSignature = swapSim.txSignature;
@@ -2332,6 +2613,10 @@ interface RecoverablePositionRecord {
   entryVolume5m: number;
   entryPairAddress?: string;
   peakSolValue?: number;
+  observablePeakSolValue?: number;
+  executablePeakSolValue?: number;
+  lastJupiterExecutableSolValue?: number;
+  lastHealthyExitRouteAt?: number;
   stopLossPct: number;
   takeProfitPct: number;
   partialTaken: boolean;
@@ -2351,7 +2636,9 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
         SELECT DISTINCT ON (dj.mint)
           dj.trace_id, dj.mint, dj.token_symbol, dj.pool_address, dj.liquidity_usd, dj.volume_5m_usd,
           dj.metadata, dj.created_at, o.entry_price_usd, o.entry_size_sol,
-          o.entry_timestamp, o.status, o.peak_sol_value
+          o.entry_timestamp, o.status, o.peak_sol_value,
+          o.observable_peak_sol_value, o.executable_peak_sol_value,
+          o.last_jupiter_executable_sol_value, o.last_healthy_exit_route_at
         FROM decision_journal dj
         JOIN trade_outcomes o ON o.trace_id = dj.trace_id
         WHERE dj.decision = 'ENTRY_APPROVED'
@@ -2379,6 +2666,14 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
           entryVolume5m: Number(row.volume_5m_usd || 0),
           entryPairAddress: row.pool_address ? String(row.pool_address) : undefined,
           peakSolValue: row.peak_sol_value != null ? Number(row.peak_sol_value) : undefined,
+          observablePeakSolValue: row.observable_peak_sol_value != null ? Number(row.observable_peak_sol_value) : undefined,
+          executablePeakSolValue: row.executable_peak_sol_value != null ? Number(row.executable_peak_sol_value) : undefined,
+          lastJupiterExecutableSolValue: row.last_jupiter_executable_sol_value != null
+            ? Number(row.last_jupiter_executable_sol_value)
+            : undefined,
+          lastHealthyExitRouteAt: row.last_healthy_exit_route_at
+            ? new Date(row.last_healthy_exit_route_at).getTime()
+            : undefined,
           stopLossPct: Number(metadata.stopLossPct ?? -0.06),
           takeProfitPct: Number(metadata.takeProfitPct ?? 0.35),
           partialTaken: row.status === 'PARTIAL_CLOSED',
@@ -2465,6 +2760,10 @@ async function rehydratePositionsFromWalletOnBoot() {
         entryVolume5m: recovery.entryVolume5m,
         entryPairAddress: recovery.entryPairAddress,
         peakSolValue: recovery.peakSolValue,
+        observablePeakSolValue: recovery.observablePeakSolValue,
+        executablePeakSolValue: recovery.executablePeakSolValue,
+        lastJupiterExecutableSolValue: recovery.lastJupiterExecutableSolValue,
+        lastHealthyExitRouteAt: recovery.lastHealthyExitRouteAt,
         traceId: recovery.traceId,
         partialTaken: recovery.partialTaken
       });
@@ -2586,8 +2885,21 @@ async function main() {
       `🧪 [Pump Observatory] ${latestState.pumpObservatory.running ? 'STREAM ATIVO' : 'STREAM INDISPONÍVEL'} ` +
       `| refresh=${PUMP_OBSERVATORY_REFRESH_MS}ms batch=${PUMP_OBSERVATORY_BATCH_SIZE} | READ-ONLY`
     );
+    pumpDexTimingRuntime.start();
+    console.log(
+      `🧪 [Pump→Dex Timing] ativo | interval=${PUMP_DEX_TIMING_INTERVAL_MS}ms ` +
+      `batch=${PUMP_DEX_TIMING_BATCH_SIZE} maxAge=${PUMP_DEX_TIMING_MAX_AGE_MS}ms`
+    );
+    if (PUMP_STRATEGY_LAB_ENABLED) {
+      pumpStrategyLabRuntime.start();
+      console.log(
+        `📐 [Pump Strategy Lab] SHADOW ativo | interval=${PUMP_STRATEGY_LAB_INTERVAL_MS}ms ` +
+        `| entryModel=${PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS} lamports | priority=P6`
+      );
+    }
     pumpStateSyncTimer = setInterval(() => {
       latestState.pumpObservatory = pumpObservatory.snapshot();
+      latestState.pumpStrategyLab = pumpStrategyLabRuntime.snapshot();
     }, 2_500);
     pumpStateSyncTimer.unref?.();
   } else {
@@ -2640,6 +2952,7 @@ async function main() {
 process.on('SIGTERM', async () => {
   console.log('🛑 [SIGTERM] Encerrando serviço e esvaziando buffer do Decision Journal...');
   if (pumpStateSyncTimer) clearInterval(pumpStateSyncTimer);
+  pumpDexTimingRuntime.stop();
   await pumpObservatory.stop();
   await journal.shutdown();
   process.exit(0);
@@ -2648,6 +2961,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('🛑 [SIGINT] Encerrando serviço e esvaziando buffer do Decision Journal...');
   if (pumpStateSyncTimer) clearInterval(pumpStateSyncTimer);
+  pumpDexTimingRuntime.stop();
   await pumpObservatory.stop();
   await journal.shutdown();
   process.exit(0);

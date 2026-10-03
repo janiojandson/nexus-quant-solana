@@ -179,3 +179,52 @@ test('refreshes multiple recent curves with one batch RPC call when provider sup
 
   await observer.stop();
 });
+
+
+test('stores Dex first-seen/ready timing against the canonical Pump birth timestamp', async () => {
+  let callback: any;
+  const rpc = {
+    onLogs(_programId: PublicKey, cb: any) { callback = cb; return 44; },
+    async removeOnLogsListener() {},
+    async getAccountInfo() { return null; }
+  };
+  const observer = new PumpObservatory(rpc as any, {
+    now: () => 1_791_043_205_000,
+    refreshIntervalMs: 60_000
+  });
+  await observer.start();
+
+  await callback({
+    err: null,
+    signature: '9'.repeat(88),
+    logs: ['Program data: ' + createEventBuffer(1_791_043_200n, 31).toString('base64')]
+  }, { slot: 303 });
+
+  const mint = key(31).toBase58();
+  const apply = (observer as any).applyDexCorrelation;
+  assert.equal(typeof apply, 'function');
+  apply.call(observer, mint, {
+    observedAtMs: 1_791_043_212_000,
+    ready: true,
+    pairAddress: 'DexPairABC',
+    pairCreatedAtMs: 1_791_043_206_000,
+    priceUsd: 0.00042,
+    liquidityUsd: 42000,
+    dexUrl: 'https://dexscreener.com/solana/dexpairabc'
+  });
+
+  const snapshot = observer.snapshot();
+  const item = snapshot.recent[0];
+  assert.equal(item.dexFirstSeenAtMs, 1_791_043_212_000);
+  assert.equal(item.dexReadyAtMs, 1_791_043_212_000);
+  assert.equal(item.pumpToDexFirstSeenLagMs, 12_000);
+  assert.equal(item.pumpToDexReadyLagMs, 12_000);
+  assert.equal(item.dexPairCreatedAtMs, 1_791_043_206_000);
+  assert.equal(item.dexTimestampSkewMs, 6_000);
+  assert.equal(item.dexLiquidityUsd, 42000);
+  assert.equal(snapshot.dexIndexedCount, 1);
+  assert.equal(snapshot.dexReadyCount, 1);
+  assert.equal(snapshot.lastPumpToDexReadyLagMs, 12_000);
+
+  await observer.stop();
+});
