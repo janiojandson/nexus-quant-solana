@@ -166,14 +166,34 @@ function persistPeakWatermark(
   const peakExpression = resetForReducedPosition
     ? '$1'
     : 'GREATEST(COALESCE(peak_sol_value, 0), $1)';
+  const executableExpression = resetForReducedPosition
+    ? '$1'
+    : 'GREATEST(COALESCE(executable_peak_sol_value, peak_sol_value, 0), $1)';
+  const observablePeakSolValue = Number(pos.observablePeakSolValue || peakSolValue);
+  const observableExpression = resetForReducedPosition
+    ? '$3'
+    : 'GREATEST(COALESCE(observable_peak_sol_value, 0), $3)';
+  const lastJupiterExecutableSolValue = Number.isFinite(Number(pos.lastJupiterExecutableSolValue))
+    ? Number(pos.lastJupiterExecutableSolValue)
+    : null;
+  const lastHealthyExitRouteAt = Number.isFinite(Number(pos.lastHealthyExitRouteAt))
+    ? Number(pos.lastHealthyExitRouteAt)
+    : null;
 
   void pgPool.query(
     `UPDATE trade_outcomes
        SET peak_sol_value = ${peakExpression},
+           executable_peak_sol_value = ${executableExpression},
+           observable_peak_sol_value = ${observableExpression},
+           last_jupiter_executable_sol_value = COALESCE($4, last_jupiter_executable_sol_value),
+           last_healthy_exit_route_at = CASE
+             WHEN $5::BIGINT IS NULL THEN last_healthy_exit_route_at
+             ELSE to_timestamp($5::DOUBLE PRECISION / 1000.0)
+           END,
            peak_updated_at = now()
      WHERE trace_id = $2
        AND status IN ('OPEN', 'PARTIAL_CLOSED')`,
-    [peakSolValue, pos.traceId]
+    [peakSolValue, pos.traceId, observablePeakSolValue, lastJupiterExecutableSolValue, lastHealthyExitRouteAt]
   ).catch((err: any) => {
     console.warn(`⚠️ [TRAILING:Persistência] ${pos.symbol}: falha ao persistir pico: ${err?.message || err}`);
   });
@@ -1072,6 +1092,12 @@ async function runUltraFastExitMonitor() {
         if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
           throw new Error('Jupiter sem valor executável válido para monitor de saída');
         }
+        positionEngine.recordExitRouteObservation(pos.mint, {
+          observableSolValue: currentSolValue,
+          executableSolValue: currentSolValue,
+          jupiterExecutableSolValue: currentSolValue,
+          healthyAtMs: Date.now()
+        });
         const pnlPct = (currentSolValue - entrySol) / entrySol;
         const sensorSource = 'JUPITER_EXECUTABLE';
         const sensorPriceUsd = dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0
@@ -2368,6 +2394,10 @@ interface RecoverablePositionRecord {
   entryVolume5m: number;
   entryPairAddress?: string;
   peakSolValue?: number;
+  observablePeakSolValue?: number;
+  executablePeakSolValue?: number;
+  lastJupiterExecutableSolValue?: number;
+  lastHealthyExitRouteAt?: number;
   stopLossPct: number;
   takeProfitPct: number;
   partialTaken: boolean;
@@ -2387,7 +2417,9 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
         SELECT DISTINCT ON (dj.mint)
           dj.trace_id, dj.mint, dj.token_symbol, dj.pool_address, dj.liquidity_usd, dj.volume_5m_usd,
           dj.metadata, dj.created_at, o.entry_price_usd, o.entry_size_sol,
-          o.entry_timestamp, o.status, o.peak_sol_value
+          o.entry_timestamp, o.status, o.peak_sol_value,
+          o.observable_peak_sol_value, o.executable_peak_sol_value,
+          o.last_jupiter_executable_sol_value, o.last_healthy_exit_route_at
         FROM decision_journal dj
         JOIN trade_outcomes o ON o.trace_id = dj.trace_id
         WHERE dj.decision = 'ENTRY_APPROVED'
@@ -2415,6 +2447,14 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
           entryVolume5m: Number(row.volume_5m_usd || 0),
           entryPairAddress: row.pool_address ? String(row.pool_address) : undefined,
           peakSolValue: row.peak_sol_value != null ? Number(row.peak_sol_value) : undefined,
+          observablePeakSolValue: row.observable_peak_sol_value != null ? Number(row.observable_peak_sol_value) : undefined,
+          executablePeakSolValue: row.executable_peak_sol_value != null ? Number(row.executable_peak_sol_value) : undefined,
+          lastJupiterExecutableSolValue: row.last_jupiter_executable_sol_value != null
+            ? Number(row.last_jupiter_executable_sol_value)
+            : undefined,
+          lastHealthyExitRouteAt: row.last_healthy_exit_route_at
+            ? new Date(row.last_healthy_exit_route_at).getTime()
+            : undefined,
           stopLossPct: Number(metadata.stopLossPct ?? -0.06),
           takeProfitPct: Number(metadata.takeProfitPct ?? 0.35),
           partialTaken: row.status === 'PARTIAL_CLOSED',
@@ -2501,6 +2541,10 @@ async function rehydratePositionsFromWalletOnBoot() {
         entryVolume5m: recovery.entryVolume5m,
         entryPairAddress: recovery.entryPairAddress,
         peakSolValue: recovery.peakSolValue,
+        observablePeakSolValue: recovery.observablePeakSolValue,
+        executablePeakSolValue: recovery.executablePeakSolValue,
+        lastJupiterExecutableSolValue: recovery.lastJupiterExecutableSolValue,
+        lastHealthyExitRouteAt: recovery.lastHealthyExitRouteAt,
         traceId: recovery.traceId,
         partialTaken: recovery.partialTaken
       });

@@ -195,8 +195,12 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
   net_pnl_sol         NUMERIC(10,6),
 
   -- Estado durável do trailing / watermark
-  peak_sol_value       NUMERIC(18,9),
-  peak_updated_at      TIMESTAMPTZ,
+  peak_sol_value                    NUMERIC(18,9),
+  observable_peak_sol_value         NUMERIC(18,9),
+  executable_peak_sol_value         NUMERIC(18,9),
+  last_jupiter_executable_sol_value NUMERIC(18,9),
+  last_healthy_exit_route_at        TIMESTAMPTZ,
+  peak_updated_at                   TIMESTAMPTZ,
 
   -- Timing (para análise de latência vs EV)
   detection_to_send_ms    INTEGER,
@@ -213,6 +217,10 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
 
 -- Migração idempotente para bancos criados antes do watermark persistente.
 ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS observable_peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS executable_peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS last_jupiter_executable_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS last_healthy_exit_route_at TIMESTAMPTZ;
 ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS peak_updated_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_to_mint       ON trade_outcomes (mint);
