@@ -187,6 +187,21 @@ test('Strategy Lab possui atualização dinâmica via /api/status', () => {
   assert.match(html, /data\.pumpStrategyLab/);
 });
 
+test('Strategy Lab exposes a temporary collection failure and sampled replay scope', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpStrategyLab: {
+      mode: 'SHADOW',
+      lastError: 'SAMPLE_FAILED',
+      totalSamples: 0,
+      strategies: []
+    } as any
+  });
+  assert.match(html, /Coleta temporariamente indisponível/);
+  assert.match(html, /cotações amostradas/);
+  assert.match(html, /strategyLab\.lastError/);
+});
+
 
 test('Dashboard deixa explícito que Pump SELL fallback está desabilitado por padrão', () => {
   const html = renderDashboardHtml({
@@ -205,4 +220,37 @@ test('Dashboard deixa explícito que Pump SELL fallback está desabilitado por p
   assert.match(html, /SELL-only/);
   assert.match(html, /Última rota/);
   assert.match(html, /Confirmação/);
+});
+
+
+test('Dashboard Strategy Lab mostra janela, horizonte e replay de saída', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpStrategyLab: {
+      mode: 'SHADOW',
+      totalSamples: 12,
+      preferredJupiterPlan: 'INSUFFICIENT_DATA',
+      strategies: [{
+        cohort: 'BIRTH_0_15S',
+        entryWindow: 'LAUNCH_0_15S',
+        horizon: '5m',
+        venue: 'JUPITER_ROUTE',
+        state: 'INSUFFICIENT_DATA',
+        sampleCount: 12,
+        meanNetReturnPct: 8.5,
+        executableExitRate: 0.92,
+        exitPolicyReplays: [{
+          policy: 'TIERED_PROFIT_LOCK',
+          meanNetReturnPct: 11.25,
+          meanMaxGiveBackFromPeakPct: 7.5,
+          prematureExitRate: 0.08
+        }]
+      }]
+    }
+  });
+
+  assert.match(html, /LAUNCH_0_15S/);
+  assert.match(html, />5m</);
+  assert.match(html, /TIERED_PROFIT_LOCK/);
+  assert.match(html, /11\.25%/);
 });
