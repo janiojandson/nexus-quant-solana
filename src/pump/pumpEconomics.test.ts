@@ -53,3 +53,12 @@ test('fixed plan allocation is included in net economics', () => {
   assert.equal(result.totalCostSol, 0.01);
   assert.ok(Math.abs(result.netPnlSol - 0.04) < 1e-12);
 });
+
+
+test('current PumpSwap SOL fee schedule matches documented market-cap bands', async () => {
+  const economics = await import('./pumpEconomics.js');
+  assert.equal(economics.resolveCurrentPumpSwapSolFeeBps(100), 125);
+  assert.equal(economics.resolveCurrentPumpSwapSolFeeBps(500), 120);
+  assert.equal(economics.resolveCurrentPumpSwapSolFeeBps(10_000), 95);
+  assert.equal(economics.resolveCurrentPumpSwapSolFeeBps(100_000), 30);
+});
