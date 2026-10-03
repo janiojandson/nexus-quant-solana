@@ -15,6 +15,15 @@ const state: DashboardState = {
   totalRealizedPnlSol: 0,
   totalNetworkFeesSolEst: 0,
   incubator: { waiting: 0, mature: 19, technicalDiscards: 3, entryEligible: 1 },
+  exitPathHealth: {
+    state: 'DEGRADED',
+    canOpenNewPosition: false,
+    canRunResearch: false,
+    maxFailures: 2,
+    affectedMints: ['Mint111111111111111111111111111111111111111'],
+    reason: 'Jupiter /order unavailable',
+    lastChangedAt: new Date().toISOString()
+  },
   pumpObservatory: {
     enabled: true,
     running: true,
@@ -81,6 +90,9 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /SL inicial: -6%/);
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
   assert.match(html, /Stop Ativo: Trailing Momentum/);
+  assert.match(html, /Proteção de Saída/);
+  assert.match(html, /DEGRADED/);
+  assert.match(html, /Jupiter \/order unavailable/);
   assert.match(html, /Pump\.fun Observatory/);
   assert.match(html, /READ-ONLY/);
   assert.match(html, /PUMPX/);

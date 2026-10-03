@@ -33,6 +33,15 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
         availableRps: 1,
         reason: 'Exit protection capacity exceeded'
       },
+      exitPathHealth: {
+        state: 'DEGRADED',
+        canOpenNewPosition: false,
+        canRunResearch: false,
+        maxFailures: 2,
+        affectedMints: ['MintA'],
+        reason: 'Jupiter /order unavailable',
+        lastChangedAt: new Date().toISOString()
+      },
       pumpObservatory: {
         enabled: true,
         running: true,
@@ -54,6 +63,8 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   assert.strictEqual(payload.pump.totalCreatedObserved, 7);
   assert.strictEqual(payload.operational.exitCapacity.admit, false);
   assert.strictEqual(payload.operational.exitCapacity.requiredRps, 1.333);
+  assert.strictEqual(payload.operational.exitPathHealth.state, 'DEGRADED');
+  assert.strictEqual(payload.operational.exitPathHealth.canOpenNewPosition, false);
 });
 
 test('handleApiRoutes: deve responder 200 OK na rota /health', async () => {

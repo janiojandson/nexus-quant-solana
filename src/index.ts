@@ -18,6 +18,7 @@ import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
 import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
+import { ExitPathHealth } from './execution/exitPathHealth.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
@@ -79,6 +80,9 @@ let isRunningFastExit = false;
 let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
+const exitPathHealth = new ExitPathHealth({
+  emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
+});
 
 // Instâncias Globais dos Serviços Operacionais
 const wallet = new SolanaWalletService({
@@ -248,6 +252,7 @@ const latestState: DashboardState = {
     openPositions: 1,
     hasLocalExitSensor: false
   }),
+  exitPathHealth: exitPathHealth.snapshot(),
   lastUpdated: new Date().toISOString()
 };
 
@@ -1098,6 +1103,8 @@ async function runUltraFastExitMonitor() {
           jupiterExecutableSolValue: currentSolValue,
           healthyAtMs: Date.now()
         });
+        exitPathHealth.recordSuccess(pos.mint);
+        latestState.exitPathHealth = exitPathHealth.snapshot();
         const pnlPct = (currentSolValue - entrySol) / entrySol;
         const sensorSource = 'JUPITER_EXECUTABLE';
         const sensorPriceUsd = dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0
@@ -1228,6 +1235,8 @@ async function runUltraFastExitMonitor() {
         }
       } catch (quoteErr: any) {
         const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);
+        exitPathHealth.recordFailure(pos.mint, failures, quoteErr?.message || String(quoteErr));
+        latestState.exitPathHealth = exitPathHealth.snapshot();
         if (failures === 1) {
           console.warn(
             `⚠️ [ExitMonitor:Falha Crítica] ${pos.symbol} (${pos.mint}) | ` +
@@ -1382,6 +1391,17 @@ async function executeAutonomousCycle() {
 
     // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (MAX_CONCURRENT_POSITIONS = 2, máx 0.10 SOL)
     const activePositions = positionEngine.getAllPositions();
+    exitPathHealth.retainOpenPositions(activePositions.map(position => position.mint));
+    const currentExitHealth = exitPathHealth.snapshot();
+    latestState.exitPathHealth = currentExitHealth;
+    if (!currentExitHealth.canOpenNewPosition) {
+      console.log(
+        `🛑 [EXIT PATH ${currentExitHealth.state}] Novas entradas pausadas: ` +
+        `${currentExitHealth.reason || 'rota de saída degradada'} ` +
+        `(falhas=${currentExitHealth.maxFailures}).`
+      );
+      return;
+    }
     if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
       console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
       return;

@@ -78,6 +78,15 @@ export interface DashboardState {
     availableRps: number;
     reason?: string;
   };
+  exitPathHealth?: {
+    state: 'HEALTHY' | 'DEGRADED' | 'EMERGENCY';
+    canOpenNewPosition: boolean;
+    canRunResearch: boolean;
+    maxFailures: number;
+    affectedMints: string[];
+    reason?: string;
+    lastChangedAt: string;
+  };
   positions: Array<{
     mint: string;
     symbol: string;
@@ -364,13 +373,31 @@ export function renderDashboardHtml(state: DashboardState): string {
     </header>
 
     <!-- ESTADO OPERACIONAL REAL -->
-    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
         <div class="text-[10px] uppercase tracking-wider text-slate-500">Execução</div>
         <div id="op-execution-mode" class="mt-1 font-bold ${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">
           ${state.dryRun ? 'DRY-RUN' : 'REAL ON-CHAIN'}
         </div>
         <div class="text-[10px] text-slate-500 mt-1">RPC: ${state.activeRpcUrl || 'n/a'}</div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Proteção de Saída</div>
+        <div id="op-exit-health-status" class="mt-1 font-bold ${
+          state.exitPathHealth?.state === 'HEALTHY'
+            ? 'text-emerald-400'
+            : state.exitPathHealth?.state === 'EMERGENCY'
+              ? 'text-rose-400'
+              : 'text-amber-400'
+        }">
+          ${state.exitPathHealth?.state || 'HEALTHY'}
+        </div>
+        <div id="op-exit-health-detail" class="text-[10px] text-slate-500 mt-1">
+          ${escapeDashboardHtml(
+            state.exitPathHealth?.reason ||
+            `Falhas: ${state.exitPathHealth?.maxFailures ?? 0} · novas entradas ${state.exitPathHealth?.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'}`
+          )}
+        </div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
         <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1</div>
@@ -840,6 +867,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         const auth = operational.adminAuth || {};
         const rent = operational.rentRecovery || {};
         const laya = operational.laya || {};
+        const exitHealth = operational.exitPathHealth || {};
 
         adminAuthStatus.configured = Boolean(auth.configured);
         adminAuthStatus.needsBootstrap = Boolean(auth.needsBootstrap);
@@ -857,6 +885,20 @@ export function renderDashboardHtml(state: DashboardState): string {
           layaEl.className = 'mt-1 font-bold ' + (laya.health === 'OK' ? 'text-emerald-400' : 'text-amber-400');
         }
         if (layaDetail) layaDetail.textContent = (laya.loaded || []).join(',') || 'checkpoint não confirmado';
+
+        const exitHealthEl = document.getElementById('op-exit-health-status');
+        const exitHealthDetail = document.getElementById('op-exit-health-detail');
+        if (exitHealthEl) {
+          const state = exitHealth.state || 'HEALTHY';
+          exitHealthEl.textContent = state;
+          exitHealthEl.className = 'mt-1 font-bold ' +
+            (state === 'HEALTHY' ? 'text-emerald-400' : (state === 'EMERGENCY' ? 'text-rose-400' : 'text-amber-400'));
+        }
+        if (exitHealthDetail) {
+          exitHealthDetail.textContent = exitHealth.reason ||
+            ('Falhas: ' + Number(exitHealth.maxFailures || 0) +
+             ' · novas entradas ' + (exitHealth.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'));
+        }
 
         const rentEl = document.getElementById('op-rent-status');
         const rentDetail = document.getElementById('op-rent-detail');
