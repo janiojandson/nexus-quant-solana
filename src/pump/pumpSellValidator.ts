@@ -84,7 +84,7 @@ function publicKeyIn(key: PublicKey, values: readonly PublicKey[]): boolean {
   return values.some(value => value.equals(key));
 }
 
-function decodeSellCurve(data: Buffer): PumpSellBondingCurveState | null {
+export function decodePumpSellBondingCurveState(data: Buffer): PumpSellBondingCurveState | null {
   if (!Buffer.isBuffer(data) || data.length < 115) return null;
   if (!data.subarray(0, 8).equals(PUMP_BONDING_CURVE_DISCRIMINATOR)) return null;
 
@@ -146,7 +146,7 @@ export function validatePumpSellState(input: PumpSellValidationInput): PumpSellV
     return fail('Pump base mint token program/owner mismatch.');
   }
 
-  const state = decodeSellCurve(input.bondingCurveAccount.data);
+  const state = decodePumpSellBondingCurveState(input.bondingCurveAccount.data);
   if (!state) return fail('Pump bonding curve data/discriminator is invalid or too short.');
   if (state.complete) return fail('Pump bonding curve is complete; use post-graduation routing.');
 
