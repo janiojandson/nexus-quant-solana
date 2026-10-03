@@ -21,6 +21,8 @@ import { PositionExitEngine, type PositionTracking } from './execution/positionE
 import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
 import { ExitPathHealth } from './execution/exitPathHealth.js';
 import { buildWatchdogExitPlan } from './execution/watchdogExitPolicy.js';
+import { ExitRouter, type RoutedExitAttempt } from './execution/exitRouter.js';
+import { PumpSellExecutor } from './pump/pumpSellExecutor.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
@@ -70,6 +72,8 @@ const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLA
 const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
 const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
 const NEXUS_MAINTENANCE_MODE = process.env.NEXUS_MAINTENANCE_MODE === 'true';
+const PUMP_DIRECT_SELL_FALLBACK_ENABLED =
+  process.env.PUMP_DIRECT_SELL_FALLBACK_ENABLED === 'true';
 const PUMP_OBSERVATORY_ENABLED = process.env.PUMP_OBSERVATORY_ENABLED === 'true';
 const PUMP_OBSERVATORY_REFRESH_MS = Math.max(
   5_000,
@@ -160,6 +164,35 @@ let executionUncertainReason: string | null = null;
 const jupiterEngine = new JupiterExecutionEngine({
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
   isDryRun: IS_DRY_RUN
+});
+
+const pumpSellExecutor = new PumpSellExecutor(
+  wallet.getConnection() as any,
+  {
+    reconcileRecentSell: async (mintAddress, sinceTimestampMs, expectedAmountAtomic) => {
+      const found = await wallet.findRecentTokenDeltaTransaction(
+        mintAddress,
+        sinceTimestampMs,
+        'OUT'
+      );
+      if (!found) return null;
+      const soldAtomic = BigInt(found.deltaAtomic) < 0n
+        ? -BigInt(found.deltaAtomic)
+        : BigInt(found.deltaAtomic);
+      if (soldAtomic < (expectedAmountAtomic * 99n) / 100n) return null;
+      const grossReceivedLamports = found.walletLamportDelta + found.feeLamports;
+      return {
+        signature: found.signature,
+        soldAtomic,
+        receivedLamports: grossReceivedLamports > 0
+          ? BigInt(grossReceivedLamports)
+          : undefined
+      };
+    }
+  }
+);
+const exitRouter = new ExitRouter({
+  pumpFallbackEnabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED
 });
 
 async function reconcileUncertainV2Execution(
@@ -528,8 +561,19 @@ async function executeExitOrderUnlocked(
       );
     } catch (err: any) {
       const reason = err?.message || String(err);
-      console.error(`🚫 [SAÍDA MANUAL SEM QUOTE] ${pos.symbol}: ${reason}`);
-      return { success: false, error: `Falha ao cotar saída manual: ${reason}` };
+      if (!exitRouter.isPumpFallbackEnabled()) {
+        console.error(`🚫 [SAÍDA MANUAL SEM QUOTE] ${pos.symbol}: ${reason}`);
+        return { success: false, error: `Falha ao cotar saída manual: ${reason}` };
+      }
+      // Com fallback Pump explicitamente armado, a ausência de quote Jupiter
+      // não impede a tentativa de saída. O valor contábil será substituído pelo
+      // resultado da rota confirmada; jamais usamos este placeholder como lucro.
+      exitSolValue = pos.entrySol || 0.015;
+      pnlPct = 0;
+      console.warn(
+        `⚠️ [SAÍDA MANUAL SEM QUOTE JUPITER] ${pos.symbol}: ${reason} | ` +
+        'seguindo para ExitRouter com Pump SELL fallback elegível.'
+      );
     }
   }
 
@@ -538,7 +582,7 @@ async function executeExitOrderUnlocked(
 
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
   const exitAttemptStartedAt = Date.now();
-  let exitSwap = await jupiterEngine.executeSwap({
+  let exitSwap: RoutedExitAttempt = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
     amountLamports: exitAmountAtomic,
@@ -616,6 +660,73 @@ async function executeExitOrderUnlocked(
     }
   }
 
+  let selectedExitPath: 'JUPITER' | 'PUMP_DIRECT' = 'JUPITER';
+  const routedExit = await exitRouter.routeAfterJupiter(
+    exitSwap,
+    async (): Promise<RoutedExitAttempt> => {
+      console.warn(
+        `🛟 [ExitRouter] Jupiter falhou definitivamente para ${pos.symbol}; ` +
+        'avaliando Pump sell_v2 direto (SELL-only).'
+      );
+
+      if (IS_DRY_RUN) {
+        const simulated = await pumpSellExecutor.simulateSell({
+          mint: new (await import('@solana/web3.js')).PublicKey(pos.mint),
+          userKeypair: wallet.getKeypair(),
+          tokenAmountAtomic: BigInt(exitAmountAtomic),
+          slippageBps: 750
+        });
+        if (!simulated.success || !simulated.built) {
+          return {
+            status: 'FAILED',
+            txSignature: '',
+            inAmount: exitAmountAtomic,
+            outAmount: 0,
+            error: simulated.error || 'Pump direct sell simulation failed.'
+          };
+        }
+        return {
+          status: 'DRY_RUN_SUCCESS',
+          txSignature: `dry_run_pump_sell_${Date.now()}`,
+          inAmount: exitAmountAtomic,
+          outAmount: Number(simulated.built.quote.netSolLamports)
+        };
+      }
+
+      const direct = await pumpSellExecutor.executeSell({
+        mint: new (await import('@solana/web3.js')).PublicKey(pos.mint),
+        userKeypair: wallet.getKeypair(),
+        tokenAmountAtomic: BigInt(exitAmountAtomic),
+        slippageBps: 750
+      });
+      return {
+        status: direct.status,
+        txSignature: direct.txSignature || '',
+        inAmount: exitAmountAtomic,
+        outAmount: Number(
+          direct.actualReceivedLamports ??
+          direct.expectedNetSolLamports ??
+          0n
+        ),
+        error: direct.error
+      };
+    }
+  );
+  selectedExitPath = routedExit.path;
+  exitSwap = routedExit.result;
+
+  if (
+    selectedExitPath === 'PUMP_DIRECT' &&
+    exitSwap.status === 'SUBMITTED_UNCONFIRMED'
+  ) {
+    uncertainExitMints.add(pos.mint);
+    executionUncertainReason =
+      `Pump direct sell inconclusivo em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
+    console.error(
+      `🛑 [Pump sell_v2: ESTADO INCERTO] ${pos.symbol}: nenhuma segunda venda será criada até reconciliação.`
+    );
+  }
+
   // 2. Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
   // foi de fato confirmado. Sem esta trava, uma saída falha fechava a ATA
   // (prendendo os tokens), gravava PnLperformed fictício e notificava "Saída Executada".
@@ -665,7 +776,7 @@ async function executeExitOrderUnlocked(
     : exitSolValue;
 
   console.log(
-    `💵 [Jupiter V2: Realizado] ${pos.symbol} | recebido=${actualExitSolValue.toFixed(9)} SOL ` +
+    `💵 [ExitRouter:${selectedExitPath}] ${pos.symbol} | recebido=${actualExitSolValue.toFixed(9)} SOL ` +
     `| custo-base=${costBasisSoldSol.toFixed(9)} SOL | PnL=${(realizedPnlPct * 100).toFixed(2)}%`
   );
 
