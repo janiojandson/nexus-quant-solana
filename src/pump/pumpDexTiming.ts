@@ -57,8 +57,13 @@ export function selectBestDexPairForMint(
     if (String(pair.chainId || '').toLowerCase() !== 'solana') return false;
     return pair.baseToken?.address === mint || pair.quoteToken?.address === mint;
   });
+  // DexScreener priceUsd describes the base token. If the Pump mint appears
+  // as quote token, that price belongs to the other asset and cannot be used
+  // as Pump price/economic readiness when a base-side pair exists.
+  const baseMatches = matching.filter(pair => pair.baseToken?.address === mint);
+  const relevant = baseMatches.length > 0 ? baseMatches : matching;
 
-  return matching.sort((a, b) => {
+  return relevant.sort((a, b) => {
     const aLiq = finiteNumber(a.liquidity?.usd) ?? -1;
     const bLiq = finiteNumber(b.liquidity?.usd) ?? -1;
     if (aLiq !== bLiq) return bLiq - aLiq;

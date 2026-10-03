@@ -120,3 +120,27 @@ test('tracker fails open for observability when DexScreener is unavailable', asy
   assert.equal(applyCalled, false);
   assert.match(tracker.snapshot().lastError || '', /429/);
 });
+
+
+test('prefers a base-token match over a higher-liquidity quote-token match', () => {
+  const pair = selectBestDexPairForMint(MINT_A, [
+    {
+      chainId: 'solana',
+      pairAddress: 'WrongPriceSide',
+      baseToken: { address: MINT_B },
+      quoteToken: { address: MINT_A },
+      priceUsd: '999',
+      liquidity: { usd: 1_000_000 }
+    },
+    {
+      chainId: 'solana',
+      pairAddress: 'CanonicalBaseSide',
+      baseToken: { address: MINT_A },
+      quoteToken: { address: MINT_B },
+      priceUsd: '0.001',
+      liquidity: { usd: 25_000 }
+    }
+  ] as any);
+
+  assert.equal(pair?.pairAddress, 'CanonicalBaseSide');
+});

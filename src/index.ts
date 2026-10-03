@@ -32,6 +32,8 @@ import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution
 import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
+import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
+import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
 
 
 dotenv.config();
@@ -74,6 +76,18 @@ const PUMP_OBSERVATORY_BATCH_SIZE = Math.max(
   1,
   Math.min(100, Number(process.env.PUMP_OBSERVATORY_BATCH_SIZE || 50))
 );
+const PUMP_DEX_TIMING_INTERVAL_MS = Math.max(
+  2_000,
+  Number(process.env.PUMP_DEX_TIMING_INTERVAL_MS || 5_000)
+);
+const PUMP_DEX_TIMING_BATCH_SIZE = Math.max(
+  1,
+  Math.min(30, Number(process.env.PUMP_DEX_TIMING_BATCH_SIZE || 30))
+);
+const PUMP_DEX_TIMING_MAX_AGE_MS = Math.max(
+  60_000,
+  Number(process.env.PUMP_DEX_TIMING_MAX_AGE_MS || 15 * 60_000)
+);
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
@@ -100,6 +114,14 @@ const pumpObservatory = new PumpObservatory(
     maxRecent: 200
   }
 );
+const pumpDexTimingTracker = new PumpDexTimingTracker(pumpObservatory, {
+  batchSize: PUMP_DEX_TIMING_BATCH_SIZE,
+  maxAgeMs: PUMP_DEX_TIMING_MAX_AGE_MS
+});
+const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
+  enabled: PUMP_OBSERVATORY_ENABLED,
+  intervalMs: PUMP_DEX_TIMING_INTERVAL_MS
+});
 
 const scanner = new DexScreenerScanner();
 const gatekeeper = new MemeRiskGatekeeper({
@@ -2686,6 +2708,11 @@ async function main() {
       `🧪 [Pump Observatory] ${latestState.pumpObservatory.running ? 'STREAM ATIVO' : 'STREAM INDISPONÍVEL'} ` +
       `| refresh=${PUMP_OBSERVATORY_REFRESH_MS}ms batch=${PUMP_OBSERVATORY_BATCH_SIZE} | READ-ONLY`
     );
+    pumpDexTimingRuntime.start();
+    console.log(
+      `🧪 [Pump→Dex Timing] ativo | interval=${PUMP_DEX_TIMING_INTERVAL_MS}ms ` +
+      `batch=${PUMP_DEX_TIMING_BATCH_SIZE} maxAge=${PUMP_DEX_TIMING_MAX_AGE_MS}ms`
+    );
     pumpStateSyncTimer = setInterval(() => {
       latestState.pumpObservatory = pumpObservatory.snapshot();
     }, 2_500);
@@ -2740,6 +2767,7 @@ async function main() {
 process.on('SIGTERM', async () => {
   console.log('🛑 [SIGTERM] Encerrando serviço e esvaziando buffer do Decision Journal...');
   if (pumpStateSyncTimer) clearInterval(pumpStateSyncTimer);
+  pumpDexTimingRuntime.stop();
   await pumpObservatory.stop();
   await journal.shutdown();
   process.exit(0);
@@ -2748,6 +2776,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   console.log('🛑 [SIGINT] Encerrando serviço e esvaziando buffer do Decision Journal...');
   if (pumpStateSyncTimer) clearInterval(pumpStateSyncTimer);
+  pumpDexTimingRuntime.stop();
   await pumpObservatory.stop();
   await journal.shutdown();
   process.exit(0);
