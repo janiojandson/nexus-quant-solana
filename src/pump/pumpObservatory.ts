@@ -40,6 +40,16 @@ export interface PumpObservation {
   progressPct?: number;
   complete: boolean;
   curveUpdatedAt?: string;
+  dexFirstSeenAtMs?: number;
+  dexReadyAtMs?: number;
+  pumpToDexFirstSeenLagMs?: number;
+  pumpToDexReadyLagMs?: number;
+  dexPairAddress?: string;
+  dexPairCreatedAtMs?: number;
+  dexTimestampSkewMs?: number;
+  dexPriceUsd?: number;
+  dexLiquidityUsd?: number;
+  dexUrl?: string;
   solscanUrl: string;
   transactionUrl: string;
   pumpUrl: string;
@@ -54,6 +64,9 @@ export interface PumpObservatorySnapshot {
   graduatedCount: number;
   lastCreateToObserverLagMs?: number;
   maxCreateToObserverLagMs?: number;
+  dexIndexedCount: number;
+  dexReadyCount: number;
+  lastPumpToDexReadyLagMs?: number;
   lastObservedAt?: string;
   lastError?: string;
   recent: PumpObservation[];
@@ -80,6 +93,7 @@ export class PumpObservatory {
   private totalCreatedObserved = 0;
   private lastCreateToObserverLagMs: number | undefined;
   private maxCreateToObserverLagMs: number | undefined;
+  private lastPumpToDexReadyLagMs: number | undefined;
   private lastObservedAt: string | undefined;
   private lastError: string | undefined;
 
@@ -218,6 +232,50 @@ export class PumpObservatory {
     this.applyCurveAccount(observation, account);
   }
 
+  getDexCorrelationCandidates(limit: number, maxAgeMs: number): Array<{ mint: string; eventTimestampMs: number }> {
+    const cutoff = this.now() - Math.max(0, maxAgeMs);
+    return [...this.observations.values()]
+      .reverse()
+      .filter(item => item.eventTimestampMs >= cutoff && item.dexReadyAtMs == null)
+      .slice(0, Math.max(0, limit))
+      .map(item => ({ mint: item.mint, eventTimestampMs: item.eventTimestampMs }));
+  }
+
+  applyDexCorrelation(
+    mint: string,
+    sample: {
+      observedAtMs: number;
+      ready: boolean;
+      pairAddress: string;
+      pairCreatedAtMs?: number;
+      priceUsd?: number;
+      liquidityUsd?: number;
+      dexUrl: string;
+    }
+  ): void {
+    const observation = this.observations.get(mint);
+    if (!observation) return;
+
+    if (observation.dexFirstSeenAtMs == null) {
+      observation.dexFirstSeenAtMs = sample.observedAtMs;
+      observation.pumpToDexFirstSeenLagMs = sample.observedAtMs - observation.eventTimestampMs;
+    }
+    if (sample.ready && observation.dexReadyAtMs == null) {
+      observation.dexReadyAtMs = sample.observedAtMs;
+      observation.pumpToDexReadyLagMs = sample.observedAtMs - observation.eventTimestampMs;
+      this.lastPumpToDexReadyLagMs = observation.pumpToDexReadyLagMs;
+    }
+
+    observation.dexPairAddress = sample.pairAddress;
+    observation.dexPairCreatedAtMs = sample.pairCreatedAtMs;
+    observation.dexTimestampSkewMs = sample.pairCreatedAtMs == null
+      ? undefined
+      : sample.pairCreatedAtMs - observation.eventTimestampMs;
+    observation.dexPriceUsd = sample.priceUsd;
+    observation.dexLiquidityUsd = sample.liquidityUsd;
+    observation.dexUrl = sample.dexUrl;
+  }
+
   async refreshActiveCurves(): Promise<void> {
     const active = [...this.observations.values()]
       .reverse()
@@ -246,6 +304,8 @@ export class PumpObservatory {
   snapshot(): PumpObservatorySnapshot {
     const recent = [...this.observations.values()].reverse().map(item => ({ ...item }));
     const graduatedCount = recent.filter(item => item.complete).length;
+    const dexIndexedCount = recent.filter(item => item.dexFirstSeenAtMs != null).length;
+    const dexReadyCount = recent.filter(item => item.dexReadyAtMs != null).length;
     return {
       enabled: this.enabled,
       running: this.subscriptionId != null,
@@ -255,6 +315,9 @@ export class PumpObservatory {
       graduatedCount,
       lastCreateToObserverLagMs: this.lastCreateToObserverLagMs,
       maxCreateToObserverLagMs: this.maxCreateToObserverLagMs,
+      dexIndexedCount,
+      dexReadyCount,
+      lastPumpToDexReadyLagMs: this.lastPumpToDexReadyLagMs,
       lastObservedAt: this.lastObservedAt,
       lastError: this.lastError,
       recent
