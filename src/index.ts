@@ -83,11 +83,35 @@ const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
 /** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
 const exitOrderInFlight = new Set<string>();
+/** Mints cujo /execute V2 ficou inconclusivo: bloqueia nova ordem até reinício/reconciliação. */
+const uncertainExitMints = new Set<string>();
+/** Circuit breaker em memória: impede novas entradas após uma execução V2 inconclusiva. */
+let executionUncertainReason: string | null = null;
 
 const jupiterEngine = new JupiterExecutionEngine({
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
   isDryRun: IS_DRY_RUN
 });
+
+async function reconcileUncertainV2Execution(
+  mint: string,
+  sinceTimestampMs: number,
+  direction: 'IN' | 'OUT',
+  attempts = 4
+) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const found = await wallet.findRecentTokenDeltaTransaction(
+      mint,
+      sinceTimestampMs,
+      direction
+    );
+    if (found) return found;
+    if (attempt < attempts - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1_500));
+    }
+  }
+  return null;
+}
 
 const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
@@ -306,6 +330,12 @@ async function executeExitOrder(
   exitSolValue: number,
   options?: ExitOrderOptions
 ): Promise<ExitOrderResult> {
+  if (uncertainExitMints.has(mint)) {
+    return {
+      success: false,
+      error: `V2_EXECUTION_UNCERTAIN:${mint}: nova saída bloqueada até reconciliação/restart seguro`
+    };
+  }
   if (exitOrderInFlight.has(mint)) {
     return { success: false, error: `EXIT_ALREADY_IN_FLIGHT:${mint}` };
   }
@@ -379,9 +409,10 @@ async function executeExitOrderUnlocked(
   }
 
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
-  console.log(`⚡ [Jupiter V6] Saída com slippage 500bps (5.0%) e priority HIGH...`);
+  console.log(`⚡ [Jupiter Swap V2] Saída com slippage 500bps (5.0%) e landing gerenciado...`);
 
-  // 1. Swap na Jupiter V6 — Blindagem de saída: 500bps slippage + priority HIGH
+  // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
+  const exitAttemptStartedAt = Date.now();
   let exitSwap = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
@@ -395,8 +426,8 @@ async function executeExitOrderUnlocked(
   // Segunda tentativa ainda fail-closed: amplia até o hard-cap de 7,5%,
   // mas continua simulando antes de transmitir. Não existe mais envio cego com
   // skipPreflight, evitando pagar taxa por uma falha que a simulação detectaria.
-  if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
-    console.warn(`⚠️ [TENTATIVA 1 FALHOU] ${pos.symbol}: ${exitSwap.error} | Tentando slippage 750bps...`);
+  if (exitSwap.status === 'FAILED') {
+    console.warn(`⚠️ [TENTATIVA 1 FALHOU DEFINITIVAMENTE] ${pos.symbol}: ${exitSwap.error} | Tentando nova ordem com slippage 750bps...`);
 
     exitSwap = await jupiterEngine.executeSwap({
       inputMint: pos.mint,
@@ -410,7 +441,51 @@ async function executeExitOrderUnlocked(
     });
 
     if (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') {
-      console.log(`✅ [TENTATIVA 2 SUCESSO] ${pos.symbol}: Liquidação confirmada com slippage 750bps`);
+      console.log(`✅ [TENTATIVA 2 SUCESSO] ${pos.symbol}: Liquidação V2 confirmada com slippage 750bps`);
+    }
+  }
+
+  if (exitSwap.status === 'SUBMITTED_UNCONFIRMED') {
+    console.warn(
+      `⚠️ [Jupiter V2: RECONCILIAÇÃO] ${pos.symbol}: resposta /execute inconclusiva; ` +
+      'procurando delta confirmado na wallet antes de qualquer nova ordem.'
+    );
+    const reconciled = await reconcileUncertainV2Execution(
+      pos.mint,
+      exitAttemptStartedAt,
+      'OUT'
+    );
+
+    if (reconciled) {
+      const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
+      if (Number.isSafeInteger(soldAtomic) && soldAtomic >= Math.floor(exitAmountAtomic * 0.99)) {
+        const grossSolLamports = reconciled.walletLamportDelta + reconciled.feeLamports;
+        exitSwap = {
+          ...exitSwap,
+          status: 'SUCCESS',
+          txSignature: reconciled.signature,
+          inAmount: soldAtomic,
+          outAmount: grossSolLamports > 0
+            ? grossSolLamports
+            : Math.max(1, Math.round(exitSolValue * 1e9)),
+          error: undefined
+        };
+        uncertainExitMints.delete(pos.mint);
+        console.log(
+          `✅ [Jupiter V2: RECONCILIADO ON-CHAIN] ${pos.symbol} | tx=${reconciled.signature} ` +
+          `| vendido=${soldAtomic} atomic`
+        );
+      }
+    }
+
+    if (exitSwap.status === 'SUBMITTED_UNCONFIRMED') {
+      uncertainExitMints.add(pos.mint);
+      executionUncertainReason =
+        `Saída V2 inconclusiva em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
+      console.error(
+        `🛑 [Jupiter V2: ESTADO INCERTO] ${pos.symbol}: não foi possível reconciliar on-chain. ` +
+        'Nova saída deste mint e novas entradas ficam BLOQUEADAS para evitar duplicidade.'
+      );
     }
   }
 
@@ -448,8 +523,27 @@ async function executeExitOrderUnlocked(
     return { success: false, txSignature: '', error: failReason };
   }
 
+  const tokenAmountBefore = pos.tokenAmount;
+  const soldRatio = Math.min(1, Math.max(0, exitAmountAtomic / tokenAmountBefore));
+  const costBasisSoldSol = (pos.entrySol || 0.015) * soldRatio;
+  const actualExitSolValue = exitSwap.outAmount > 0
+    ? exitSwap.outAmount / 1e9
+    : exitSolValue * soldRatio;
+  const realizedPnlSol = actualExitSolValue - costBasisSoldSol;
+  const realizedPnlPct = costBasisSoldSol > 0
+    ? realizedPnlSol / costBasisSoldSol
+    : pnlPct;
+  const impliedFullPositionSolValue = soldRatio > 0
+    ? actualExitSolValue / soldRatio
+    : exitSolValue;
+
+  console.log(
+    `💵 [Jupiter V2: Realizado] ${pos.symbol} | recebido=${actualExitSolValue.toFixed(9)} SOL ` +
+    `| custo-base=${costBasisSoldSol.toFixed(9)} SOL | PnL=${(realizedPnlPct * 100).toFixed(2)}%`
+  );
+
   if (isPartial) {
-    const committed = positionEngine.commitPartialExit(pos.mint, exitAmountAtomic, exitSolValue);
+    const committed = positionEngine.commitPartialExit(pos.mint, exitAmountAtomic, impliedFullPositionSolValue);
     if (!committed) {
       console.error(`❌ [CONSISTÊNCIA] Swap parcial confirmou, mas o estado local não conseguiu aplicar a redução de ${exitAmountAtomic} unidades em ${pos.symbol}.`);
     }
@@ -511,8 +605,8 @@ async function executeExitOrderUnlocked(
     }
   }
 
-  // 5. Registra Trade Fechado
-  const pnlSol = pnlPct * (pos.entrySol || 0.015);
+  // 5. Registra Trade Fechado usando o valor REAL refletido na wallet pelo /execute V2.
+  const pnlSol = realizedPnlSol;
 
   // Registro do resultado no Drawdown Breaker para proteção de capital diária
   drawdownBreaker.recordTradeResult(pnlSol);
@@ -522,10 +616,10 @@ async function executeExitOrderUnlocked(
     symbol: pos.symbol,
     tokenAmount: tokenAmountToSell,
     entryPriceUsd: pos.entryPriceUsd,
-    exitPriceUsd: exitSolValue > 0 ? (exitSolValue / tokenAmountToSell) : pos.entryPriceUsd,
+    exitPriceUsd: pos.entryPriceUsd * (1 + realizedPnlPct),
     entryTimestamp: pos.entryTimestamp,
     exitTimestamp: Date.now(),
-    pnlPct,
+    pnlPct: realizedPnlPct,
     pnlUsdEst: (pnlSol * 130), // Estimativa USD
     pnlSolEst: pnlSol,
     exitReason,
@@ -552,14 +646,14 @@ async function executeExitOrderUnlocked(
     traceId: pos.traceId || randomUUID(),
     mint: pos.mint,
     entryPriceUsd: pos.entryPriceUsd,
-    entrySizeSol: pos.entrySol || 0.05,
+    entrySizeSol: costBasisSoldSol,
     entryTimestamp: new Date(pos.entryTimestamp),
-    exitPriceUsd: exitSolValue > 0 ? (exitSolValue / tokenAmountToSell) : pos.entryPriceUsd,
-    exitSizeSol: exitSolValue,
+    exitPriceUsd: pos.entryPriceUsd * (1 + realizedPnlPct),
+    exitSizeSol: actualExitSolValue,
     exitTimestamp: new Date(),
     exitReason: exitTypeMap[exitReason] || 'EXIT_WATCHDOG',
     pnlSol,
-    pnlPct: pnlPct * 100,
+    pnlPct: realizedPnlPct * 100,
     feesTotalSol: feesSol,
     rentRecoveredSol: rentRecovered,
     netPnlSol,
@@ -583,12 +677,12 @@ async function executeExitOrderUnlocked(
 
   // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
   cerebroService.notifyTradeEvent({
-    title: isPartial ? 'Colheita Parcial (+100%)' : `Saída Executada (${exitReason})`,
+    title: isPartial ? 'Colheita Parcial (+35%)' : `Saída Executada (${exitReason})`,
     symbol: pos.symbol,
     mint: pos.mint,
     action: isPartial ? 'Venda de 50% / Breakeven ativado' : 'Liquidação Total / ATA encerrada',
-    pnlPct,
-    solValue: exitSolValue,
+    pnlPct: realizedPnlPct,
+    solValue: actualExitSolValue,
     txSignature: exitSwap.txSignature
   }).catch(() => {});
 
@@ -785,7 +879,7 @@ const server = http.createServer(async (req, res) => {
     getAllOpenPositions: () => positionEngine.getAllPositions(),
     sweepRent: () => runRentRecoverySweep('MANUAL'),
     panicToken: async (mint: string) => {
-      console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter V6...`);
+      console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter Swap V2...`);
       positionEngine.removePosition(mint);
 
       const splAccounts = await wallet.getSplTokenAccounts();
@@ -1143,6 +1237,10 @@ async function runUltraFastExitMonitor() {
  */
 async function executeAutonomousCycle() {
   if (NEXUS_MAINTENANCE_MODE) return;
+  if (executionUncertainReason) {
+    console.error(`🛑 [CIRCUIT BREAKER V2] Novas entradas suspensas: ${executionUncertainReason}`);
+    return;
+  }
   if (isRunningScanner) {
     console.log('⏳ Ciclo de scanner anterior ainda em processamento. Pulando iteração...');
     return;
@@ -1459,7 +1557,7 @@ async function executeAutonomousCycle() {
           return momentumTelemetry.pass ? 'PASS' : 'FAIL';
         };
 
-        // Ciclo 4: Execução na Jupiter V6 (Dry-Run ou Real)
+        // Ciclo 4: Execução na Jupiter Swap V2 Meta-Aggregator (Dry-Run ou Real)
         // Dimensionamento adaptativo: o lote é escolhido pela profundidade real da pool.
         const currentBalance = latestState.balanceSol || (await wallet.getBalanceSol());
         const safeBalance = currentBalance - GAS_RESERVE_SOL;
@@ -1723,7 +1821,7 @@ async function executeAutonomousCycle() {
           maxAutoSlippageBps: 750
         };
 
-        console.log(`⚡ [3/3 Motor Jupiter V6] Dimensionando lote econômico com validação pré-voo (máx. 2 tentativas | autoSlippage 750bps)...`);
+        console.log(`⚡ [3/3 Motor Jupiter V2] Dimensionando lote economico com RTSE e validacao pre-voo (max. 2 tentativas | hard-cap 750bps)...`);
 
         // O hook `validate` fecha o ciclo sizer -> execução: cada degrau da
         // escada é testado contra a simulação real ANTES de comprometer capital.
@@ -1860,8 +1958,9 @@ async function executeAutonomousCycle() {
           }
         });
 
-        console.log(`⚡ [3/3 Motor Jupiter V6] Executando compra com pré-voo fail-closed (${dynamicAllocSol} SOL | autoSlippage 750bps)...`);
-        const swapSim = await jupiterEngine.executeSwap({
+        console.log(`⚡ [3/3 Motor Jupiter Swap V2] Executando compra com RTSE + pré-voo fail-closed (${dynamicAllocSol} SOL | hard-cap 750bps)...`);
+        const entryAttemptStartedAt = Date.now();
+        let swapSim = await jupiterEngine.executeSwap({
           inputMint: SOL_MINT,
           outputMint: topCandidate.mint,
           amountLamports: tradeLamports,
@@ -1879,7 +1978,53 @@ async function executeAutonomousCycle() {
           console.log(`   ⚠️ Erro Swap: ${swapSim.error}`);
         }
         console.log(`   Assinatura Tx: ${swapSim.txSignature || 'N/A'}`);
-        console.log(`   Retorno cotado: ${swapSim.outAmount.toLocaleString()} unidades atômicas`);
+        console.log(`   Retorno V2: ${swapSim.outAmount.toLocaleString()} unidades atômicas | router=${swapSim.router || 'n/d'} | slippage=${swapSim.slippageBps ?? 'n/d'}bps`);
+
+        if (swapSim.status === 'SUBMITTED_UNCONFIRMED') {
+          console.warn(
+            `⚠️ [Jupiter V2: RECONCILIAÇÃO DE ENTRADA] ${topCandidate.symbol}: ` +
+            'resposta /execute inconclusiva; procurando delta confirmado na wallet.'
+          );
+          const reconciled = await reconcileUncertainV2Execution(
+            topCandidate.mint,
+            entryAttemptStartedAt,
+            'IN'
+          );
+
+          if (reconciled) {
+            const receivedAtomic = Number(BigInt(reconciled.deltaAtomic));
+            if (Number.isSafeInteger(receivedAtomic) && receivedAtomic > 0) {
+              swapSim = {
+                ...swapSim,
+                status: 'SUCCESS',
+                txSignature: reconciled.signature,
+                outAmount: receivedAtomic,
+                error: undefined
+              };
+              txSignature = reconciled.signature;
+              console.log(
+                `✅ [Jupiter V2: ENTRADA RECONCILIADA ON-CHAIN] ${topCandidate.symbol} ` +
+                `| tx=${reconciled.signature} | recebido=${receivedAtomic} atomic`
+              );
+            }
+          }
+
+          if (swapSim.status === 'SUBMITTED_UNCONFIRMED') {
+            const reason =
+              `Entrada V2 inconclusiva em ${topCandidate.symbol} (${topCandidate.mint}); ` +
+              'novas entradas suspensas até reconciliação/restart seguro.';
+            executionUncertainReason = reason;
+            antiSpamMemory.recordVeto(topCandidate.mint, reason, 24 * 60 * 60 * 1000);
+            void postgresRepo.saveQuarantine({
+              mint: topCandidate.mint,
+              symbol: topCandidate.symbol,
+              reason,
+              expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+            }).catch(() => {});
+            console.error(`🛑 [CIRCUIT BREAKER V2] ${reason}`);
+            return;
+          }
+        }
 
         if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
           // CORREÇÃO: Só adiciona posição se houver txid on-chain confirmado
@@ -1991,6 +2136,12 @@ async function executeAutonomousCycle() {
               txSignature: swapSim.txSignature,
               outAmountAtomic: String(managedEntryAtomic),
               quotedOutAmountAtomic: String(Math.trunc(swapSim.outAmount)),
+              executionPath: swapSim.executionPath,
+              jupiterRouter: swapSim.router ?? null,
+              jupiterRequestId: swapSim.requestId ?? null,
+              jupiterFeeBps: swapSim.feeBps ?? null,
+              jupiterFeeMint: swapSim.feeMint ?? null,
+              jupiterSlippageBps: swapSim.slippageBps ?? null,
               stopLossPct: -0.06,
               takeProfitPct: 0.35,
               entryTimestampMs: nowTs,
@@ -2017,7 +2168,7 @@ async function executeAutonomousCycle() {
             entryPriceUsd: topCandidate.priceUsd,
             entrySizeSol: dynamicAllocSol,
             entryTimestamp: new Date(nowTs),
-            entrySlippagePct: 7.5,
+            entrySlippagePct: (swapSim.slippageBps ?? 750) / 100,
             status: 'OPEN'
           });
           await journal.flush();
@@ -2036,7 +2187,7 @@ async function executeAutonomousCycle() {
             title: `Nova Entrada Executada (Sniper ${dynamicAllocSol} SOL)`,
             symbol: topCandidate.symbol,
             mint: topCandidate.mint,
-            action: `Compra na Jupiter V6 | Recebido: ${managedEntryAtomic.toLocaleString()} unidades atômicas`,
+            action: `Compra na Jupiter V2 (${swapSim.router || 'router n/d'}) | Recebido: ${managedEntryAtomic.toLocaleString()} unidades atômicas`,
             solValue: dynamicAllocSol,
             txSignature: swapSim.txSignature,
             detail: `Liq: $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m: $${(topCandidate.volume5mUsd || 0).toLocaleString()}`

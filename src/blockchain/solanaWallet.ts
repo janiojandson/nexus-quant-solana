@@ -114,6 +114,81 @@ export class SolanaWalletService {
     }
   }
 
+  /**
+   * Reconcilia uma execução V2 cuja resposta HTTP ficou incerta.
+   * Procura transações recentes da própria wallet e devolve o delta real do mint.
+   * Não transmite nada.
+   */
+  public async findRecentTokenDeltaTransaction(
+    mintAddress: string,
+    sinceTimestampMs: number,
+    direction: 'IN' | 'OUT' | 'ANY' = 'ANY'
+  ): Promise<{
+    signature: string;
+    deltaAtomic: string;
+    walletLamportDelta: number;
+    feeLamports: number;
+    blockTimeMs: number;
+  } | null> {
+    try {
+      const owner = this.keypair.publicKey.toBase58();
+      const signatures = await this.connection.getSignaturesForAddress(
+        this.keypair.publicKey,
+        { limit: 30 },
+        'confirmed'
+      );
+
+      for (const item of signatures) {
+        const blockTimeMs = Number(item.blockTime || 0) * 1000;
+        if (blockTimeMs > 0 && blockTimeMs < sinceTimestampMs - 5_000) continue;
+
+        const tx = await this.connection.getParsedTransaction(item.signature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0
+        });
+        if (!tx?.meta) continue;
+
+        const sumForOwner = (balances: any[] | null | undefined): bigint => {
+          let total = 0n;
+          for (const balance of balances || []) {
+            if (balance?.mint !== mintAddress || balance?.owner !== owner) continue;
+            const raw = String(balance?.uiTokenAmount?.amount ?? '0');
+            if (/^\d+$/.test(raw)) total += BigInt(raw);
+          }
+          return total;
+        };
+
+        const delta = sumForOwner(tx.meta.postTokenBalances) - sumForOwner(tx.meta.preTokenBalances);
+        if (delta === 0n) continue;
+        if (direction === 'IN' && delta <= 0n) continue;
+        if (direction === 'OUT' && delta >= 0n) continue;
+
+        const accountKeys = tx.transaction.message.accountKeys.map((key: any) =>
+          key.pubkey?.toBase58 ? key.pubkey.toBase58() : String(key.pubkey || key)
+        );
+        const ownerIndex = accountKeys.indexOf(owner);
+        const walletLamportDelta = ownerIndex >= 0
+          ? Number(tx.meta.postBalances[ownerIndex] - tx.meta.preBalances[ownerIndex])
+          : 0;
+
+        return {
+          signature: item.signature,
+          deltaAtomic: delta.toString(),
+          walletLamportDelta,
+          feeLamports: Number(tx.meta.fee || 0),
+          blockTimeMs
+        };
+      }
+
+      return null;
+    } catch (err: any) {
+      console.warn(
+        `⚠️ [Wallet:Reconciliação V2] Falha ao procurar delta de ${mintAddress}: ${err?.message || err}`
+      );
+      return null;
+    }
+  }
+
   private async getParsedTokenAccountsForSupportedPrograms(): Promise<any[]> {
     const programIds = [
       new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // SPL Token clássico

@@ -1,5 +1,6 @@
 /**
- * Calibração do parâmetro `autoSlippageCollisionUsdValue` da Jupiter v6.
+ * Telemetria histórica de profundidade/slippage. No Swap V2 o RTSE da Jupiter
+ * calcula slippage dinamicamente; estes valores não são mais enviados à API.
  *
  * A Jupiter dimensiona o slippage automático contra o impacto de uma
  * "colisão" — o tamanho que um participante de mercado aleatórioiro levaria.

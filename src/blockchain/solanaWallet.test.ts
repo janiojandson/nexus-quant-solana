@@ -144,3 +144,51 @@ it('deve usar o delta real da transação confirmada, não o outAmount esperado 
   const delta = await wallet.getReceivedTokenDeltaAtomic('MockTx', 'GoogleMint');
   assert.strictEqual(delta, '5245575701');
 });
+
+
+it('reconcilia execução V2 incerta pelo delta real recente da wallet', async () => {
+  const kp = Keypair.generate();
+  const owner = kp.publicKey.toBase58();
+  const wallet = new SolanaWalletService({
+    secretKeyRaw: JSON.stringify(Array.from(kp.secretKey)),
+    rpcUrl: 'https://api.mainnet-beta.solana.com'
+  });
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  (wallet as any).connection = {
+    getSignaturesForAddress: async () => [{
+      signature: 'RecentV2Tx',
+      blockTime: nowSec
+    }],
+    getParsedTransaction: async () => ({
+      meta: {
+        fee: 5000,
+        preBalances: [1_000_000_000],
+        postBalances: [984_995_000],
+        preTokenBalances: [],
+        postTokenBalances: [{
+          mint: 'V2Mint',
+          owner,
+          uiTokenAmount: { amount: '123456789' }
+        }]
+      },
+      transaction: {
+        message: {
+          accountKeys: [{ pubkey: kp.publicKey }]
+        }
+      }
+    })
+  };
+
+  const found = await wallet.findRecentTokenDeltaTransaction(
+    'V2Mint',
+    Date.now() - 2_000,
+    'IN'
+  );
+
+  assert.ok(found);
+  assert.strictEqual(found?.signature, 'RecentV2Tx');
+  assert.strictEqual(found?.deltaAtomic, '123456789');
+  assert.strictEqual(found?.walletLamportDelta, -15_005_000);
+  assert.strictEqual(found?.feeLamports, 5000);
+});

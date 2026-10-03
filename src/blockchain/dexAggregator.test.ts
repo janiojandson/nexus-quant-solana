@@ -143,11 +143,21 @@ describe('DexAggregatorService - Jupiter', () => {
     assert.strictEqual(calls, 1);
   });
 
-  it('envia API key e instructionVersion V2 quando configurados', async () => {
+  it('envia API key e usa /order V2 sem parâmetros legados', async () => {
+    let seenUrl = '';
     let seenConfig: any;
-    axios.get = (async (_url: string, config: any) => {
+    axios.get = (async (url: string, config: any) => {
+      seenUrl = url;
       seenConfig = config;
-      return { data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' } };
+      return {
+        data: {
+          inAmount: '100',
+          outAmount: '200',
+          priceImpactPct: '0.001',
+          router: 'metis',
+          mode: 'ultra'
+        }
+      };
     }) as any;
 
     const dex = new DexAggregatorService('https://fake.invalid', {
@@ -161,8 +171,10 @@ describe('DexAggregatorService - Jupiter', () => {
       amountLamports: 100
     });
 
+    assert.strictEqual(seenUrl, 'https://fake.invalid/order');
     assert.strictEqual(seenConfig.headers['x-api-key'], 'test-key');
-    assert.strictEqual(seenConfig.params.instructionVersion, 'V2');
+    assert.strictEqual(seenConfig.params.instructionVersion, undefined);
+    assert.strictEqual(seenConfig.params.amount, '100');
   });
 });
 

@@ -11,6 +11,7 @@
     "db:reset-ledger": "tsx scripts/resetLedger.ts",
     "trade:canary": "tsx scripts/testCanaryTrade.ts",
     "trade:preflight-exit": "tsx scripts/validateExitNoBroadcast.ts",
+    "trade:preflight-v2": "tsx scripts/preflightJupiterV2.ts",
     "trade:rescue": "tsx scripts/rescueJup.ts",
     "token:purge-ci": "tsx scripts/purgeOrphanToken.ts"
   },

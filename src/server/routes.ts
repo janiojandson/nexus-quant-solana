@@ -267,7 +267,14 @@ export async function handleApiRoutes(
         maintenanceMode: Boolean(s.maintenanceMode),
         adminAuth: s.auth || { configured: false, needsBootstrap: false },
         rentRecovery: s.rentRecovery || null,
-        laya: s.laya || null
+        laya: s.laya || null,
+        jupiter: {
+          version: 'V2',
+          mode: 'META_AGGREGATOR',
+          rtse: true,
+          managedLanding: true,
+          maxSlippageBps: 750
+        }
       },
 
       // Campos legados mantidos para retrocompatibilidade
