@@ -4,6 +4,7 @@ import axios from 'axios';
 import { VitalityState, getAgentVitalityState } from './core/vitalityEngine.js';
 import { SolanaWalletService } from './blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
+import { priorityForJupiterWork } from './blockchain/jupiterPriorityPolicy.js';
 import {
   AdaptivePositionSizer,
   MAX_TRADE_AMOUNT_SOL,
@@ -409,7 +410,8 @@ async function executeExitOrderUnlocked(
         pos.mint,
         'So11111111111111111111111111111111111111112',
         exitAmountAtomic,
-        500
+        500,
+        priorityForJupiterWork('PROTECTIVE_EXIT')
       );
       const quotedSolValue = (manualQuote.outAmount || 0) / 1e9;
       if (!Number.isFinite(quotedSolValue) || quotedSolValue <= 0) {
@@ -441,7 +443,8 @@ async function executeExitOrderUnlocked(
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
     keypair: wallet.getKeypair(),
     slippageBps: 500,       // 5.0% — Saídas/Stops
-    priorityLevel: 'high'   // Fura fila e liquida no primeiro bloco disponível
+    priorityLevel: 'high',  // Fura fila e liquida no primeiro bloco disponível
+    trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
   });
 
   // Segunda tentativa ainda fail-closed: amplia até o hard-cap de 7,5%,
@@ -458,7 +461,8 @@ async function executeExitOrderUnlocked(
       keypair: wallet.getKeypair(),
       slippageBps: 750,
       priorityLevel: 'veryHigh',
-      skipPreflight: false
+      skipPreflight: false,
+      trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
     });
 
     if (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') {
@@ -764,7 +768,8 @@ async function maybeRunLayaTacticalPositionDecision(
       freshPosition.mint,
       'So11111111111111111111111111111111111111112',
       tokenAtomicAmount,
-      500
+      500,
+      priorityForJupiterWork('EXIT_CONFIRMATION')
     );
     const executableSolValue = (executableQuote.outAmount || 0) / 1e9;
     if (!Number.isFinite(executableSolValue) || executableSolValue <= 0) {
@@ -870,7 +875,8 @@ const server = http.createServer(async (req, res) => {
         userPublicKey: OFFICIAL_PHANTOM_WALLET,
         keypair: wallet.getKeypair(),
         slippageBps: 500,
-        priorityLevel: 'high'
+        priorityLevel: 'high',
+        trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
       });
 
       if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
@@ -918,7 +924,8 @@ const server = http.createServer(async (req, res) => {
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair(),
           slippageBps: 500,
-          priorityLevel: 'high'
+          priorityLevel: 'high',
+          trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
         });
         txSignature = swapRes.txSignature;
       }
@@ -959,7 +966,8 @@ const server = http.createServer(async (req, res) => {
             userPublicKey: OFFICIAL_PHANTOM_WALLET,
             keypair: wallet.getKeypair(),
             slippageBps: 500,
-            priorityLevel: 'high'
+            priorityLevel: 'high',
+            trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
           });
           await rentRecovery.closeTokenAccount(spl.mint);
           liquidationsCount++;
@@ -1047,7 +1055,8 @@ async function runUltraFastExitMonitor() {
           pos.mint,
           'So11111111111111111111111111111111111111112',
           tokenAtomicAmount,
-          500
+          500,
+          priorityForJupiterWork('EXIT_CONFIRMATION')
         );
         const marketSnapshot = await marketSnapshotPromise;
         const dexPriceUsd = marketSnapshot?.priceUsd ?? null;
@@ -1209,7 +1218,8 @@ async function runUltraFastExitMonitor() {
               userPublicKey: OFFICIAL_PHANTOM_WALLET,
               keypair: wallet.getKeypair(),
               slippageBps: 600, // 6.0% slippage defensivo
-              priorityLevel: 'high'
+              priorityLevel: 'high',
+              trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
             });
             if (emergencySwap.status !== 'SUCCESS' && emergencySwap.status !== 'DRY_RUN_SUCCESS') {
               throw new Error(`Swap do watchdog não confirmado (${emergencySwap.status}): ${emergencySwap.error || 'sem detalhe'}. Posição e ATA preservadas.`);
@@ -1839,7 +1849,8 @@ async function executeAutonomousCycle() {
           poolLiquidityUsd: topCandidate.liquidityUsd,
           // Colisao calibrada pela profundidade real da pool, em vez do valor
           // fixo de 1000 USD que apertava demais o slippage em pools de 15k-100k.
-          maxAutoSlippageBps: 750
+          maxAutoSlippageBps: 750,
+          trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
         };
 
         console.log(`⚡ [3/3 Motor Jupiter V2] Dimensionando lote economico com RTSE e validacao pre-voo (max. 2 tentativas | hard-cap 750bps)...`);
@@ -1869,7 +1880,8 @@ async function executeAutonomousCycle() {
                 skipPreflight: false,
                 userPublicKey: OFFICIAL_PHANTOM_WALLET,
                 keypair: wallet.getKeypair(),
-                priorityLevel: 'medium'
+                priorityLevel: 'medium',
+                trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
               }, _quote);
               if (sim.success) {
                 console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao APROVADA (CU=${sim.unitsConsumed ?? 'n/d'})`);
@@ -1990,7 +2002,8 @@ async function executeAutonomousCycle() {
           maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
           skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: wallet.getKeypair()
+          keypair: wallet.getKeypair(),
+          trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
         });
 
         txSignature = swapSim.txSignature;

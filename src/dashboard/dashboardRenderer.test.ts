@@ -22,6 +22,8 @@ const state: DashboardState = {
     totalCreatedObserved: 12,
     activeCurves: 9,
     graduatedCount: 3,
+    dexIndexedCount: 0,
+    dexReadyCount: 0,
     lastCreateToObserverLagMs: 2400,
     maxCreateToObserverLagMs: 5100,
     lastObservedAt: new Date().toISOString(),
