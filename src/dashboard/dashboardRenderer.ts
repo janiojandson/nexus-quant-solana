@@ -11,7 +11,7 @@ export interface ClosedTradeView {
   exitTimestamp: number;
   pnlPct: number;
   pnlSolEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
@@ -189,6 +189,7 @@ function renderPumpObservatorySection(state: DashboardState): string {
 
 const EXIT_REASON_LABELS: Record<string, { label: string; cls: string }> = {
   STOP_LOSS: { label: 'Stop Loss', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
+  WATCHDOG_EXIT: { label: 'Watchdog Exit', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
   PARTIAL_TAKE_PROFIT_50: { label: 'Colheita Parcial +35%', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
   TRAILING_STOP: { label: 'Trailing Stop', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
   TIME_STOP: { label: 'Time-Stop', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },

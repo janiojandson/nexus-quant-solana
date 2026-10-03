@@ -19,6 +19,7 @@ import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
 import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
 import { ExitPathHealth } from './execution/exitPathHealth.js';
+import { buildWatchdogExitPlan } from './execution/watchdogExitPolicy.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
@@ -396,8 +397,13 @@ if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN && !NEXUS_MAINTENANCE_MODE) {
  * 3. Quarentena severa de 24 horas no AntiSpamMemory se for STOP_LOSS ou MANUAL
  * 4. Registro no histórico de trades fechados e atualização no Dashboard
  */
-type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT';
-type ExitOrderOptions = { exitTokenAmount?: number; shouldCloseAta?: boolean };
+type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT';
+type ExitOrderOptions = {
+  exitTokenAmount?: number;
+  shouldCloseAta?: boolean;
+  trafficPriority?: ReturnType<typeof priorityForJupiterWork>;
+  initialSlippageBps?: number;
+};
 type ExitOrderResult = { success: boolean; txSignature?: string; error?: string };
 
 async function executeExitOrder(
@@ -439,6 +445,8 @@ async function executeExitOrderUnlocked(
   const tokenAmountToSell = options?.exitTokenAmount || pos.tokenAmount;
   const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50';
   const shouldCloseAta = options?.shouldCloseAta ?? !isPartial;
+  const trafficPriority = options?.trafficPriority ?? priorityForJupiterWork('PROTECTIVE_EXIT');
+  const initialSlippageBps = Math.min(750, Math.max(250, options?.initialSlippageBps ?? 500));
 
   // Validação atômica ANTES de qualquer cotação. `tokenAmount` vem de
   // `swapSim.outAmount` (inteiro do Jupiter), mas um refactor futuro poderia
@@ -465,8 +473,8 @@ async function executeExitOrderUnlocked(
         pos.mint,
         'So11111111111111111111111111111111111111112',
         exitAmountAtomic,
-        500,
-        priorityForJupiterWork('PROTECTIVE_EXIT')
+        initialSlippageBps,
+        trafficPriority
       );
       const quotedSolValue = (manualQuote.outAmount || 0) / 1e9;
       if (!Number.isFinite(quotedSolValue) || quotedSolValue <= 0) {
@@ -487,7 +495,7 @@ async function executeExitOrderUnlocked(
   }
 
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
-  console.log(`⚡ [Jupiter Swap V2] Saída com slippage 500bps (5.0%) e landing gerenciado...`);
+  console.log(`⚡ [Jupiter Swap V2] Saída com slippage ${initialSlippageBps}bps e landing gerenciado...`);
 
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
   const exitAttemptStartedAt = Date.now();
@@ -497,9 +505,9 @@ async function executeExitOrderUnlocked(
     amountLamports: exitAmountAtomic,
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
     keypair: wallet.getKeypair(),
-    slippageBps: 500,       // 5.0% — Saídas/Stops
-    priorityLevel: 'high',  // Fura fila e liquida no primeiro bloco disponível
-    trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
+    slippageBps: initialSlippageBps,
+    priorityLevel: 'high',
+    trafficPriority
   });
 
   // Segunda tentativa ainda fail-closed: amplia até o hard-cap de 7,5%,
@@ -517,7 +525,7 @@ async function executeExitOrderUnlocked(
       slippageBps: 750,
       priorityLevel: 'veryHigh',
       skipPreflight: false,
-      trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
+      trafficPriority
     });
 
     if (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') {
@@ -663,13 +671,19 @@ async function executeExitOrderUnlocked(
       STOP_LOSS:     3 * 60 * 60 * 1000,  // 3 horas
       TIME_STOP:     30 * 60 * 1000,       // 30 minutos
       MANUAL:        24 * 60 * 60 * 1000,  // 24 horas
+      WATCHDOG_EXIT: 24 * 60 * 60 * 1000,  // 24 horas após perda prolongada de rota
       TRAILING_STOP: 0,
       TAKE_PROFIT:   0,
       LAYA_EXIT:     0
     };
     const quarantineMs = QUARANTINE_MS[exitReason] ?? 0;
     if (quarantineMs > 0) {
-      const labels: Record<string, string> = { STOP_LOSS: '3h', TIME_STOP: '30min', MANUAL: '24h' };
+      const labels: Record<string, string> = {
+        STOP_LOSS: '3h',
+        TIME_STOP: '30min',
+        MANUAL: '24h',
+        WATCHDOG_EXIT: '24h'
+      };
       const label = labels[exitReason] || '?h';
       const reasonText = `Quarentena Pós-${exitReason}: cooldown de ${label}`;
       antiSpamMemory.recordVeto(pos.mint, reasonText, quarantineMs);
@@ -715,6 +729,7 @@ async function executeExitOrderUnlocked(
     MANUAL: 'EXIT_PANIC',
     TAKE_PROFIT: 'EXIT_PARTIAL',
     LAYA_EXIT: 'EXIT_LAYA',
+    WATCHDOG_EXIT: 'EXIT_WATCHDOG',
   };
 
   const rentRecovered = rentRecoveredActualSol;
@@ -738,7 +753,9 @@ async function executeExitOrderUnlocked(
     rentRecoveredSol: rentRecovered,
     netPnlSol,
     totalTradeDurationS: tradeDurationS,
-    status: shouldCloseAta ? (exitReason === 'MANUAL' ? 'PANIC_CLOSED' : 'FULLY_CLOSED') : 'PARTIAL_CLOSED'
+    status: shouldCloseAta
+      ? (exitReason === 'MANUAL' ? 'PANIC_CLOSED' : exitReason === 'WATCHDOG_EXIT' ? 'WATCHDOG_CLOSED' : 'FULLY_CLOSED')
+      : 'PARTIAL_CLOSED'
   });
 
   // Se for liquidação total, remove do Gestor de Posições
@@ -1276,44 +1293,25 @@ async function runUltraFastExitMonitor() {
             } catch (amountErr: any) {
               throw new Error(`Watchdog recusou quantidade n?o at?mica: ${amountErr?.message || amountErr}`);
             }
-            const emergencySwap = await jupiterEngine.executeSwap({
-              inputMint: pos.mint,
-              outputMint: 'So11111111111111111111111111111111111111112',
-              amountLamports: rawLamports,
-              userPublicKey: OFFICIAL_PHANTOM_WALLET,
-              keypair: wallet.getKeypair(),
-              slippageBps: 600, // 6.0% slippage defensivo
-              priorityLevel: 'high',
-              trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
+            const watchdogPlan = buildWatchdogExitPlan({
+              entrySol: pos.entrySol || 0.015,
+              tokenAmountAtomic: rawLamports
             });
-            if (emergencySwap.status !== 'SUCCESS' && emergencySwap.status !== 'DRY_RUN_SUCCESS') {
-              throw new Error(`Swap do watchdog não confirmado (${emergencySwap.status}): ${emergencySwap.error || 'sem detalhe'}. Posição e ATA preservadas.`);
+            const emergencyResult = await executeExitOrder(
+              pos.mint,
+              watchdogPlan.exitReason,
+              watchdogPlan.pnlPct,
+              watchdogPlan.exitSolValue,
+              watchdogPlan.options
+            );
+            if (!emergencyResult.success) {
+              throw new Error(
+                `Saída segura do watchdog não confirmada: ${emergencyResult.error || 'sem detalhe'}. ` +
+                'Posição preservada; nenhuma nova ordem é criada se a execução ficou incerta.'
+              );
             }
-            if (emergencySwap.status === 'SUCCESS') {
-              const closeResult = await rentRecovery.closeTokenAccount(pos.mint);
-              if (!closeResult.success) {
-                console.warn(
-                  `⚠️ [WATCHDOG] Swap de ${pos.symbol} confirmado, mas ATA permaneceu aberta; ` +
-                  'posição financeira será encerrada e o rent ficará para o sweep automático.'
-                );
-              }
-            }
-            antiSpamMemory.recordVeto(pos.mint, 'Watchdog de Perda de Sinal (12s sem cotação)', 24 * 60 * 60 * 1000);
-            positionEngine.removePosition(pos.mint);
-            positionEngine.recordClosedTrade({
-              mint: pos.mint,
-              symbol: pos.symbol,
-              tokenAmount: pos.tokenAmount,
-              entryPriceUsd: pos.entryPriceUsd,
-              exitPriceUsd: 0,
-              entryTimestamp: pos.entryTimestamp,
-              exitTimestamp: Date.now(),
-              pnlPct: -0.20,
-              pnlUsdEst: 0,
-              exitReason: 'MANUAL',
-              txSignature: emergencySwap.txSignature
-            });
-            updateDashboardViews();
+            exitPathHealth.recordSuccess(pos.mint);
+            latestState.exitPathHealth = exitPathHealth.snapshot();
           } catch (emergencyErr: any) {
             console.error(`❌ [WATCHDOG ERRO] Falha ao executar liquidação defensiva de ${pos.symbol}:`, emergencyErr?.message || emergencyErr);
           }
