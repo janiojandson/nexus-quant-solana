@@ -341,6 +341,13 @@ const latestState: DashboardState = {
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   pumpObservatory: pumpObservatory.snapshot(),
   pumpStrategyLab: pumpStrategyLabRuntime.snapshot(),
+  pumpDirectSellFallback: {
+    enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
+    selectedPath: 'NONE',
+    confirmationState: 'IDLE',
+    estimatedCostSol: null,
+    fallbackReason: null
+  },
   exitCapacity: evaluateExitCapacity({
     generalRps: JUPITER_GENERAL_RPS,
     monitorIntervalMs: FAST_EXIT_INTERVAL_MS,
@@ -661,6 +668,16 @@ async function executeExitOrderUnlocked(
   }
 
   let selectedExitPath: 'JUPITER' | 'PUMP_DIRECT' = 'JUPITER';
+  const jupiterFallbackReason = exitSwap.status === 'FAILED'
+    ? (exitSwap.error || 'Jupiter exit failed definitively')
+    : null;
+  latestState.pumpDirectSellFallback = {
+    enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
+    selectedPath: 'JUPITER',
+    confirmationState: 'PENDING',
+    estimatedCostSol: null,
+    fallbackReason: jupiterFallbackReason
+  };
   const routedExit = await exitRouter.routeAfterJupiter(
     exitSwap,
     async (): Promise<RoutedExitAttempt> => {
@@ -714,6 +731,18 @@ async function executeExitOrderUnlocked(
   );
   selectedExitPath = routedExit.path;
   exitSwap = routedExit.result;
+  latestState.pumpDirectSellFallback = {
+    enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
+    selectedPath: selectedExitPath,
+    confirmationState:
+      exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS'
+        ? 'CONFIRMED'
+        : exitSwap.status === 'SUBMITTED_UNCONFIRMED'
+          ? 'UNCERTAIN'
+          : 'FAILED',
+    estimatedCostSol: null,
+    fallbackReason: selectedExitPath === 'PUMP_DIRECT' ? jupiterFallbackReason : null
+  };
 
   if (
     selectedExitPath === 'PUMP_DIRECT' &&

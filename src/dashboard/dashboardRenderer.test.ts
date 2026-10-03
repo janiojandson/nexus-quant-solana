@@ -186,3 +186,23 @@ test('Strategy Lab possui atualização dinâmica via /api/status', () => {
   assert.match(html, /id="pump-strategy-lab-samples"/);
   assert.match(html, /data\.pumpStrategyLab/);
 });
+
+
+test('Dashboard deixa explícito que Pump SELL fallback está desabilitado por padrão', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpDirectSellFallback: {
+      enabled: false,
+      selectedPath: 'NONE',
+      confirmationState: 'IDLE',
+      estimatedCostSol: null,
+      fallbackReason: null
+    }
+  });
+
+  assert.match(html, /Pump SELL Fallback/);
+  assert.match(html, /DESABILITADO/);
+  assert.match(html, /SELL-only/);
+  assert.match(html, /Última rota/);
+  assert.match(html, /Confirmação/);
+});

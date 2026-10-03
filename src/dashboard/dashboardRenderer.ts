@@ -86,6 +86,13 @@ export interface DashboardState {
       executableExitRate: number;
     }>;
   };
+  pumpDirectSellFallback?: {
+    enabled: boolean;
+    selectedPath: 'NONE' | 'JUPITER' | 'PUMP_DIRECT';
+    confirmationState: 'IDLE' | 'PENDING' | 'CONFIRMED' | 'UNCERTAIN' | 'FAILED';
+    estimatedCostSol: number | null;
+    fallbackReason: string | null;
+  };
   exitCapacity?: {
     admit: boolean;
     requiredRps: number;
@@ -237,6 +244,34 @@ function renderPumpStrategyLabSection(state: DashboardState): string {
           <thead><tr class="border-y border-slate-800 text-[10px] uppercase tracking-wider text-slate-500"><th class="py-2 px-3">Cohort</th><th class="py-2 px-3">Venue</th><th class="py-2 px-3">Estado</th><th class="py-2 px-3">N</th><th class="py-2 px-3">Retorno líquido</th><th class="py-2 px-3">Saída executável</th></tr></thead>
           <tbody id="pump-strategy-lab-tbody">${rows || '<tr><td colspan="6" class="py-6 text-center text-slate-500 text-sm">INSUFFICIENT_DATA — coletando evidência shadow.</td></tr>'}</tbody>
         </table>
+      </div>
+    </section>`;
+}
+
+function renderPumpSellFallbackSection(state: DashboardState): string {
+  const fallback = state.pumpDirectSellFallback || {
+    enabled: false,
+    selectedPath: 'NONE' as const,
+    confirmationState: 'IDLE' as const,
+    estimatedCostSol: null,
+    fallbackReason: null
+  };
+  const status = fallback.enabled ? 'ARMADO' : 'DESABILITADO';
+  const cost = fallback.estimatedCostSol == null ? 'N/D' : fallback.estimatedCostSol.toFixed(9) + ' SOL';
+  return `
+    <section class="bg-slate-900/70 border border-rose-900/40 rounded-2xl p-4 shadow-xl">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="text-base font-bold text-white">🛟 Pump SELL Fallback <span class="text-[10px] px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30">SELL-only</span></h2>
+          <p class="text-xs text-slate-400 mt-1">Fallback direto de proteção; nunca autoriza BUY direto.</p>
+        </div>
+        <div id="pump-sell-fallback-enabled" class="text-xs font-mono ${fallback.enabled ? 'text-emerald-400' : 'text-slate-500'}">${status}</div>
+      </div>
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
+        <div><div class="text-[10px] uppercase text-slate-500">Última rota</div><div id="pump-sell-fallback-path" class="font-mono text-sm text-cyan-300">${escapeDashboardHtml(fallback.selectedPath)}</div></div>
+        <div><div class="text-[10px] uppercase text-slate-500">Confirmação</div><div id="pump-sell-fallback-confirmation" class="font-mono text-sm text-amber-300">${escapeDashboardHtml(fallback.confirmationState)}</div></div>
+        <div><div class="text-[10px] uppercase text-slate-500">Custo estimado</div><div id="pump-sell-fallback-cost" class="font-mono text-sm text-slate-300">${cost}</div></div>
+        <div><div class="text-[10px] uppercase text-slate-500">Motivo fallback</div><div id="pump-sell-fallback-reason" class="font-mono text-xs text-slate-400">${escapeDashboardHtml(fallback.fallbackReason || '—')}</div></div>
       </div>
     </section>`;
 }
@@ -537,6 +572,9 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     <!-- LABORATÓRIO ECONÔMICO PUMP / JUPITER -->
     ${renderPumpStrategyLabSection(state)}
+
+    <!-- FALLBACK DIRETO PUMP SELL-ONLY -->
+    ${renderPumpSellFallbackSection(state)}
 
     <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
@@ -1069,6 +1107,21 @@ export function renderDashboardHtml(state: DashboardState): string {
                   '</tr>';
               }).join('');
         }
+
+        // 3.3 Pump direct SELL fallback — proteção de capital, nunca BUY.
+        const pumpSellFallback = (data.operational && data.operational.pumpDirectSellFallback) || {};
+        const fallbackEnabled = document.getElementById('pump-sell-fallback-enabled');
+        const fallbackPath = document.getElementById('pump-sell-fallback-path');
+        const fallbackConfirmation = document.getElementById('pump-sell-fallback-confirmation');
+        const fallbackCost = document.getElementById('pump-sell-fallback-cost');
+        const fallbackReason = document.getElementById('pump-sell-fallback-reason');
+        if (fallbackEnabled) fallbackEnabled.textContent = pumpSellFallback.enabled ? 'ARMADO' : 'DESABILITADO';
+        if (fallbackPath) fallbackPath.textContent = String(pumpSellFallback.selectedPath || 'NONE');
+        if (fallbackConfirmation) fallbackConfirmation.textContent = String(pumpSellFallback.confirmationState || 'IDLE');
+        if (fallbackCost) fallbackCost.textContent = pumpSellFallback.estimatedCostSol == null
+          ? 'N/D'
+          : Number(pumpSellFallback.estimatedCostSol).toFixed(9) + ' SOL';
+        if (fallbackReason) fallbackReason.textContent = String(pumpSellFallback.fallbackReason || '—');
 
         // 4. Atualiza Tabela de Posições
         const positions = data.positions || [];

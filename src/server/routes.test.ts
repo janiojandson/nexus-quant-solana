@@ -50,6 +50,13 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
         activeCurves: 5,
         graduatedCount: 2,
         recent: []
+      },
+      pumpDirectSellFallback: {
+        enabled: false,
+        selectedPath: 'NONE',
+        confirmationState: 'IDLE',
+        estimatedCostSol: null,
+        fallbackReason: null
       }
     }
   } as any;
@@ -65,6 +72,9 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   assert.strictEqual(payload.operational.exitCapacity.requiredRps, 1.333);
   assert.strictEqual(payload.operational.exitPathHealth.state, 'DEGRADED');
   assert.strictEqual(payload.operational.exitPathHealth.canOpenNewPosition, false);
+  assert.strictEqual(payload.operational.pumpDirectSellFallback.enabled, false);
+  assert.strictEqual(payload.operational.pumpDirectSellFallback.selectedPath, 'NONE');
+  assert.strictEqual(payload.operational.pumpDirectSellFallback.confirmationState, 'IDLE');
 });
 
 test('handleApiRoutes: deve responder 200 OK na rota /health', async () => {

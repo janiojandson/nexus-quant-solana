@@ -285,6 +285,13 @@ export async function handleApiRoutes(
         laya: s.laya || null,
         exitCapacity: s.exitCapacity || null,
         exitPathHealth: s.exitPathHealth || null,
+        pumpDirectSellFallback: s.pumpDirectSellFallback || {
+          enabled: false,
+          selectedPath: 'NONE',
+          confirmationState: 'IDLE',
+          estimatedCostSol: null,
+          fallbackReason: null
+        },
         jupiter: {
           version: 'V2',
           mode: 'META_AGGREGATOR',
