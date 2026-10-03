@@ -38,9 +38,12 @@ export function dueEntryWindows(input: EntryWindowInput): PumpEntryWindow[] {
     return [];
   }
 
-  if (progress >= 95) return unseen('NEAR_GRAD_95_100') ? ['NEAR_GRAD_95_100'] : [];
-  if (progress >= 80) return unseen('NEAR_GRAD_80_95') ? ['NEAR_GRAD_80_95'] : [];
-  if (progress >= 60) return unseen('NEAR_GRAD_60_80') ? ['NEAR_GRAD_60_80'] : [];
+  const currentCurveWindow: PumpEntryWindow | undefined =
+    progress >= 95 ? 'NEAR_GRAD_95_100'
+      : progress >= 80 ? 'NEAR_GRAD_80_95'
+        : progress >= 60 ? 'NEAR_GRAD_60_80'
+          : undefined;
+  if (currentCurveWindow && unseen(currentCurveWindow)) return [currentCurveWindow];
 
   if (ageMs < 15_000) return unseen('LAUNCH_0_15S') ? ['LAUNCH_0_15S'] : [];
   if (ageMs >= 30_000 && ageMs < 60_000) return unseen('ENTRY_30S') ? ['ENTRY_30S'] : [];
