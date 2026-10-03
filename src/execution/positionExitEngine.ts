@@ -14,6 +14,7 @@ export interface PositionTracking {
   entrySolValue?: number;
   entryLiquidityUsd?: number;
   entryVolume5m?: number;
+  entryPairAddress?: string;
   traceId?: string;
   // Estado de proteção propagado para o painel pelo monitor de 1.5s.
   trailingActive?: boolean;
@@ -119,8 +120,14 @@ export class PositionExitEngine {
       initialTokenAmount: position.initialTokenAmount || position.tokenAmount
     };
     this.activePositions.set(fullPosition.mint, fullPosition);
-    // Inicializa pico com o valor de entrada
-    this.peakSolValues.set(fullPosition.mint, fullPosition.entrySol || 0.015);
+    // Inicializa/reidrata o pico. Em restart de um runner, nunca devemos
+    // esquecer o watermark já persistido e afrouxar o trailing silenciosamente.
+    const entrySol = fullPosition.entrySol || 0.015;
+    const restoredPeak = Number(fullPosition.peakSolValue || 0);
+    this.peakSolValues.set(
+      fullPosition.mint,
+      Number.isFinite(restoredPeak) && restoredPeak > entrySol ? restoredPeak : entrySol
+    );
   }
 
   public getPosition(mint: string): PositionTracking | undefined {

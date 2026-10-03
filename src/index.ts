@@ -98,6 +98,40 @@ const journal = new DecisionLogger(pgPool, {
   flushIntervalMs: 5000,
   maxBufferSize: 100
 });
+
+// Watermark persistente do trailing: grava de forma assíncrona e limitada para
+// não bloquear o loop de saída nem gerar write storm durante uma alta contínua.
+const persistedPeakState = new Map<string, { value: number; at: number }>();
+function persistPeakWatermark(
+  pos: PositionTracking,
+  peakSolValue: number,
+  resetForReducedPosition = false
+): void {
+  if (!pgPool || !pos.traceId || !Number.isFinite(peakSolValue) || peakSolValue <= 0) return;
+
+  const now = Date.now();
+  const previous = persistedPeakState.get(pos.mint);
+  const advancedEnough = !previous || peakSolValue >= previous.value * 1.02;
+  const staleEnough = !previous || (now - previous.at) >= 15_000;
+  if (!resetForReducedPosition && !advancedEnough && !staleEnough) return;
+
+  persistedPeakState.set(pos.mint, { value: peakSolValue, at: now });
+  const peakExpression = resetForReducedPosition
+    ? '$1'
+    : 'GREATEST(COALESCE(peak_sol_value, 0), $1)';
+
+  void pgPool.query(
+    `UPDATE trade_outcomes
+       SET peak_sol_value = ${peakExpression},
+           peak_updated_at = now()
+     WHERE trace_id = $2
+       AND status IN ('OPEN', 'PARTIAL_CLOSED')`,
+    [peakSolValue, pos.traceId]
+  ).catch((err: any) => {
+    console.warn(`⚠️ [TRAILING:Persistência] ${pos.symbol}: falha ao persistir pico: ${err?.message || err}`);
+  });
+}
+
 const cerebroService = new CerebroIntegrationService();
 const drawdownBreaker = new DrawdownBreaker();
 
@@ -865,7 +899,13 @@ async function runUltraFastExitMonitor() {
   isRunningFastExit = true;
 
   try {
-    const openPositions = positionEngine.getAllPositions();
+    const openPositions = positionEngine.getAllPositions().sort((a, b) => {
+      // Com cota limitada da Jupiter, runners pós-parcial têm prioridade de leitura:
+      // já carregam lucro não realizado e dependem do trailing para proteção.
+      const partialPriority = Number(Boolean(b.partialTaken)) - Number(Boolean(a.partialTaken));
+      if (partialPriority !== 0) return partialPriority;
+      return positionEngine.getPeakSolValue(b.mint) - positionEngine.getPeakSolValue(a.mint);
+    });
     
     // CORREÇÃO: Log de debug mesmo sem posições (para diagnóstico)
     if (openPositions.length === 0) {
@@ -882,7 +922,11 @@ async function runUltraFastExitMonitor() {
           throw new Error('Posição sem preço USD de entrada para monitor de saída');
         }
 
-        const dexPriceUsd = await scanner.fetchCurrentTokenPriceUsd(pos.mint);
+        // Inicia a leitura de mercado em paralelo à Jupiter. DexScreener é
+        // telemetria de liquidez/fluxo; Jupiter continua sendo a verdade econômica
+        // para PnL e execução. Isso reduz latência e ativa de fato o gate de
+        // drenagem de liquidez sem adicionar uma segunda chamada HTTP.
+        const marketSnapshotPromise = scanner.fetchCurrentTokenMarketSnapshot(pos.mint, pos.entryPairAddress);
         const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
         const executableQuote = await jupiterEngine.getQuote(
           pos.mint,
@@ -890,6 +934,8 @@ async function runUltraFastExitMonitor() {
           tokenAtomicAmount,
           500
         );
+        const marketSnapshot = await marketSnapshotPromise;
+        const dexPriceUsd = marketSnapshot?.priceUsd ?? null;
         const currentSolValue = (executableQuote.outAmount || 0) / 1e9;
         if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
           throw new Error('Jupiter sem valor executável válido para monitor de saída');
@@ -923,8 +969,21 @@ async function runUltraFastExitMonitor() {
         const trailingStopSolValue = peakSolValue * (1 - activeTrailingDistance);
         const trailPnlPct = (trailingStopSolValue - entrySol) / entrySol;
         const trailingStatus = (pos.partialTaken || earlyTrailingActive) ? 'ATIVO' : 'INATIVO';
+        const liquidityNow = marketSnapshot?.liquidityUsd;
+        const liquidityDropPct = liquidityNow !== undefined && pos.entryLiquidityUsd && pos.entryLiquidityUsd > 0
+          ? Math.max(0, (pos.entryLiquidityUsd - liquidityNow) / pos.entryLiquidityUsd)
+          : null;
+        if (liquidityDropPct !== null && liquidityDropPct >= 0.15) {
+          console.warn(
+            `⚠️ [LIQUIDITY_DRAIN_WATCH] ${pos.symbol} | entrada=$${Math.round(pos.entryLiquidityUsd || 0).toLocaleString('en-US')} ` +
+            `| atual=$${Math.round(liquidityNow || 0).toLocaleString('en-US')} | queda=${(liquidityDropPct * 100).toFixed(1)}%`
+          );
+        }
+
         console.log(
           `[ExitSensor] Token: ${pos.symbol} | Fonte: ${sensorSource} | PnL: ${(pnlPct * 100).toFixed(2)}% | ` +
+          `Impacto: ${executableQuote.priceImpactPct.toFixed(3)}% | ` +
+          `Liq: ${liquidityNow !== undefined ? '$' + Math.round(liquidityNow).toLocaleString('en-US') : 'N/D'} | ` +
           `SL: ${((pos.stopLossPct || -0.06) * 100).toFixed(0)}% | Trailing: ${trailingStatus}`
         );
 
@@ -963,12 +1022,13 @@ async function runUltraFastExitMonitor() {
           currentSolValue,
           Date.now(),
           {
-            currentLiquidityUsd: pos.entryLiquidityUsd, // atualizado dinamicamente
-            currentVolume5m: pos.entryVolume5m
+            currentLiquidityUsd: marketSnapshot?.liquidityUsd,
+            currentVolume5m: marketSnapshot?.volume5mUsd
           }
         );
 
         if (!exitSignal.shouldExit || exitSignal.type === 'HOLD') {
+          persistPeakWatermark(pos, positionEngine.getPeakSolValue(pos.mint));
           // O ciclo inteiro de leitura foi saudável; só agora zeramos o watchdog.
           // Antes isto ocorria ANTES da cotação executável de saída e mascarava
           // falhas consecutivas justamente no caminho crítico de liquidação.
@@ -994,6 +1054,19 @@ async function runUltraFastExitMonitor() {
             exitTokenAmount: exitSignal.exitTokenAmount,
             shouldCloseAta: exitSignal.shouldCloseAta
           });
+
+          // Se a posição permaneceu aberta (parcial confirmada ou saída falhou),
+          // persiste o watermark já ajustado ao lote/custo remanescente.
+          const remainingPosition = positionEngine.getPosition(pos.mint);
+          if (remainingPosition) {
+            const partialWasCommitted =
+              exitSignal.type === 'PARTIAL_TAKE_PROFIT_50' && remainingPosition.partialTaken === true;
+            persistPeakWatermark(
+              remainingPosition,
+              positionEngine.getPeakSolValue(pos.mint),
+              partialWasCommitted
+            );
+          }
         }
       } catch (quoteErr: any) {
         const { failures, shouldWarn, shouldEmergencyExit } = positionEngine.recordQuoteFailure(pos.mint);
@@ -1880,6 +1953,7 @@ async function executeAutonomousCycle() {
             entrySolValue: dynamicAllocSol,
             entryLiquidityUsd: topCandidate.liquidityUsd,
             entryVolume5m: topCandidate.volume5mUsd || 0,
+            entryPairAddress: topCandidate.pairAddress,
             traceId: currentTraceId
           });
 
@@ -2084,6 +2158,8 @@ interface RecoverablePositionRecord {
   initialTokenAmountAtomic: number;
   entryLiquidityUsd: number;
   entryVolume5m: number;
+  entryPairAddress?: string;
+  peakSolValue?: number;
   stopLossPct: number;
   takeProfitPct: number;
   partialTaken: boolean;
@@ -2101,9 +2177,9 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
     const res = await pool.query(`
       WITH latest AS (
         SELECT DISTINCT ON (dj.mint)
-          dj.trace_id, dj.mint, dj.token_symbol, dj.liquidity_usd, dj.volume_5m_usd,
+          dj.trace_id, dj.mint, dj.token_symbol, dj.pool_address, dj.liquidity_usd, dj.volume_5m_usd,
           dj.metadata, dj.created_at, o.entry_price_usd, o.entry_size_sol,
-          o.entry_timestamp, o.status
+          o.entry_timestamp, o.status, o.peak_sol_value
         FROM decision_journal dj
         JOIN trade_outcomes o ON o.trace_id = dj.trace_id
         WHERE dj.decision = 'ENTRY_APPROVED'
@@ -2129,6 +2205,8 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
           initialTokenAmountAtomic: initialAtomic,
           entryLiquidityUsd: Number(row.liquidity_usd || 0),
           entryVolume5m: Number(row.volume_5m_usd || 0),
+          entryPairAddress: row.pool_address ? String(row.pool_address) : undefined,
+          peakSolValue: row.peak_sol_value != null ? Number(row.peak_sol_value) : undefined,
           stopLossPct: Number(metadata.stopLossPct ?? -0.06),
           takeProfitPct: Number(metadata.takeProfitPct ?? 0.35),
           partialTaken: row.status === 'PARTIAL_CLOSED',
@@ -2213,6 +2291,8 @@ async function rehydratePositionsFromWalletOnBoot() {
         entrySolValue: recovery.entrySizeSol,
         entryLiquidityUsd: recovery.entryLiquidityUsd,
         entryVolume5m: recovery.entryVolume5m,
+        entryPairAddress: recovery.entryPairAddress,
+        peakSolValue: recovery.peakSolValue,
         traceId: recovery.traceId,
         partialTaken: recovery.partialTaken
       });

@@ -250,3 +250,90 @@ test('DexScreenerScanner: deve consumir mint maduro da incubadora uma única vez
   await scanner.scanSolanaTrends(15000);
   assert.strictEqual(enrichmentCalls, 1, 'mint já liberado não deve ocupar novamente o lote de enriquecimento');
 });
+
+
+test('DexScreenerScanner: snapshot de saída deve trazer liquidez/volume atuais do par base mais líquido', async () => {
+  const mint = 'MintSnapshotTesla';
+  const mockFetch = async () => ({
+    data: {
+      pairs: [
+        {
+          chainId: 'solana',
+          dexId: 'pumpfun',
+          pairAddress: 'PoolBaseMenor',
+          baseToken: { address: mint, symbol: 'TESLA' },
+          quoteToken: { address: 'So11111111111111111111111111111111111111112', symbol: 'SOL' },
+          priceUsd: '0.001',
+          liquidity: { usd: 12000 },
+          volume: { m5: 900 },
+          txns: { m5: { buys: 10, sells: 8 } }
+        },
+        {
+          chainId: 'solana',
+          dexId: 'pumpfun',
+          pairAddress: 'PoolBaseMaior',
+          baseToken: { address: mint, symbol: 'TESLA' },
+          quoteToken: { address: 'So11111111111111111111111111111111111111112', symbol: 'SOL' },
+          priceUsd: '0.0011',
+          liquidity: { usd: 42000 },
+          volume: { m5: 3500 },
+          txns: { m5: { buys: 33, sells: 11 } }
+        },
+        {
+          chainId: 'solana',
+          dexId: 'other',
+          pairAddress: 'PoolOndeMintEhQuote',
+          baseToken: { address: 'OutroMint', symbol: 'OUTRO' },
+          quoteToken: { address: mint, symbol: 'TESLA' },
+          priceUsd: '999',
+          liquidity: { usd: 999999 }
+        }
+      ]
+    }
+  });
+
+  const scanner = new DexScreenerScanner({ fetchClient: mockFetch as any });
+  const snapshot = await scanner.fetchCurrentTokenMarketSnapshot(mint);
+
+  assert.ok(snapshot);
+  assert.strictEqual(snapshot?.symbol, 'TESLA');
+  assert.strictEqual(snapshot?.priceUsd, 0.0011);
+  assert.strictEqual(snapshot?.liquidityUsd, 42000);
+  assert.strictEqual(snapshot?.volume5mUsd, 3500);
+  assert.strictEqual(snapshot?.buysM5, 33);
+  assert.strictEqual(snapshot?.sellsM5, 11);
+  assert.strictEqual(snapshot?.pairAddress, 'PoolBaseMaior');
+});
+
+
+test('DexScreenerScanner: snapshot pode fixar a mesma pool observada na entrada', async () => {
+  const mint = 'MintPreferredPool';
+  const mockFetch = async () => ({
+    data: {
+      pairs: [
+        {
+          chainId: 'solana',
+          pairAddress: 'PoolEntrada',
+          baseToken: { address: mint, symbol: 'PREF' },
+          priceUsd: '0.01',
+          liquidity: { usd: 12000 },
+          volume: { m5: 1000 }
+        },
+        {
+          chainId: 'solana',
+          pairAddress: 'PoolMaior',
+          baseToken: { address: mint, symbol: 'PREF' },
+          priceUsd: '0.011',
+          liquidity: { usd: 50000 },
+          volume: { m5: 5000 }
+        }
+      ]
+    }
+  });
+
+  const scanner = new DexScreenerScanner({ fetchClient: mockFetch as any });
+  const snapshot = await scanner.fetchCurrentTokenMarketSnapshot(mint, 'PoolEntrada');
+
+  assert.strictEqual(snapshot?.pairAddress, 'PoolEntrada');
+  assert.strictEqual(snapshot?.liquidityUsd, 12000);
+});

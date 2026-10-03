@@ -18,6 +18,19 @@ export interface TokenCandidate {
   buysM5?: number;
   sellsM5?: number;
   h1HighPriceUsd?: number;
+  pairAddress?: string;
+}
+
+export interface TokenMarketSnapshot {
+  symbol: string;
+  priceUsd: number;
+  liquidityUsd: number;
+  volume5mUsd: number;
+  buysM5: number;
+  sellsM5: number;
+  pairAddress?: string;
+  dexId?: string;
+  fetchedAt: number;
 }
 
 export interface IncubatorScanStats {
@@ -325,7 +338,8 @@ export class DexScreenerScanner {
           priceChangeM5,
           buysM5,
           sellsM5,
-          h1HighPriceUsd
+          h1HighPriceUsd,
+          pairAddress: item.pairAddress ? String(item.pairAddress) : undefined
         });
       }
 
@@ -358,11 +372,17 @@ export class DexScreenerScanner {
   }
 
   public async fetchCurrentTokenPriceUsd(mint: string): Promise<number | null> {
-    const meta = await this.fetchTokenMetadata(mint);
-    return meta ? meta.priceUsd : null;
+    const snapshot = await this.fetchCurrentTokenMarketSnapshot(mint);
+    return snapshot ? snapshot.priceUsd : null;
   }
 
-  public async fetchTokenMetadata(mint: string): Promise<{ symbol: string; priceUsd: number } | null> {
+  /**
+   * Snapshot de mercado usado pelo monitor de saída.
+   * Uma única chamada ao endpoint /tokens traz preço, liquidez e fluxo recente;
+   * isso evita consultar preço e liquidez separadamente e garante que o
+   * SOLANA_LIQUIDITY_DRAIN compare a entrada com uma leitura atual.
+   */
+  public async fetchCurrentTokenMarketSnapshot(mint: string, preferredPairAddress?: string): Promise<TokenMarketSnapshot | null> {
     try {
       const res = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
       const data = res.data;
@@ -370,17 +390,55 @@ export class DexScreenerScanner {
       if (!Array.isArray(pairs) || pairs.length === 0) {
         return null;
       }
-      // Ordena pelas pools com maior liquidez para garantir preço e dados representativos
-      const sortedPairs = [...pairs].sort((a, b) => Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0));
-      const best = sortedPairs[0];
+
+      // O endpoint pode devolver pares onde o mint aparece como quote token.
+      // priceUsd refere-se ao base token, então preferimos estritamente pares
+      // onde o mint monitorado é o base token para não contaminar o sensor.
+      const solanaPairs = pairs.filter((pair: any) =>
+        (!pair?.chainId || String(pair.chainId).toLowerCase() === 'solana')
+      );
+      const baseMatches = solanaPairs.filter((pair: any) =>
+        String(pair?.baseToken?.address || '') === mint
+      );
+      const relevantPairs = baseMatches.length > 0 ? baseMatches : solanaPairs;
+      if (relevantPairs.length === 0) return null;
+
+      // Quando conhecemos a pool usada na entrada, mantemos a comparação de
+      // liquidez na mesma pool. Se ela não estiver mais disponível, caímos para
+      // a pool de maior liquidez apenas como referência de mercado.
+      const preferred = preferredPairAddress
+        ? relevantPairs.find((pair: any) => String(pair?.pairAddress || '') === preferredPairAddress)
+        : undefined;
+      const sortedPairs = [...relevantPairs].sort(
+        (a, b) => Number(b?.liquidity?.usd || 0) - Number(a?.liquidity?.usd || 0)
+      );
+      const best = preferred || sortedPairs[0];
       const bestPrice = Number(best?.priceUsd || 0);
+      if (!Number.isFinite(bestPrice) || bestPrice <= 0) return null;
+
       const rawSymbol = best?.baseToken?.symbol;
-      const symbol = (rawSymbol && rawSymbol !== 'undefined' && rawSymbol.trim() !== '') 
-        ? rawSymbol 
+      const symbol = (rawSymbol && rawSymbol !== 'undefined' && rawSymbol.trim() !== '')
+        ? rawSymbol
         : (mint.slice(0, 4) + '...' + mint.slice(-4));
-      return bestPrice > 0 ? { symbol, priceUsd: bestPrice } : null;
+
+      return {
+        symbol,
+        priceUsd: bestPrice,
+        liquidityUsd: Number(best?.liquidity?.usd || 0),
+        volume5mUsd: Number(best?.volume?.m5 || 0),
+        buysM5: Number(best?.txns?.m5?.buys || 0),
+        sellsM5: Number(best?.txns?.m5?.sells || 0),
+        pairAddress: best?.pairAddress ? String(best.pairAddress) : undefined,
+        dexId: best?.dexId ? String(best.dexId) : undefined,
+        fetchedAt: Date.now()
+      };
     } catch {
       return null;
     }
+  }
+
+  public async fetchTokenMetadata(mint: string): Promise<{ symbol: string; priceUsd: number } | null> {
+    const snapshot = await this.fetchCurrentTokenMarketSnapshot(mint);
+    return snapshot ? { symbol: snapshot.symbol, priceUsd: snapshot.priceUsd } : null;
   }
 }

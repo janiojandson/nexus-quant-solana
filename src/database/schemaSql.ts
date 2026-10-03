@@ -194,6 +194,10 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
   rent_recovered_sol  NUMERIC(10,6) DEFAULT 0,
   net_pnl_sol         NUMERIC(10,6),
 
+  -- Estado durável do trailing / watermark
+  peak_sol_value       NUMERIC(18,9),
+  peak_updated_at      TIMESTAMPTZ,
+
   -- Timing (para análise de latência vs EV)
   detection_to_send_ms    INTEGER,
   send_to_confirm_ms      INTEGER,
@@ -206,6 +210,10 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
   -- Garantir 1 resultado por trade
   CONSTRAINT uq_outcome_trace UNIQUE (trace_id)
 );
+
+-- Migração idempotente para bancos criados antes do watermark persistente.
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS peak_sol_value NUMERIC(18,9);
+ALTER TABLE trade_outcomes ADD COLUMN IF NOT EXISTS peak_updated_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_to_mint       ON trade_outcomes (mint);
 CREATE INDEX IF NOT EXISTS idx_to_status     ON trade_outcomes (status);

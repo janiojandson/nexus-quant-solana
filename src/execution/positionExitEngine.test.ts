@@ -312,3 +312,27 @@ test('PositionExitEngine: trailing de momentum protege ganho antes da parcial', 
   assert.strictEqual(reversal.shouldCloseAta, true);
   assert.strictEqual(reversal.reasonDetail, 'EARLY_MOMENTUM_TRAILING');
 });
+
+
+test('PositionExitEngine: deve reidratar watermark persistido do trailing após restart', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'PersistedRunnerPeak';
+  engine.addPosition({
+    mint,
+    symbol: 'RUNNER',
+    tokenAmount: 500,
+    entryPriceUsd: 1,
+    entryTimestamp: Date.now(),
+    entrySol: 0.015,
+    partialTaken: true,
+    peakSolValue: 0.030
+  });
+
+  assert.strictEqual(engine.getPeakSolValue(mint), 0.030);
+
+  // O pico persistido mantém o trailing em 0.027 SOL mesmo depois do restart.
+  const signal = engine.evaluateExitBySol(mint, 0.0269);
+  assert.strictEqual(signal.shouldExit, true);
+  assert.strictEqual(signal.type, 'TRAILING_STOP');
+  assert.ok((signal.trailingStopSolValue || 0) >= 0.027 - 1e-12);
+});
