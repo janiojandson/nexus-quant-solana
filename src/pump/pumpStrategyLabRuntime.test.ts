@@ -107,3 +107,50 @@ test('runtime does not probe Jupiter at all while research is suspended', async 
   await runtime.sample();
   assert.equal(provider.calls.length, 0);
 });
+
+
+test('runtime abre múltiplas janelas para o mesmo mint e separa resumo por horizonte', async () => {
+  let now = 10_000;
+  const provider = new FakeProvider();
+  const shadows: any[] = [];
+  const markets: any[] = [];
+  const store = {
+    appendObservation: async () => {},
+    appendShadowTrade: async (record: any) => { shadows.push(record); },
+    appendMarketSample: async (record: any) => { markets.push(record); },
+    upsertStrategySummary: async () => {}
+  };
+
+  const runtime = new PumpStrategyLabRuntime(source(), provider, store, {
+    now: () => now,
+    entryLamports: 1_000_000,
+    horizons: [{ label: '15s', ms: 15_000 }]
+  });
+
+  await runtime.sample(); // LAUNCH_0_15S
+  now = 25_000;
+  await runtime.sample(); // saída 15s do lançamento
+  now = 180_000;
+  await runtime.sample(); // ENTRY_3M do mesmo mint
+  now = 195_000;
+  await runtime.sample(); // saída 15s da entrada 3m
+
+  assert.equal(shadows.length, 2);
+  assert.equal(shadows[0].payload.entryWindow, 'LAUNCH_0_15S');
+  assert.equal(shadows[1].payload.entryWindow, 'ENTRY_3M');
+  assert.equal(markets.length, 2);
+  assert.equal(markets[0].payload.entryWindow, 'LAUNCH_0_15S');
+  assert.equal(markets[1].payload.entryWindow, 'ENTRY_3M');
+  assert.ok(Array.isArray(markets[0].payload.exitPolicyReplays));
+  assert.ok(markets[0].payload.exitPolicyReplays.some((row: any) => row.policy === 'BASELINE_CURRENT'));
+  assert.ok(markets[0].payload.exitPolicyReplays.some((row: any) => row.policy === 'TIERED_PROFIT_LOCK'));
+
+  const snapshot = runtime.snapshot();
+  assert.equal(snapshot.totalSamples, 2);
+  assert.ok(snapshot.strategies.some(row =>
+    row.entryWindow === 'LAUNCH_0_15S' && row.horizon === '15s'
+  ));
+  assert.ok(snapshot.strategies.some(row =>
+    row.entryWindow === 'ENTRY_3M' && row.horizon === '15s'
+  ));
+});
