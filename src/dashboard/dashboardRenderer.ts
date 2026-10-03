@@ -72,6 +72,12 @@ export interface DashboardState {
     entryEligible: number;
   };
   pumpObservatory?: PumpObservatorySnapshot;
+  exitCapacity?: {
+    admit: boolean;
+    requiredRps: number;
+    availableRps: number;
+    reason?: string;
+  };
   positions: Array<{
     mint: string;
     symbol: string;

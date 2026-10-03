@@ -17,6 +17,7 @@ import { SolanaPostgresRepository } from './database/postgresClient.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
+import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
 import { RentRecoveryService } from './services/rentRecoveryService.js';
@@ -39,6 +40,7 @@ const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
 const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
+const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 1));
 const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
 const TRADE_AMOUNT_SOL = MAX_TRADE_AMOUNT_SOL; // Teto do lote por trade (o lote real é dimensionado adaptativamente)
 const GAS_RESERVE_SOL = 0.05;       // Reserva mínima intocável em 0.05 SOL (gás de saída)
@@ -220,6 +222,12 @@ const latestState: DashboardState = {
   quarantineCount: 0,
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   pumpObservatory: pumpObservatory.snapshot(),
+  exitCapacity: evaluateExitCapacity({
+    generalRps: JUPITER_GENERAL_RPS,
+    monitorIntervalMs: FAST_EXIT_INTERVAL_MS,
+    openPositions: 1,
+    hasLocalExitSensor: false
+  }),
   lastUpdated: new Date().toISOString()
 };
 
@@ -1350,6 +1358,21 @@ async function executeAutonomousCycle() {
     const activePositions = positionEngine.getAllPositions();
     if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
       console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
+      return;
+    }
+
+    const exitCapacity = evaluateExitCapacity({
+      generalRps: JUPITER_GENERAL_RPS,
+      monitorIntervalMs: FAST_EXIT_INTERVAL_MS,
+      openPositions: activePositions.length + 1,
+      hasLocalExitSensor: false
+    });
+    latestState.exitCapacity = exitCapacity;
+    if (!exitCapacity.admit) {
+      console.log(
+        `🛑 [EXIT CAPACITY] Nova entrada bloqueada: ${exitCapacity.reason} ` +
+        `Posições após entrada=${activePositions.length + 1}; monitor=${FAST_EXIT_INTERVAL_MS}ms.`
+      );
       return;
     }
 

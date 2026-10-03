@@ -277,6 +277,7 @@ export async function handleApiRoutes(
         adminAuth: s.auth || { configured: false, needsBootstrap: false },
         rentRecovery: s.rentRecovery || null,
         laya: s.laya || null,
+        exitCapacity: s.exitCapacity || null,
         jupiter: {
           version: 'V2',
           mode: 'META_AGGREGATOR',

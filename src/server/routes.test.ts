@@ -27,6 +27,12 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
       balanceSol: 0.15,
       positions: [],
       closedTrades: [],
+      exitCapacity: {
+        admit: false,
+        requiredRps: 1.333,
+        availableRps: 1,
+        reason: 'Exit protection capacity exceeded'
+      },
       pumpObservatory: {
         enabled: true,
         running: true,
@@ -46,6 +52,8 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   const payload = JSON.parse(responseData);
   assert.strictEqual(payload.pump.readOnly, true);
   assert.strictEqual(payload.pump.totalCreatedObserved, 7);
+  assert.strictEqual(payload.operational.exitCapacity.admit, false);
+  assert.strictEqual(payload.operational.exitCapacity.requiredRps, 1.333);
 });
 
 test('handleApiRoutes: deve responder 200 OK na rota /health', async () => {
