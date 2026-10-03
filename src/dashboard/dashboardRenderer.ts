@@ -72,6 +72,20 @@ export interface DashboardState {
     entryEligible: number;
   };
   pumpObservatory?: PumpObservatorySnapshot;
+  pumpStrategyLab?: {
+    mode: 'SHADOW';
+    totalSamples: number;
+    preferredJupiterPlan?: string;
+    preferredPlanNetAfterCostSol?: number;
+    strategies: Array<{
+      cohort: string;
+      venue: string;
+      state: string;
+      sampleCount: number;
+      meanNetReturnPct?: number;
+      executableExitRate: number;
+    }>;
+  };
   exitCapacity?: {
     admit: boolean;
     requiredRps: number;
@@ -184,6 +198,46 @@ function renderPumpObservatorySection(state: DashboardState): string {
         </table>
       </div>
       ${pump?.lastError ? `<div class="p-3 text-xs text-amber-300 border-t border-slate-800">Último erro de leitura: ${escapeDashboardHtml(pump.lastError)}</div>` : ''}
+    </section>`;
+}
+
+function renderPumpStrategyLabSection(state: DashboardState): string {
+  const lab = state.pumpStrategyLab;
+  const rows = (lab?.strategies || []).map(item => `
+    <tr class="border-b border-slate-800/60">
+      <td class="py-2 px-3 font-mono text-xs text-slate-300">${escapeDashboardHtml(item.cohort)}</td>
+      <td class="py-2 px-3 text-xs text-slate-300">${escapeDashboardHtml(item.venue)}</td>
+      <td class="py-2 px-3 text-xs text-cyan-300">${escapeDashboardHtml(item.state)}</td>
+      <td class="py-2 px-3 font-mono text-xs text-slate-400">${item.sampleCount}</td>
+      <td class="py-2 px-3 font-mono text-xs text-slate-400">${item.meanNetReturnPct == null ? '—' : item.meanNetReturnPct.toFixed(2) + '%'}</td>
+      <td class="py-2 px-3 font-mono text-xs text-slate-400">${(item.executableExitRate * 100).toFixed(1)}%</td>
+    </tr>`).join('');
+
+  return `
+    <section class="bg-slate-900/70 border border-cyan-900/40 rounded-2xl overflow-hidden shadow-xl">
+      <div class="p-4 md:px-6 border-b border-slate-800/80 bg-slate-900/90 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h2 class="text-base md:text-lg font-bold text-white">📐 Pump Strategy Lab <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">SHADOW</span></h2>
+          <p class="text-xs text-slate-400 mt-1">Compara cohort, venue, custos e saída executável. Nenhuma estratégia é promovida sem evidência suficiente.</p>
+        </div>
+        <div id="pump-strategy-lab-samples" class="text-xs font-mono text-slate-400">Amostras: ${lab?.totalSamples ?? 0}</div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-4">
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
+          <div class="text-[10px] uppercase text-slate-500">Jupiter economicamente preferido</div>
+          <div id="pump-strategy-lab-plan" class="text-lg font-black font-mono text-cyan-300">${escapeDashboardHtml(lab?.preferredJupiterPlan || 'INSUFFICIENT_DATA')}</div>
+        </div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
+          <div class="text-[10px] uppercase text-slate-500">Resultado líquido após custo do plano</div>
+          <div id="pump-strategy-lab-net" class="text-lg font-black font-mono text-emerald-300">${lab?.preferredPlanNetAfterCostSol == null ? '—' : lab.preferredPlanNetAfterCostSol.toFixed(6) + ' SOL'}</div>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left">
+          <thead><tr class="border-y border-slate-800 text-[10px] uppercase tracking-wider text-slate-500"><th class="py-2 px-3">Cohort</th><th class="py-2 px-3">Venue</th><th class="py-2 px-3">Estado</th><th class="py-2 px-3">N</th><th class="py-2 px-3">Retorno líquido</th><th class="py-2 px-3">Saída executável</th></tr></thead>
+          <tbody id="pump-strategy-lab-tbody">${rows || '<tr><td colspan="6" class="py-6 text-center text-slate-500 text-sm">INSUFFICIENT_DATA — coletando evidência shadow.</td></tr>'}</tbody>
+        </table>
+      </div>
     </section>`;
 }
 
@@ -480,6 +534,9 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     <!-- OBSERVATÓRIO PUMP.FUN READ-ONLY -->
     ${renderPumpObservatorySection(state)}
+
+    <!-- LABORATÓRIO ECONÔMICO PUMP / JUPITER -->
+    ${renderPumpStrategyLabSection(state)}
 
     <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
@@ -980,6 +1037,37 @@ export function renderDashboardHtml(state: DashboardState): string {
                 '</tr>';
             }).join('');
           }
+        }
+
+        // 3.2 Strategy Lab Pump/Jupiter — shadow, sem execução real.
+        const strategyLab = data.pumpStrategyLab || {};
+        const labSamples = document.getElementById('pump-strategy-lab-samples');
+        const labPlan = document.getElementById('pump-strategy-lab-plan');
+        const labNet = document.getElementById('pump-strategy-lab-net');
+        const labTbody = document.getElementById('pump-strategy-lab-tbody');
+        if (labSamples) labSamples.textContent = 'Amostras: ' + Number(strategyLab.totalSamples || 0);
+        if (labPlan) labPlan.textContent = String(strategyLab.preferredJupiterPlan || 'INSUFFICIENT_DATA');
+        if (labNet) {
+          labNet.textContent = strategyLab.preferredPlanNetAfterCostSol == null
+            ? '—'
+            : Number(strategyLab.preferredPlanNetAfterCostSol).toFixed(6) + ' SOL';
+        }
+        if (labTbody) {
+          const strategies = Array.isArray(strategyLab.strategies) ? strategyLab.strategies : [];
+          labTbody.innerHTML = strategies.length === 0
+            ? '<tr><td colspan="6" class="py-6 text-center text-slate-500 text-sm">INSUFFICIENT_DATA — coletando evidência shadow.</td></tr>'
+            : strategies.map(function (item) {
+                return '<tr class="border-b border-slate-800/60">' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-300">' + escapePumpHtml(item.cohort || '') + '</td>' +
+                  '<td class="py-2 px-3 text-xs text-slate-300">' + escapePumpHtml(item.venue || '') + '</td>' +
+                  '<td class="py-2 px-3 text-xs text-cyan-300">' + escapePumpHtml(item.state || '') + '</td>' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-400">' + Number(item.sampleCount || 0) + '</td>' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-400">' +
+                    (item.meanNetReturnPct == null ? '—' : Number(item.meanNetReturnPct).toFixed(2) + '%') + '</td>' +
+                  '<td class="py-2 px-3 font-mono text-xs text-slate-400">' +
+                    (Number(item.executableExitRate || 0) * 100).toFixed(1) + '%</td>' +
+                  '</tr>';
+              }).join('');
         }
 
         // 4. Atualiza Tabela de Posições

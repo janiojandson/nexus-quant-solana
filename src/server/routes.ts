@@ -264,6 +264,12 @@ export async function handleApiRoutes(
         graduatedCount: 0,
         recent: []
       },
+      pumpStrategyLab: s.pumpStrategyLab || {
+        mode: 'SHADOW',
+        totalSamples: 0,
+        preferredJupiterPlan: 'INSUFFICIENT_DATA',
+        strategies: []
+      },
       positions: formattedPositions,
       recentLogs: formattedLogs,
       closedTrades: formattedClosedTrades,

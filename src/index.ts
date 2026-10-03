@@ -14,6 +14,7 @@ import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { DexScreenerScanner } from './scanner/dexScreenerScanner.js';
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
 import { SolanaPostgresRepository } from './database/postgresClient.js';
+import { PumpStrategyRepository } from './database/pumpStrategyRepository.js';
 import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
@@ -35,6 +36,7 @@ import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
 import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
+import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
 
 
 dotenv.config();
@@ -88,6 +90,23 @@ const PUMP_DEX_TIMING_BATCH_SIZE = Math.max(
 const PUMP_DEX_TIMING_MAX_AGE_MS = Math.max(
   60_000,
   Number(process.env.PUMP_DEX_TIMING_MAX_AGE_MS || 15 * 60_000)
+);
+const PUMP_STRATEGY_LAB_ENABLED = process.env.PUMP_STRATEGY_LAB_ENABLED !== 'false';
+const PUMP_STRATEGY_LAB_INTERVAL_MS = Math.max(
+  2_000,
+  Number(process.env.PUMP_STRATEGY_LAB_INTERVAL_MS || 5_000)
+);
+const PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS = Math.max(
+  10_000,
+  Math.floor(Number(process.env.PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS || 1_000_000))
+);
+const PUMP_STRATEGY_NETWORK_FEE_LAMPORTS = Math.max(
+  0,
+  Math.floor(Number(process.env.PUMP_STRATEGY_NETWORK_FEE_LAMPORTS || 5_000))
+);
+const PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS = Math.max(
+  0,
+  Math.floor(Number(process.env.PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS || 0))
 );
 
 let isRunningScanner = false;
@@ -167,6 +186,25 @@ const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
 const postgresRepo = new SolanaPostgresRepository();
 const pgPool = postgresRepo.getPool();
+const pumpStrategyRepository = new PumpStrategyRepository(pgPool as any);
+const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
+  pumpObservatory,
+  jupiterEngine.getAggregator(),
+  pumpStrategyRepository,
+  {
+    enabled: PUMP_OBSERVATORY_ENABLED && PUMP_STRATEGY_LAB_ENABLED,
+    intervalMs: PUMP_STRATEGY_LAB_INTERVAL_MS,
+    entryLamports: PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS,
+    networkFeeLamports: PUMP_STRATEGY_NETWORK_FEE_LAMPORTS,
+    priorityFeeLamports: PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS,
+    canRunResearch: () => {
+      if (!exitPathHealth.snapshot().canRunResearch) return false;
+      // No Free, capital exposto tem prioridade total sobre pesquisa P6.
+      if (JUPITER_GENERAL_RPS <= 1 && positionEngine.getAllPositions().length > 0) return false;
+      return true;
+    }
+  }
+);
 const adminAuthService = new SolanaAdminAuthService(pgPool);
 const journal = new DecisionLogger(pgPool, {
   flushIntervalMs: 5000,
@@ -269,6 +307,7 @@ const latestState: DashboardState = {
   quarantineCount: 0,
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   pumpObservatory: pumpObservatory.snapshot(),
+  pumpStrategyLab: pumpStrategyLabRuntime.snapshot(),
   exitCapacity: evaluateExitCapacity({
     generalRps: JUPITER_GENERAL_RPS,
     monitorIntervalMs: FAST_EXIT_INTERVAL_MS,
@@ -2711,8 +2750,16 @@ async function main() {
       `🧪 [Pump→Dex Timing] ativo | interval=${PUMP_DEX_TIMING_INTERVAL_MS}ms ` +
       `batch=${PUMP_DEX_TIMING_BATCH_SIZE} maxAge=${PUMP_DEX_TIMING_MAX_AGE_MS}ms`
     );
+    if (PUMP_STRATEGY_LAB_ENABLED) {
+      pumpStrategyLabRuntime.start();
+      console.log(
+        `📐 [Pump Strategy Lab] SHADOW ativo | interval=${PUMP_STRATEGY_LAB_INTERVAL_MS}ms ` +
+        `| entryModel=${PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS} lamports | priority=P6`
+      );
+    }
     pumpStateSyncTimer = setInterval(() => {
       latestState.pumpObservatory = pumpObservatory.snapshot();
+      latestState.pumpStrategyLab = pumpStrategyLabRuntime.snapshot();
     }, 2_500);
     pumpStateSyncTimer.unref?.();
   } else {

@@ -151,3 +151,38 @@ test('Pump Observatory escapa nome/símbolo não confiável antes de renderizar 
   assert.doesNotMatch(html, /<img src=x onerror=alert\(1\)>/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
 });
+
+
+test('Dashboard expõe Strategy Lab econômico sem promover dados insuficientes', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpStrategyLab: {
+      mode: 'SHADOW',
+      totalSamples: 40,
+      preferredJupiterPlan: 'Developer',
+      preferredPlanNetAfterCostSol: 0.275,
+      strategies: [{
+        cohort: 'BIRTH_0_15S',
+        venue: 'JUPITER_ROUTE',
+        state: 'PROMISING_SHADOW',
+        sampleCount: 40,
+        meanNetReturnPct: 4.2,
+        executableExitRate: 0.95
+      }]
+    }
+  });
+
+  assert.match(html, /Pump Strategy Lab/);
+  assert.match(html, /Developer/);
+  assert.match(html, /PROMISING_SHADOW/);
+  assert.match(html, /BIRTH_0_15S/);
+  assert.match(html, /95\.0%/);
+});
+
+
+test('Strategy Lab possui atualização dinâmica via /api/status', () => {
+  const html = renderDashboardHtml(state);
+  assert.match(html, /id="pump-strategy-lab-tbody"/);
+  assert.match(html, /id="pump-strategy-lab-samples"/);
+  assert.match(html, /data\.pumpStrategyLab/);
+});
