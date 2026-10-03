@@ -44,6 +44,7 @@ class FakeConnection {
   simulateErr: unknown = null;
   sendCalls = 0;
   blockhashCalls = 0;
+  sendError: Error | null = null;
 
   async getAccountInfo(key: PublicKey) {
     return this.accounts.get(key.toBase58()) ?? null;
@@ -57,6 +58,7 @@ class FakeConnection {
   }
   async sendRawTransaction() {
     this.sendCalls++;
+    if (this.sendError) throw this.sendError;
     return 'direct_pump_sig';
   }
   async confirmTransaction() {
@@ -154,4 +156,62 @@ test('simulation rejection prevents any broadcast', async () => {
   assert.equal(result.status, 'FAILED');
   assert.match(result.error || '', /simulation/i);
   assert.equal(connection.sendCalls, 0);
+});
+
+
+test('timeout after broadcast reconciles on-chain and never sends a duplicate sell', async () => {
+  const { connection, userKeypair, mint } = fixture();
+  connection.sendError = new Error('RPC timeout after broadcast');
+  let reconcileCalls = 0;
+  const executor = new PumpSellExecutor(connection as any, {
+    reconcileRecentSell: async (mintAddress, _sinceMs, expectedAmountAtomic) => {
+      reconcileCalls++;
+      assert.equal(mintAddress, mint.toBase58());
+      assert.equal(expectedAmountAtomic, 1_000_000n);
+      return {
+        signature: 'reconciled_sig',
+        soldAtomic: 1_000_000n,
+        receivedLamports: 123_456n
+      };
+    }
+  });
+
+  const result = await executor.executeSell({
+    mint,
+    userKeypair,
+    tokenAmountAtomic: 1_000_000n,
+    slippageBps: 500
+  });
+
+  assert.equal(result.status, 'SUCCESS');
+  assert.equal(result.txSignature, 'reconciled_sig');
+  assert.equal(result.reconciled, true);
+  assert.equal(result.actualReceivedLamports, 123_456n);
+  assert.equal(connection.sendCalls, 1);
+  assert.equal(reconcileCalls, 1);
+});
+
+test('unreconciled uncertain submission returns SUBMITTED_UNCONFIRMED without retry', async () => {
+  const { connection, userKeypair, mint } = fixture();
+  connection.sendError = new Error('transport timeout');
+  let reconcileCalls = 0;
+  const executor = new PumpSellExecutor(connection as any, {
+    reconcileRecentSell: async () => {
+      reconcileCalls++;
+      return null;
+    }
+  });
+
+  const result = await executor.executeSell({
+    mint,
+    userKeypair,
+    tokenAmountAtomic: 1_000_000n,
+    slippageBps: 500
+  });
+
+  assert.equal(result.status, 'SUBMITTED_UNCONFIRMED');
+  assert.equal(result.reconciled, false);
+  assert.equal(connection.sendCalls, 1);
+  assert.equal(reconcileCalls, 1);
+  assert.match(result.error || '', /do not retry/i);
 });

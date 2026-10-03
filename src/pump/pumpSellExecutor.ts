@@ -75,8 +75,24 @@ export interface PumpSellExecutionResult {
   txSignature?: string;
   expectedNetSolLamports?: bigint;
   minSolOutputLamports?: bigint;
+  actualReceivedLamports?: bigint;
   unitsConsumed?: number;
+  reconciled?: boolean;
   error?: string;
+}
+
+export interface PumpSellReconciledTrade {
+  signature: string;
+  soldAtomic: bigint;
+  receivedLamports?: bigint;
+}
+
+export interface PumpSellReconciler {
+  reconcileRecentSell(
+    mintAddress: string,
+    sinceTimestampMs: number,
+    expectedAmountAtomic: bigint
+  ): Promise<PumpSellReconciledTrade | null>;
 }
 
 export function derivePumpGlobalPda(): PublicKey {
@@ -166,7 +182,10 @@ function assertRequestCaps(request: PumpSellRequest): {
 }
 
 export class PumpSellExecutor {
-  constructor(private readonly connection: PumpSellExecutorConnection) {}
+  constructor(
+    private readonly connection: PumpSellExecutorConnection,
+    private readonly reconciler?: PumpSellReconciler
+  ) {}
 
   async buildSell(request: PumpSellRequest): Promise<PumpBuiltSell> {
     const caps = assertRequestCaps(request);
@@ -407,6 +426,7 @@ export class PumpSellExecutor {
     }
 
     const built = simulation.built;
+    const submissionStartedAt = Date.now();
     try {
       const txSignature = await this.connection.sendRawTransaction(
         built.transaction.serialize(),
@@ -438,12 +458,43 @@ export class PumpSellExecutor {
         unitsConsumed: simulation.unitsConsumed
       };
     } catch (err: any) {
+      const detail = err?.message || String(err);
+
+      if (this.reconciler) {
+        try {
+          const reconciled = await this.reconciler.reconcileRecentSell(
+            request.mint.toBase58(),
+            submissionStartedAt,
+            request.tokenAmountAtomic
+          );
+          if (
+            reconciled &&
+            reconciled.soldAtomic === request.tokenAmountAtomic &&
+            reconciled.signature
+          ) {
+            return {
+              status: 'SUCCESS',
+              txSignature: reconciled.signature,
+              expectedNetSolLamports: built.quote.netSolLamports,
+              minSolOutputLamports: built.quote.minSolOutputLamports,
+              actualReceivedLamports: reconciled.receivedLamports,
+              unitsConsumed: simulation.unitsConsumed,
+              reconciled: true
+            };
+          }
+        } catch {
+          // Reconciliation failure must not trigger a duplicate sell.
+        }
+      }
+
       return {
-        status: 'FAILED',
+        status: 'SUBMITTED_UNCONFIRMED',
         expectedNetSolLamports: built.quote.netSolLamports,
         minSolOutputLamports: built.quote.minSolOutputLamports,
         unitsConsumed: simulation.unitsConsumed,
-        error: err?.message || String(err)
+        reconciled: false,
+        error:
+          `Pump direct sell submission is uncertain (${detail}); do not retry until on-chain reconciliation completes.`
       };
     }
   }
