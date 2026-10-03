@@ -209,9 +209,120 @@ Extend the Pump panel with:
 
 Existing HTML escaping/link safety remains mandatory.
 
+## 4.10 Exit Sovereignty, STOP and Trailing Protection
+
+Exit protection has higher priority than discovery, shadow research or new entries.
+
+The current production path has a structural risk: the fast exit monitor obtains a Jupiter executable quote and, when a stop fires, the final swap obtains another Jupiter /order. Entry sizing and discovery probes also use the same external organisation-level general rate-limit bucket. Separate in-process queues do not create separate provider capacity.
+
+### Single global Jupiter traffic coordinator
+
+All Jupiter general-bucket calls must pass through one shared coordinator with strict priorities:
+
+1. P0 — emergency liquidation / watchdog exit;
+2. P1 — STOP, TRAILING_STOP, TAKE_PROFIT and manual exit order;
+3. P2 — executable exit confirmation for an active position;
+4. P3 — active-position exitability health;
+5. P4 — new-entry order;
+6. P5 — entry sizing and momentum probes;
+7. P6 — Pump Strategy Lab shadow probes.
+
+The /execute bucket is measured separately because Jupiter documents it as a dedicated bucket.
+
+When P0–P3 work is queued, P4–P6 must yield. Shadow research must never consume capacity needed to protect live capital.
+
+### Capacity-aware entry admission
+
+Before opening a position, Nexus must verify that the configured Jupiter plan plus available local/on-chain sensors can protect all open positions.
+
+With the current 1.5-second monitor, two Jupiter-only monitored positions require about 1.33 general-bucket requests/second before any sizing or entry work. A Free plan at 1 RPS is therefore not sufficient for two positions if every protection cycle depends on Jupiter.
+
+The system must fail closed by doing one or more of:
+
+- use a local/on-chain high-frequency exit sensor that does not consume Jupiter general RPS;
+- reduce the number of concurrently admitted Jupiter-dependent positions;
+- reduce non-critical polling while positions are open;
+- require a higher Jupiter plan for the configured concurrency.
+
+It must never silently accept more positions than the exit control plane can protect.
+
+### Two-stage stop sensor
+
+High-frequency trailing observation must be separated from final route execution.
+
+For a Pump token still on its bonding curve:
+
+- subscribe to or batch-read the canonical bonding-curve account;
+- calculate the deterministic sell quote locally from current on-chain reserves and current Pump fee rules;
+- update peak/trailing watermark from this locally sellable state without consuming Jupiter general RPS;
+- persist the high-watermark independently of Jupiter availability.
+
+For non-Pump or post-graduation positions, use the best available on-chain venue sensor when deterministic; otherwise retain periodic Jupiter executable quotes with capacity admission.
+
+Maintain separate fields:
+
+- observable/high-frequency peak;
+- executable/local-sellable peak;
+- latest Jupiter executable value;
+- last healthy exit-route timestamp.
+
+A mark-price-only peak must not be treated as executable profit. Pump bonding-curve local sell math is allowed to be an executable-equivalent sensor only while the canonical curve is active and account state is fresh.
+
+### Exit-path degradation circuit breaker
+
+If an open position loses its protected exit path:
+
+- pause new entries immediately;
+- cancel/defer Strategy Lab Jupiter probes;
+- raise exit monitoring priority;
+- expose degraded state on dashboard/API;
+- keep the position and peak watermark persisted;
+- do not mark it closed until an on-chain sale is confirmed.
+
+The existing quote-failure watchdog remains, but its emergency attempt must run through P0 and must not wait behind entry or research traffic.
+
+### Sell-only Pump fallback
+
+A direct Pump **sell-only** path is allowed to be designed and validated earlier than a direct Pump buy path because it is a capital-protection mechanism, not an alpha feature.
+
+It may activate only for a token that is still on its canonical Pump bonding curve and only after deterministic fail-closed validation of program IDs, mint, curve PDA, token program, account ownership, fee accounts and curve completion state.
+
+Requirements:
+
+- local signing;
+- exact atomic token amount;
+- minimum SOL out / hard slippage cap;
+- priority-fee cap;
+- simulation/preflight when compatible with the emergency latency objective;
+- idempotency and duplicate-sale prevention;
+- on-chain reconciliation before retry after uncertain submission;
+- no automatic direct BUY permission as a consequence of enabling SELL fallback.
+
+If the curve has completed during the exit attempt, the curve fallback must refuse and hand off to the post-graduation route (Jupiter/PumpSwap path) rather than guessing.
+
+### Stop/trailing strategy lab
+
+The current production protection remains the baseline:
+
+- fixed stop-loss -6%;
+- early trailing after +8% with 6% distance;
+- partial harvest at +35%;
+- runner trailing 10% from peak.
+
+The Strategy Lab must replay the same token path through multiple protection policies, including:
+
+- BASELINE_CURRENT;
+- volatility/liquidity-adaptive trailing;
+- tiered profit-lock floors for very large moves;
+- partial-harvest variants.
+
+For each policy measure net captured return, maximum give-back from peak, premature-exit rate, exit-route availability and realized slippage.
+
+No threshold change reaches live production merely because it would have improved one historical token. Promotion requires cohort-level evidence.
+
 ## 5. Execution-path decision gate
 
-No direct Pump executor is created in the initial Strategy Lab implementation.
+No direct Pump **buy** executor is created in the initial Strategy Lab implementation. A narrowly scoped sell-only Pump fallback may be implemented earlier under Section 4.10 because it is an exit-safety control, not an alpha path.
 
 A later pumpDirectExecutor is justified only if production shadow data shows all of:
 
@@ -263,8 +374,12 @@ Minimum test groups:
 - Pump event decode and canonical PDA validation;
 - slot/local timing and deduplication;
 - Dex first-seen/ready correlation;
-- Jupiter scheduler/rate-limit behavior;
+- Jupiter scheduler/rate-limit behavior, including P0/P1 exit preemption;
+- capacity-aware entry admission under Free/paid plan budgets;
 - direct bonding-curve quote math against canonical examples;
+- exit-path degradation circuit breaker;
+- persistent dual watermark and STOP/TRAILING behavior during Jupiter outages;
+- sell-only Pump fallback validation/idempotency in tests before any live arming;
 - fee/net-return calculations;
 - cohort classification;
 - shadow trade lifecycle and horizon marks;
@@ -280,17 +395,23 @@ Full repository tests and TypeScript build must pass before merge.
 ### Stage A — Observatory correlation
 Complete Pump→Dex correlation, persist timing, enable on Railway read-only.
 
-### Stage B — Jupiter availability/rate telemetry
-Add rate-budgeted Jupiter probes and Pump→Jupiter timing. No signing.
+### Stage B — Exit sovereignty
+Introduce the single Jupiter traffic coordinator, exit priorities, capacity-aware entry admission, degraded-exit circuit breaker and independent persistent watermarks. Prove STOP/TRAILING cannot wait behind entry/research traffic.
 
-### Stage C — Shadow Strategy Lab
-Generate lifecycle cohorts, hypothetical entries/exits and net expectancy.
+### Stage C — Jupiter availability/rate telemetry
+Add rate-budgeted Jupiter probes and Pump→Jupiter timing. Shadow probes are always lower priority than live exit protection.
 
-### Stage D — Evidence review
+### Stage D — Shadow Strategy Lab
+Generate lifecycle cohorts, hypothetical entries/exits, stop/trailing policy replays and net expectancy.
+
+### Stage E — Sell-only fallback safety gate
+If Pump bonding-curve validation and transaction construction can be proven fail-closed, validate a direct Pump sell-only fallback independently from direct buying. It remains disabled until its own tests, simulations and operational review pass.
+
+### Stage F — Evidence review
 Run until minimum-sample gates are met. Compare Free Jupiter, optionally a paid Jupiter tier if latency is the bottleneck, and locally modeled direct Pump economics.
 
-### Stage E — Execution candidate
-Only if the evidence gate passes, design and separately arm a live direct-Pump execution subsystem.
+### Stage G — Execution candidate
+Only if the alpha evidence gate passes, design and separately arm a live direct-Pump BUY subsystem.
 
 ## 10. Success criteria
 
