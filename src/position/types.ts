@@ -188,6 +188,46 @@ export class PositionNotFoundError extends Error {
   }
 }
 
+export class ArbitraryBalanceMutationRejectedError extends Error {
+  constructor(message: string, public readonly positionId: string, public readonly details?: Record<string, unknown>) {
+    super(message);
+    this.name = 'ArbitraryBalanceMutationRejectedError';
+  }
+}
+
+export class AmbiguousTokenAccountCustodyError extends Error {
+  constructor(message: string, public readonly walletId: string, public readonly mint: string, public readonly details?: Record<string, unknown>) {
+    super(message);
+    this.name = 'AmbiguousTokenAccountCustodyError';
+  }
+}
+
+export interface ApplyConfirmedFillInput {
+  positionId: string;
+  expectedVersion: PositionVersion;
+  fillId: string;
+  signature: string;
+  confirmedActualDebitAtomic: bigint;
+  grossProceedsLamports: bigint;
+  evidenceType?: string;
+  isFinal?: boolean;
+}
+
+export interface ReconciliationEvidenceMetadata {
+  source: string;
+  slot?: number | bigint;
+  observedAtWallMs: number;
+  reason: string;
+  operatorSignature?: string;
+}
+
+export interface ApplyReconciliationAdjustmentInput {
+  positionId: string;
+  expectedVersion: PositionVersion;
+  observedBalanceAtomic: bigint;
+  evidence: ReconciliationEvidenceMetadata;
+}
+
 /**
  * Creates an immutable PositionSnapshot from a DurablePosition.
  */

@@ -13,6 +13,9 @@ import {
   CreatePositionInput,
   UpdatePositionCASParams,
   ApplyFillParams,
+  ApplyConfirmedFillInput,
+  ApplyReconciliationAdjustmentInput,
+  ArbitraryBalanceMutationRejectedError,
   ExternalBalanceDivergenceAdjustment,
   StalePositionVersionError,
   DuplicateFillApplicationError,
@@ -22,31 +25,42 @@ import {
 } from './types.js';
 
 export interface IPositionRepository {
-  createPosition(input: CreatePositionInput): Promise<DurablePosition>;
-  getPosition(positionId: string): Promise<DurablePosition | null>;
+  createPosition(input: CreatePositionInput, client?: any): Promise<DurablePosition>;
+  getPosition(positionId: string, client?: any): Promise<DurablePosition | null>;
   getActivePositionByWalletMint(
     walletId: string,
     mint: string,
-    tokenProgram?: string
+    tokenProgram?: string,
+    client?: any
   ): Promise<DurablePosition | null>;
   getAllPositions(filter?: { walletId?: string; status?: PositionStatus }): Promise<DurablePosition[]>;
-  updatePositionCAS(params: UpdatePositionCASParams): Promise<{
+  updatePositionCAS(params: UpdatePositionCASParams, client?: any): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
   }>;
-  applyFill(params: ApplyFillParams): Promise<{
+  applyFill(params: ApplyFillParams, client?: any): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
     alreadyApplied: boolean;
   }>;
-  reconcileExternalBalance(adjustment: ExternalBalanceDivergenceAdjustment): Promise<{
+  applyConfirmedFill(input: ApplyConfirmedFillInput, client?: any): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+    alreadyApplied: boolean;
+  }>;
+  applyReconciliationAdjustment(input: ApplyReconciliationAdjustmentInput, client?: any): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }>;
+  reconcileExternalBalance(adjustment: ExternalBalanceDivergenceAdjustment, client?: any): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
   }>;
   markReconciliationRequired(
     positionId: string,
     expectedVersion: PositionVersion,
-    required: boolean
+    required: boolean,
+    client?: any
   ): Promise<DurablePosition>;
 }
 
@@ -174,6 +188,13 @@ export class InMemoryPositionRepository implements IPositionRepository {
       );
     }
 
+    if (params.newAmountAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Position amount cannot be negative: ${params.newAmountAtomic}`,
+        params.positionId
+      );
+    }
+
     const previousVersion = pos.positionVersion;
     const nextVersion = previousVersion + 1n;
     const amountBefore = pos.tokenAmountAtomic;
@@ -233,23 +254,23 @@ export class InMemoryPositionRepository implements IPositionRepository {
     };
   }
 
-  public async applyFill(params: ApplyFillParams): Promise<{
+  public async applyConfirmedFill(input: ApplyConfirmedFillInput): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
     alreadyApplied: boolean;
   }> {
-    const pos = this.positions.get(params.positionId);
+    const pos = this.positions.get(input.positionId);
     if (!pos) {
-      throw new PositionNotFoundError(`Position ${params.positionId} not found`, params.positionId);
+      throw new PositionNotFoundError(`Position ${input.positionId} not found`, input.positionId);
     }
 
     // Idempotency: verify if this fill was already applied to this position by fillId OR by signature
-    const fillKey = `${params.positionId}:${params.fillId}`;
-    const sigKey = params.signature ? `${params.positionId}:${params.signature}` : null;
+    const fillKey = `${input.positionId}:${input.fillId}`;
+    const sigKey = input.signature ? `${input.positionId}:${input.signature}` : null;
     if (this.fillMutationKeys.has(fillKey) || (sigKey && this.signatureMutationKeys.has(sigKey))) {
       const existing = this.mutations.find(
-        m => m.positionId === params.positionId && (
-          m.fillId === params.fillId || (params.signature && m.signature === params.signature)
+        m => m.positionId === input.positionId && (
+          m.fillId === input.fillId || (input.signature && m.signature === input.signature)
         )
       );
       if (existing) {
@@ -262,34 +283,49 @@ export class InMemoryPositionRepository implements IPositionRepository {
     }
 
     // Verify expected position version
-    if (pos.positionVersion !== params.expectedVersion) {
+    if (pos.positionVersion !== input.expectedVersion) {
       throw new StalePositionVersionError(
-        `Fill application rejected for position ${params.positionId}: expected version ${params.expectedVersion}, found ${pos.positionVersion}`,
-        params.positionId,
-        params.expectedVersion,
+        `Fill application rejected for position ${input.positionId}: expected version ${input.expectedVersion}, found ${pos.positionVersion}`,
+        input.positionId,
+        input.expectedVersion,
         pos.positionVersion
       );
     }
 
-    if (params.fillAmountAtomic > pos.tokenAmountAtomic) {
-      throw new Error(
-        `Fill amount ${params.fillAmountAtomic} exceeds current position balance ${pos.tokenAmountAtomic}`
+    if (input.confirmedActualDebitAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Confirmed debit atomic cannot be negative: ${input.confirmedActualDebitAtomic}`,
+        input.positionId
       );
     }
 
-    const newAmount = pos.tokenAmountAtomic - params.fillAmountAtomic;
-    const isFinal = Boolean(params.isFinal || newAmount === 0n);
+    if (input.confirmedActualDebitAtomic > pos.tokenAmountAtomic) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Fill debit ${input.confirmedActualDebitAtomic} exceeds current position balance ${pos.tokenAmountAtomic}`,
+        input.positionId
+      );
+    }
+
+    const newAmount = pos.tokenAmountAtomic - input.confirmedActualDebitAtomic;
+    if (newAmount < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Calculated position balance cannot be negative: ${newAmount}`,
+        input.positionId
+      );
+    }
+
+    const isFinal = Boolean(input.isFinal || newAmount === 0n);
     const newStatus: PositionStatus = isFinal ? 'CLOSED' : 'PARTIAL_CLOSED';
     const mutationType: PositionMutationType = isFinal ? 'FINAL_FILL' : 'PARTIAL_FILL';
 
     const result = await this.updatePositionCAS({
-      positionId: params.positionId,
-      expectedVersion: params.expectedVersion,
+      positionId: input.positionId,
+      expectedVersion: input.expectedVersion,
       newAmountAtomic: newAmount,
       newStatus,
-      proceedsDeltaLamports: params.proceedsLamports,
-      fillId: params.fillId,
-      signature: params.signature,
+      proceedsDeltaLamports: input.grossProceedsLamports,
+      fillId: input.fillId,
+      signature: input.signature,
       mutationType
     });
 
@@ -298,6 +334,71 @@ export class InMemoryPositionRepository implements IPositionRepository {
       mutation: result.mutation,
       alreadyApplied: false
     };
+  }
+
+  public async applyFill(params: ApplyFillParams): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+    alreadyApplied: boolean;
+  }> {
+    return this.applyConfirmedFill({
+      positionId: params.positionId,
+      expectedVersion: params.expectedVersion,
+      fillId: params.fillId,
+      signature: params.signature,
+      confirmedActualDebitAtomic: params.fillAmountAtomic,
+      grossProceedsLamports: params.proceedsLamports,
+      isFinal: params.isFinal
+    });
+  }
+
+  public async applyReconciliationAdjustment(input: ApplyReconciliationAdjustmentInput): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    const pos = this.positions.get(input.positionId);
+    if (!pos) {
+      throw new PositionNotFoundError(
+        `Position ${input.positionId} not found`,
+        input.positionId
+      );
+    }
+
+    if (!input.evidence || !input.evidence.reason || !input.evidence.source) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Evidence metadata (source and reason) is strictly required for reconciliation adjustment',
+        input.positionId
+      );
+    }
+
+    if (input.observedBalanceAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Observed balance cannot be negative: ${input.observedBalanceAtomic}`,
+        input.positionId
+      );
+    }
+
+    if (pos.positionVersion !== input.expectedVersion) {
+      throw new StalePositionVersionError(
+        `Reconciliation rejected for position ${input.positionId}: expected version ${input.expectedVersion}, found ${pos.positionVersion}`,
+        input.positionId,
+        input.expectedVersion,
+        pos.positionVersion
+      );
+    }
+
+    const newStatus: PositionStatus = input.observedBalanceAtomic === 0n
+      ? 'CLOSED'
+      : pos.status;
+
+    return this.updatePositionCAS({
+      positionId: input.positionId,
+      expectedVersion: input.expectedVersion,
+      newAmountAtomic: input.observedBalanceAtomic,
+      newStatus,
+      mutationType: 'RECONCILIATION_ADJUSTMENT',
+      reconciliationRequired: false
+    });
   }
 
   public async reconcileExternalBalance(adjustment: ExternalBalanceDivergenceAdjustment): Promise<{

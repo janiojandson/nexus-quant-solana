@@ -568,15 +568,17 @@ export class PostgresJournalRepository implements IExitJournalRepository {
 
   public async recordFill(
     fill: FillRecord,
-    expectedEpoch?: bigint | number
+    expectedEpoch?: bigint | number,
+    externalClient?: PoolClient
   ): Promise<{ fill: FillRecord; created: boolean }> {
     if (expectedEpoch === undefined || expectedEpoch === null) {
       throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
     }
 
-    const client = await this.pool.connect();
+    const client = externalClient ?? await this.pool.connect();
+    const shouldManageTx = !externalClient;
     try {
-      await client.query('BEGIN');
+      if (shouldManageTx) await client.query('BEGIN');
 
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [fill.intentId]);
       if (intentRes.rows.length > 0) {
@@ -639,7 +641,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
            WHERE signature = $1 AND chain_leg_index = $2 AND instruction_index = $3 AND inner_instruction_index = $4`,
           [fill.signature, fill.chainLegIndex, fill.instructionIndex, fill.innerInstructionIndex]
         );
-        await client.query('COMMIT');
+        if (shouldManageTx) await client.query('COMMIT');
         return { fill: this.mapRowToFill(dupRes.rows[0]), created: false };
       }
 
@@ -667,16 +669,16 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         }
       }
 
-      await client.query('COMMIT');
+      if (shouldManageTx) await client.query('COMMIT');
       return { fill: this.mapRowToFill(fillRes.rows[0]), created: true };
     } catch (err: any) {
-      await client.query('ROLLBACK');
+      if (shouldManageTx) await client.query('ROLLBACK');
       if (err?.code === '23505' && err.constraint === 'fill_ledger_pkey') {
         throw new AppendOnlyViolationError(`Fill ID already exists: ${fill.id}. Cannot overwrite existing fill.`);
       }
       throw err;
     } finally {
-      client.release();
+      if (shouldManageTx) client.release();
     }
   }
 

@@ -123,7 +123,7 @@ export interface IExitJournalRepository {
     updates?: Partial<ExecutionAttempt>,
     expectedEpoch?: bigint | number
   ): Promise<ExecutionAttempt>;
-  recordFill(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }>;
+  recordFill(fill: FillRecord, expectedEpoch?: bigint | number, client?: any): Promise<{ fill: FillRecord; created: boolean }>;
   getFillsForTrade(tradeId: string): Promise<FillRecord[]>;
   getFillsForPosition(positionId: string): Promise<FillRecord[]>;
   recordReconciliationEvent(
@@ -522,7 +522,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     return { ...attempt };
   }
 
-  public async recordFill(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }> {
+  public async recordFill(fill: FillRecord, expectedEpoch?: bigint | number, _client?: any): Promise<{ fill: FillRecord; created: boolean }> {
     if (expectedEpoch === undefined || expectedEpoch === null) {
       throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
     }

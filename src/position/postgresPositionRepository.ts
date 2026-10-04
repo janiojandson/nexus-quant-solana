@@ -22,6 +22,9 @@ import {
   CreatePositionInput,
   UpdatePositionCASParams,
   ApplyFillParams,
+  ApplyConfirmedFillInput,
+  ApplyReconciliationAdjustmentInput,
+  ArbitraryBalanceMutationRejectedError,
   ExternalBalanceDivergenceAdjustment,
   StalePositionVersionError,
   ActivePositionConflictError,
@@ -174,8 +177,9 @@ export class PostgresPositionRepository implements IPositionRepository {
     }
   }
 
-  public async getPosition(positionId: string): Promise<DurablePosition | null> {
-    const res = await this.pool.query(
+  public async getPosition(positionId: string, client?: PoolClient): Promise<DurablePosition | null> {
+    const runner = client ?? this.pool;
+    const res = await runner.query(
       'SELECT * FROM nexus_positions_v2 WHERE position_id = $1;',
       [positionId]
     );
@@ -218,13 +222,24 @@ export class PostgresPositionRepository implements IPositionRepository {
     return res.rows.map(r => this.mapRowToPosition(r));
   }
 
-  public async updatePositionCAS(params: UpdatePositionCASParams): Promise<{
+  public async updatePositionCAS(
+    params: UpdatePositionCASParams,
+    externalClient?: PoolClient
+  ): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
   }> {
-    const client = await this.pool.connect();
+    if (params.newAmountAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Position amount cannot be negative: ${params.newAmountAtomic}`,
+        params.positionId
+      );
+    }
+
+    const client = externalClient ?? await this.pool.connect();
+    const shouldManageTx = !externalClient;
     try {
-      await client.query('BEGIN');
+      if (shouldManageTx) await client.query('BEGIN');
 
       const selectSql = `
         SELECT position_id, position_version, token_amount_atomic, status
@@ -327,24 +342,28 @@ export class PostgresPositionRepository implements IPositionRepository {
 
       const mutation = this.mapRowToMutation(mutationRes.rows[0]);
 
-      await client.query('COMMIT');
+      if (shouldManageTx) await client.query('COMMIT');
       return { position: updatedPos, mutation };
     } catch (err) {
-      await client.query('ROLLBACK');
+      if (shouldManageTx) await client.query('ROLLBACK');
       throw err;
     } finally {
-      client.release();
+      if (shouldManageTx) client.release();
     }
   }
 
-  public async applyFill(params: ApplyFillParams): Promise<{
+  public async applyConfirmedFill(
+    input: ApplyConfirmedFillInput,
+    externalClient?: PoolClient
+  ): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
     alreadyApplied: boolean;
   }> {
-    const client = await this.pool.connect();
+    const client = externalClient ?? await this.pool.connect();
+    const shouldManageTx = !externalClient;
     try {
-      await client.query('BEGIN');
+      if (shouldManageTx) await client.query('BEGIN');
 
       // 1. Check if fill was already recorded for this position by fill_id OR signature
       const checkFillSql = `
@@ -353,17 +372,17 @@ export class PostgresPositionRepository implements IPositionRepository {
         LIMIT 1;
       `;
       const existingRes = await client.query(checkFillSql, [
-        params.positionId,
-        params.fillId,
-        params.signature || ''
+        input.positionId,
+        input.fillId,
+        input.signature || ''
       ]);
       if (existingRes.rows.length > 0) {
         // Fill already applied
         const posRes = await client.query(
           'SELECT * FROM nexus_positions_v2 WHERE position_id = $1;',
-          [params.positionId]
+          [input.positionId]
         );
-        await client.query('COMMIT');
+        if (shouldManageTx) await client.query('COMMIT');
         return {
           position: this.mapRowToPosition(posRes.rows[0]),
           mutation: this.mapRowToMutation(existingRes.rows[0]),
@@ -374,30 +393,45 @@ export class PostgresPositionRepository implements IPositionRepository {
       // 2. Lock position and verify expected version
       const posRes = await client.query(
         'SELECT * FROM nexus_positions_v2 WHERE position_id = $1 FOR UPDATE;',
-        [params.positionId]
+        [input.positionId]
       );
       if (posRes.rows.length === 0) {
-        throw new PositionNotFoundError(`Position ${params.positionId} not found`, params.positionId);
+        throw new PositionNotFoundError(`Position ${input.positionId} not found`, input.positionId);
       }
 
       const currentPos = this.mapRowToPosition(posRes.rows[0]);
-      if (currentPos.positionVersion !== params.expectedVersion) {
+      if (currentPos.positionVersion !== input.expectedVersion) {
         throw new StalePositionVersionError(
-          `Fill application rejected for position ${params.positionId}: expected version ${params.expectedVersion}, found ${currentPos.positionVersion}`,
-          params.positionId,
-          params.expectedVersion,
+          `Fill application rejected for position ${input.positionId}: expected version ${input.expectedVersion}, found ${currentPos.positionVersion}`,
+          input.positionId,
+          input.expectedVersion,
           currentPos.positionVersion
         );
       }
 
-      if (params.fillAmountAtomic > currentPos.tokenAmountAtomic) {
-        throw new Error(
-          `Fill amount ${params.fillAmountAtomic} exceeds current balance ${currentPos.tokenAmountAtomic}`
+      if (input.confirmedActualDebitAtomic < 0n) {
+        throw new ArbitraryBalanceMutationRejectedError(
+          `Confirmed debit atomic cannot be negative: ${input.confirmedActualDebitAtomic}`,
+          input.positionId
         );
       }
 
-      const newAmount = currentPos.tokenAmountAtomic - params.fillAmountAtomic;
-      const isFinal = Boolean(params.isFinal || newAmount === 0n);
+      if (input.confirmedActualDebitAtomic > currentPos.tokenAmountAtomic) {
+        throw new ArbitraryBalanceMutationRejectedError(
+          `Fill debit ${input.confirmedActualDebitAtomic} exceeds current balance ${currentPos.tokenAmountAtomic}`,
+          input.positionId
+        );
+      }
+
+      const newAmount = currentPos.tokenAmountAtomic - input.confirmedActualDebitAtomic;
+      if (newAmount < 0n) {
+        throw new ArbitraryBalanceMutationRejectedError(
+          `Calculated position balance cannot be negative: ${newAmount}`,
+          input.positionId
+        );
+      }
+
+      const isFinal = Boolean(input.isFinal || newAmount === 0n);
       const newStatus: PositionStatus = isFinal ? 'CLOSED' : 'PARTIAL_CLOSED';
       const mutationType: PositionMutationType = isFinal ? 'FINAL_FILL' : 'PARTIAL_FILL';
 
@@ -420,18 +454,18 @@ export class PostgresPositionRepository implements IPositionRepository {
       const updateRes = await client.query(updateSql, [
         newAmount.toString(),
         newStatus,
-        params.proceedsLamports.toString(),
-        params.fillId,
-        params.signature,
-        params.positionId,
-        params.expectedVersion.toString()
+        input.grossProceedsLamports.toString(),
+        input.fillId,
+        input.signature,
+        input.positionId,
+        input.expectedVersion.toString()
       ]);
 
       if (updateRes.rowCount === 0) {
         throw new StalePositionVersionError(
-          `CAS update failed during fill application for position ${params.positionId}`,
-          params.positionId,
-          params.expectedVersion
+          `CAS update failed during fill application for position ${input.positionId}`,
+          input.positionId,
+          input.expectedVersion
         );
       }
 
@@ -452,39 +486,91 @@ export class PostgresPositionRepository implements IPositionRepository {
       `;
 
       const mutationRes = await client.query(mutationSql, [
-        params.positionId,
-        params.expectedVersion.toString(),
+        input.positionId,
+        input.expectedVersion.toString(),
         updatedPos.positionVersion.toString(),
         mutationType,
-        params.fillId,
-        params.signature,
+        input.fillId,
+        input.signature,
         currentPos.tokenAmountAtomic.toString(),
         newAmount.toString(),
-        (-params.fillAmountAtomic).toString(),
-        params.proceedsLamports.toString()
+        (-input.confirmedActualDebitAtomic).toString(),
+        input.grossProceedsLamports.toString()
       ]);
 
       const mutation = this.mapRowToMutation(mutationRes.rows[0]);
 
-      await client.query('COMMIT');
+      if (shouldManageTx) await client.query('COMMIT');
       return {
         position: updatedPos,
         mutation,
         alreadyApplied: false
       };
     } catch (err) {
-      await client.query('ROLLBACK');
+      if (shouldManageTx) await client.query('ROLLBACK');
       throw err;
     } finally {
-      client.release();
+      if (shouldManageTx) client.release();
     }
   }
 
-  public async reconcileExternalBalance(adjustment: ExternalBalanceDivergenceAdjustment): Promise<{
+  public async applyFill(
+    params: ApplyFillParams,
+    externalClient?: PoolClient
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+    alreadyApplied: boolean;
+  }> {
+    return this.applyConfirmedFill({
+      positionId: params.positionId,
+      expectedVersion: params.expectedVersion,
+      fillId: params.fillId,
+      signature: params.signature,
+      confirmedActualDebitAtomic: params.fillAmountAtomic,
+      grossProceedsLamports: params.proceedsLamports,
+      isFinal: params.isFinal
+    }, externalClient);
+  }
+
+  public async applyReconciliationAdjustment(
+    input: ApplyReconciliationAdjustmentInput,
+    externalClient?: PoolClient
+  ): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
   }> {
-    const pos = await this.getPosition(adjustment.positionId);
+    if (!input.evidence || !input.evidence.reason || !input.evidence.source) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Evidence metadata (source and reason) is strictly required for reconciliation adjustment',
+        input.positionId
+      );
+    }
+    if (input.observedBalanceAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Observed balance cannot be negative: ${input.observedBalanceAtomic}`,
+        input.positionId
+      );
+    }
+    const newStatus: PositionStatus = input.observedBalanceAtomic === 0n ? 'CLOSED' : 'OPEN';
+    return this.updatePositionCAS({
+      positionId: input.positionId,
+      expectedVersion: input.expectedVersion,
+      newAmountAtomic: input.observedBalanceAtomic,
+      newStatus,
+      mutationType: 'RECONCILIATION_ADJUSTMENT',
+      reconciliationRequired: false
+    }, externalClient);
+  }
+
+  public async reconcileExternalBalance(
+    adjustment: ExternalBalanceDivergenceAdjustment,
+    externalClient?: PoolClient
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    const pos = await this.getPosition(adjustment.positionId, externalClient);
     if (!pos) {
       throw new PositionNotFoundError(`Position ${adjustment.positionId} not found`, adjustment.positionId);
     }
@@ -504,7 +590,7 @@ export class PostgresPositionRepository implements IPositionRepository {
       newStatus,
       mutationType: 'RECONCILIATION_ADJUSTMENT',
       reconciliationRequired: false
-    });
+    }, externalClient);
   }
 
   public async markReconciliationRequired(
