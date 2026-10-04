@@ -286,6 +286,7 @@ export class SolanaWalletService {
   private keypair: Keypair;
   private connection: Connection;
   private readonly providerAlias: SolanaRpcProviderAlias;
+  private debtChecker?: (mint: string) => boolean;
   public static readonly MAX_TRADE_ALLOCATION_RATIO = 0.10; // Teto de 10%
   public static readonly MIN_GAS_RESERVE_SOL = 0.005; // Reserva intangível para taxas
 
@@ -293,6 +294,10 @@ export class SolanaWalletService {
     this.keypair = this.parseKeypair(config.secretKeyRaw);
     this.connection = new Connection(config.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
     this.providerAlias = config.providerAlias || resolveRpcProviderAlias(config.rpcUrl);
+  }
+
+  public setDebtChecker(checker: (mint: string) => boolean): void {
+    this.debtChecker = checker;
   }
 
   public getProviderAlias(): SolanaRpcProviderAlias {
@@ -812,6 +817,11 @@ export class SolanaWalletService {
         throw new Error(`Programa de token não suportado para ${mintAddress}: ${mintInfo.owner.toBase58()}`);
       }
 
+      if (this.debtChecker && this.debtChecker(mintAddress)) {
+        console.warn(`🛡️ [Wallet:closeTokenAccount] Recusando fechar ATA de ${mintAddress}: possui dívida ou execução não reconciliada.`);
+        return { txSignature: null, success: false };
+      }
+
       const ata = await getAssociatedTokenAddress(mint, owner, false, tokenProgramId);
 
       // Verifica se a conta existe antes de tentar fechar
@@ -822,6 +832,27 @@ export class SolanaWalletService {
       );
       if (!accountInfo) {
         return { txSignature: null, success: true };
+      }
+
+      // Finding 15: Check that actual on-chain token balance is strictly 0
+      if (typeof this.connection.getTokenAccountBalance === 'function') {
+        try {
+          const balanceRes = await this.measureRpcCall(
+            'getTokenAccountBalance',
+            () => this.connection.getTokenAccountBalance(ata),
+            { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+          );
+          if (balanceRes?.value?.amount && balanceRes.value.amount !== '0') {
+            console.warn(`🛡️ [Wallet:closeTokenAccount] Recusando fechar ATA de ${mintAddress}: saldo atômico não é zero (${balanceRes.value.amount}).`);
+            return { txSignature: null, success: false };
+          }
+        } catch (balErr: any) {
+          if (balErr?.message?.includes('could not find account')) {
+            return { txSignature: null, success: true };
+          }
+          console.warn(`⚠️ [Wallet:closeTokenAccount] Falha ao verificar saldo da ATA de ${mintAddress}: ${balErr?.message}`);
+          return { txSignature: null, success: false };
+        }
       }
 
       const closeIx = createCloseAccountInstruction(

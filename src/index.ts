@@ -212,6 +212,8 @@ const layaPositionInFlight = new Set<string>();
 /** Finding P0-05: Exclusão in-process unificada em financialExitSafetyGuard (sem múltiplos universos de lock). */
 /** Mints cujo /execute V2 ficou inconclusivo: bloqueia nova ordem até reinício/reconciliação. */
 const uncertainExitMints = new Set<string>();
+wallet.setDebtChecker((mint) => financialExitSafetyGuard.hasUnresolvedDebt(mint) || uncertainExitMints.has(mint));
+rentRecovery.setDebtChecker((mint) => financialExitSafetyGuard.hasUnresolvedDebt(mint) || uncertainExitMints.has(mint));
 
 /** Circuit breaker em memória: impede novas entradas após uma execução V2 inconclusiva. */
 let executionUncertainReason: string | null = null;
@@ -1834,7 +1836,22 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      await rentRecovery.sweepOrphanAccounts();
+      // Finding 14 & T3-P0-02: NÃO executar sweep indiscriminado de ATAs associadas a
+      // UNKNOWN, SIGNED, SUBMITTED, PENDING_RECONCILIATION ou com dívida durável.
+      const excludedFromSweep = new Set<string>();
+      for (const res of results) {
+        if (res.status !== 'CONFIRMED' || !res.success) {
+          excludedFromSweep.add(res.mint);
+        }
+      }
+      for (const mint of financialExitSafetyGuard.getUnresolvedDebtMints()) {
+        excludedFromSweep.add(mint);
+      }
+      for (const mint of uncertainExitMints) {
+        excludedFromSweep.add(mint);
+      }
+
+      await rentRecovery.sweepOrphanAccounts(undefined, { excludedMints: excludedFromSweep });
       updateDashboardViews();
 
       const pendingCount = results.filter(r => r.status === 'PENDING_RECONCILIATION').length;

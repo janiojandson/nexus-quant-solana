@@ -5,6 +5,7 @@ import {
   TOKEN_PROGRAM_ID,
   TOKEN_2022_PROGRAM_ID
 } from '@solana/spl-token';
+import { financialExitSafetyGuard } from '../execution/financialExitSafetyGuard.js';
 
 export interface SweepResult {
   closedCount: number;
@@ -21,14 +22,29 @@ export interface SplAccountInfo {
   decimals: number;
 }
 
+export type DurableDebtChecker = (mint: string) => boolean;
+
 export class RentRecoveryService {
   private connection: Connection;
   private keypair?: Keypair;
+  private debtChecker?: DurableDebtChecker;
   public static readonly RENT_EXEMPTION_EST_SOL = 0.00204;
 
-  constructor(connection: Connection, keypair?: Keypair) {
+  constructor(connection: Connection, keypair?: Keypair, debtChecker?: DurableDebtChecker) {
     this.connection = connection;
     this.keypair = keypair;
+    this.debtChecker = debtChecker;
+  }
+
+  public setDebtChecker(checker: DurableDebtChecker): void {
+    this.debtChecker = checker;
+  }
+
+  public isDebtBlocked(mint: string): boolean {
+    if (this.debtChecker && this.debtChecker(mint)) {
+      return true;
+    }
+    return financialExitSafetyGuard.hasUnresolvedDebt(mint);
   }
 
   private async getParsedTokenAccountsForSupportedPrograms(): Promise<any[]> {
@@ -107,6 +123,13 @@ export class RentRecoveryService {
       return { success: true, txSignature: 'DRY_RUN_ATA_CLOSED' };
     }
 
+    // Finding 15: Check whether durable execution debt exists for that custody/mint
+    if (this.isDebtBlocked(mintAddress)) {
+      const err = `UNRESOLVED_DURABLE_DEBT: Cannot close ATA for ${mintAddress} while unresolved execution debt exists.`;
+      console.warn(`🛡️ [RentRecoveryService] ${err}`);
+      return { success: false, error: err };
+    }
+
     const mintPubkey = new PublicKey(mintAddress);
     const tokenProgramId = await this.resolveTokenProgram(mintPubkey);
     const ataAddress = getAssociatedTokenAddressSync(
@@ -115,6 +138,25 @@ export class RentRecoveryService {
       false,
       tokenProgramId
     );
+
+    // Finding 15: Check that actual on-chain token balance is strictly 0
+    if (typeof this.connection.getTokenAccountBalance === 'function') {
+      try {
+        const balance = await this.connection.getTokenAccountBalance(ataAddress);
+        if (balance?.value?.amount && balance.value.amount !== '0') {
+          const err = `NON_ZERO_BALANCE: Cannot close ATA for ${mintAddress}, balance is ${balance.value.amount} atomic tokens.`;
+          console.warn(`🛡️ [RentRecoveryService] ${err}`);
+          return { success: false, error: err };
+        }
+      } catch (balanceErr: any) {
+        if (balanceErr?.message?.includes('could not find account')) {
+          return { success: true, txSignature: null };
+        }
+        console.warn(`⚠️ [RentRecoveryService] Não foi possível verificar saldo da ATA de ${mintAddress}: ${balanceErr?.message}`);
+        return { success: false, error: `BALANCE_CHECK_FAILED: ${balanceErr?.message || balanceErr}` };
+      }
+    }
+
     const result = await this.closeAccountAddress(
       ataAddress,
       destinationAddress,
@@ -134,7 +176,10 @@ export class RentRecoveryService {
    * (ATA ou conta SPL auxiliar) e soma os lamports efetivamente presentes nela.
    * Contas com qualquer saldo token são sempre preservadas.
    */
-  public async sweepOrphanAccounts(destinationAddress?: string): Promise<SweepResult> {
+  public async sweepOrphanAccounts(
+    destinationAddress?: string,
+    options?: { excludedMints?: Set<string> }
+  ): Promise<SweepResult> {
     if (!this.keypair) {
       return {
         closedCount: 0,
@@ -153,7 +198,12 @@ export class RentRecoveryService {
       const txSignatures: string[] = [];
       const errors: string[] = [];
 
+      const seenPubkeys = new Set<string>();
       for (const account of accounts) {
+        const pubkeyStr = account.pubkey?.toBase58 ? account.pubkey.toBase58() : String(account.pubkey || '');
+        if (seenPubkeys.has(pubkeyStr)) continue;
+        seenPubkeys.add(pubkeyStr);
+
         const info = account.account.data.parsed?.info;
         if (!info) continue;
 
@@ -161,6 +211,12 @@ export class RentRecoveryService {
         const mint = String(info.mint || '');
         // Nunca arredondar uiAmount para decidir fechamento. Só fecha amount atômico == 0.
         if (amountRaw !== '0' || !mint) continue;
+
+        // Finding 14 & 15: Check durable execution debt and explicit exclusions
+        if (this.isDebtBlocked(mint) || options?.excludedMints?.has(mint)) {
+          console.warn(`🛡️ [RentRecoveryService] Skipping orphan sweep for ${mint}: active execution debt or excluded.`);
+          continue;
+        }
 
         try {
           const rentLamports = Number(account.account.lamports || 0);
