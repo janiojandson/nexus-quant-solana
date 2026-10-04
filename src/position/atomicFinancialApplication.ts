@@ -22,7 +22,7 @@
 import { Pool, PoolClient } from 'pg';
 import { PostgresJournalRepository } from '../journal/postgresRepository.js';
 import { PostgresPositionRepository } from './postgresPositionRepository.js';
-import { FillRecord, StaleEpochError } from '../journal/types.js';
+import { FillRecord, StaleEpochError, assertValidAttemptTransition } from '../journal/types.js';
 import {
   DurablePosition,
   PositionMutationRecord,
@@ -107,6 +107,16 @@ export async function applyConfirmedFillAtomically(
       );
     }
 
+    // Finding 27: Validate signature match between Attempt and Fill
+    if (attemptRow.signature && params.fill.signature) {
+      if (params.fill.signature.trim() !== attemptRow.signature.trim()) {
+        throw new EconomicIdentityMismatchError(
+          `Fill signature (${params.fill.signature}) does not match Attempt signature (${attemptRow.signature})`,
+          { fillSignature: params.fill.signature, attemptSignature: attemptRow.signature }
+        );
+      }
+    }
+
     // 4. Validate Economic Identity (Finding R-P1-01)
     if (intentRow.position_id !== posRow.position_id) {
       throw new EconomicIdentityMismatchError(
@@ -169,12 +179,16 @@ export async function applyConfirmedFillAtomically(
     );
 
     // 7. Apply confirmed fill to position using same shared client
+    // 7. Apply confirmed fill to position using same shared client
     const posRes = await params.positionRepo.applyConfirmedFill(
       {
         positionId: params.fill.positionId,
         expectedVersion: params.expectedPositionVersion,
         fillId: params.fill.id,
         signature: params.fill.signature,
+        chainLegIndex: params.fill.chainLegIndex,
+        instructionIndex: params.fill.instructionIndex,
+        innerInstructionIndex: params.fill.innerInstructionIndex,
         confirmedActualDebitAtomic: BigInt(params.fill.actualAmountAtomic),
         grossProceedsLamports: BigInt(params.fill.grossProceedsLamports),
         evidenceType: params.fill.evidenceType,
@@ -201,9 +215,12 @@ export async function applyConfirmedFillAtomically(
       );
     }
 
+    // Finding 31: Enforce valid attempt transition and do not bypass state machine
+    assertValidAttemptTransition(attemptRow.state, 'CONFIRMED');
+
     await client.query(
       `UPDATE execution_attempts
-       SET state = CASE WHEN state IN ('PREPARED', 'SIGNED', 'SUBMITTED', 'UNKNOWN', 'PROVIDER_RECEIPT') THEN 'CONFIRMED' ELSE state END,
+       SET state = 'CONFIRMED',
            confirmed_at = COALESCE(confirmed_at, NOW())
        WHERE attempt_id = $1`,
       [params.fill.attemptId]

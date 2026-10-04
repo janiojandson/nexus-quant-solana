@@ -829,29 +829,8 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         return { fill: this.mapRowToFill(dupRes.rows[0]), created: false };
       }
 
-      // Update parent intent status: fully filled -> APPLIED, partially filled -> CONFIRMED
-      if (intentRes.rows.length > 0) {
-        const intentRow = intentRes.rows[0];
-        const sumRes = await client.query(
-          `SELECT COALESCE(SUM(actual_amount_atomic), 0) as total_filled FROM fill_ledger WHERE intent_id = $1`,
-          [fill.intentId]
-        );
-        const totalFilled = BigInt(sumRes.rows[0]?.total_filled || 0);
-        const isFullyFilled = totalFilled >= BigInt(intentRow.requested_amount_atomic);
-        if (isFullyFilled) {
-          assertValidIntentTransition(intentRow.status, 'APPLIED');
-          await client.query(
-            "UPDATE exit_intents SET status = 'APPLIED', reconciliation_debt = false WHERE id = $1",
-            [fill.intentId]
-          );
-        } else {
-          assertValidIntentTransition(intentRow.status, 'CONFIRMED');
-          await client.query(
-            "UPDATE exit_intents SET status = 'CONFIRMED' WHERE id = $1",
-            [fill.intentId]
-          );
-        }
-      }
+      // Finding 30: recordFill only records raw observed fill in fill_ledger;
+      // does not move intent to CONFIRMED or APPLIED (reserved for atomic position debit).
 
       if (shouldManageTx) await client.query('COMMIT');
       return { fill: this.mapRowToFill(fillRes.rows[0]), created: true };

@@ -24,9 +24,11 @@ import {
   ApplyFillParams,
   ApplyConfirmedFillInput,
   ApplyReconciliationAdjustmentInput,
+  ReconcilePositionCustodyInput,
   ArbitraryBalanceMutationRejectedError,
   InvalidFinalFillResidualError,
   AdministrativeCorrectionInput,
+  AdministrativeCorrectionWithEvidenceInput,
   ExternalBalanceDivergenceAdjustment,
   StalePositionVersionError,
   ActivePositionConflictError,
@@ -87,6 +89,9 @@ export class PostgresPositionRepository implements IPositionRepository {
       mutationType: row.mutation_type as PositionMutationType,
       fillId: row.fill_id ? String(row.fill_id) : null,
       signature: row.signature ? String(row.signature) : null,
+      chainLegIndex: row.chain_leg_index !== null && row.chain_leg_index !== undefined ? Number(row.chain_leg_index) : 0,
+      instructionIndex: row.instruction_index !== null && row.instruction_index !== undefined ? Number(row.instruction_index) : -1,
+      innerInstructionIndex: row.inner_instruction_index !== null && row.inner_instruction_index !== undefined ? Number(row.inner_instruction_index) : -1,
       tokenAmountBefore: BigInt(row.token_amount_before),
       tokenAmountAfter: BigInt(row.token_amount_after),
       deltaAtomic: BigInt(row.delta_atomic),
@@ -328,12 +333,14 @@ export class PostgresPositionRepository implements IPositionRepository {
       const mutationSql = `
         INSERT INTO nexus_position_mutations_v2 (
           position_id, from_version, to_version, mutation_type,
-          fill_id, signature, token_amount_before, token_amount_after,
+          fill_id, signature, chain_leg_index, instruction_index, inner_instruction_index,
+          token_amount_before, token_amount_after,
           delta_atomic, proceeds_lamports, created_at
         ) VALUES (
           $1, $2, $3, $4,
-          $5, $6, $7, $8,
-          $9, $10, NOW()
+          $5, $6, $7, $8, $9,
+          $10, $11,
+          $12, $13, NOW()
         )
         RETURNING *;
       `;
@@ -345,6 +352,9 @@ export class PostgresPositionRepository implements IPositionRepository {
         params.mutationType,
         params.fillId || null,
         params.signature || null,
+        params.chainLegIndex ?? 0,
+        params.instructionIndex ?? -1,
+        params.innerInstructionIndex ?? -1,
         amountBefore.toString(),
         amountAfter.toString(),
         delta.toString(),
@@ -376,16 +386,31 @@ export class PostgresPositionRepository implements IPositionRepository {
     try {
       if (shouldManageTx) await client.query('BEGIN');
 
-      // 1. Check if fill was already recorded for this position by fill_id OR signature
+      // 1. Check if fill was already recorded for this position by fill_id OR by composite on-chain leg identity
+      const legIndex = input.chainLegIndex ?? 0;
+      const instIndex = input.instructionIndex ?? -1;
+      const innerInstIndex = input.innerInstructionIndex ?? -1;
+
       const checkFillSql = `
         SELECT * FROM nexus_position_mutations_v2
-        WHERE position_id = $1 AND (fill_id = $2 OR (signature IS NOT NULL AND signature = $3))
+        WHERE position_id = $1 AND (
+          fill_id = $2 OR (
+            signature IS NOT NULL
+            AND signature = $3
+            AND chain_leg_index = $4
+            AND instruction_index = $5
+            AND inner_instruction_index = $6
+          )
+        )
         LIMIT 1;
       `;
       const existingRes = await client.query(checkFillSql, [
         input.positionId,
         input.fillId,
-        input.signature || ''
+        input.signature || '',
+        legIndex,
+        instIndex,
+        innerInstIndex
       ]);
       if (existingRes.rows.length > 0) {
         // Fill already applied
@@ -494,12 +519,14 @@ export class PostgresPositionRepository implements IPositionRepository {
       const mutationSql = `
         INSERT INTO nexus_position_mutations_v2 (
           position_id, from_version, to_version, mutation_type,
-          fill_id, signature, token_amount_before, token_amount_after,
+          fill_id, signature, chain_leg_index, instruction_index, inner_instruction_index,
+          token_amount_before, token_amount_after,
           delta_atomic, proceeds_lamports, created_at
         ) VALUES (
           $1, $2, $3, $4,
-          $5, $6, $7, $8,
-          $9, $10, NOW()
+          $5, $6, $7, $8, $9,
+          $10, $11,
+          $12, $13, NOW()
         )
         RETURNING *;
       `;
@@ -511,6 +538,9 @@ export class PostgresPositionRepository implements IPositionRepository {
         mutationType,
         input.fillId,
         input.signature,
+        legIndex,
+        instIndex,
+        innerInstIndex,
         currentPos.tokenAmountAtomic.toString(),
         newAmount.toString(),
         (-input.confirmedActualDebitAtomic).toString(),
@@ -546,6 +576,9 @@ export class PostgresPositionRepository implements IPositionRepository {
       expectedVersion: params.expectedVersion,
       fillId: params.fillId,
       signature: params.signature,
+      chainLegIndex: params.chainLegIndex,
+      instructionIndex: params.instructionIndex,
+      innerInstructionIndex: params.innerInstructionIndex,
       confirmedActualDebitAtomic: params.fillAmountAtomic,
       grossProceedsLamports: params.proceedsLamports,
       isFinal: params.isFinal
@@ -658,22 +691,89 @@ export class PostgresPositionRepository implements IPositionRepository {
         input.positionId
       );
     }
+    if (!input.evidence || input.evidence.trim().length === 0) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Evidence is strictly required for explicit administrative correction',
+        input.positionId
+      );
+    }
     if (input.newAmountAtomic < 0n) {
       throw new ArbitraryBalanceMutationRejectedError(
         `Position amount cannot be negative: ${input.newAmountAtomic}`,
         input.positionId
       );
     }
-    const newStatus: PositionStatus = input.newAmountAtomic === 0n ? 'CLOSED' : 'OPEN';
-    return this.updatePositionCAS({
-      positionId: input.positionId,
-      expectedVersion: input.expectedVersion,
-      newAmountAtomic: input.newAmountAtomic,
-      newStatus,
-      mutationType: 'MANUAL_CORRECTION',
-      signature: input.signature || null,
-      reconciliationRequired: false
-    }, externalClient);
+
+    const client = externalClient ?? await this.pool.connect();
+    const shouldManageTx = !externalClient;
+
+    try {
+      if (shouldManageTx) await client.query('BEGIN');
+
+      const currentPos = await this.getPosition(input.positionId, client);
+      if (!currentPos) {
+        throw new PositionNotFoundError(`Position ${input.positionId} not found`, input.positionId);
+      }
+      const beforeState = currentPos.tokenAmountAtomic.toString();
+      const afterState = input.newAmountAtomic.toString();
+
+      const newStatus: PositionStatus = input.newAmountAtomic === 0n ? 'CLOSED' : 'OPEN';
+      const result = await this.updatePositionCAS({
+        positionId: input.positionId,
+        expectedVersion: input.expectedVersion,
+        newAmountAtomic: input.newAmountAtomic,
+        newStatus,
+        mutationType: 'MANUAL_CORRECTION',
+        signature: input.signature || null,
+        reconciliationRequired: false
+      }, client);
+
+      const eventId = `audit-admin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await client.query(
+        `INSERT INTO system_audit_events (
+          event_id, actor, reason, mutation_class, entity_type, entity_id, before_state, after_state, correlation_id, created_at
+        ) VALUES (
+          $1, $2, $3, 'FINANCIAL_STATE_MUTATION', 'Position', $4, $5, $6, $7, NOW()
+        );`,
+        [
+          eventId,
+          input.actor,
+          `${input.reason} [evidence: ${input.evidence}]`,
+          input.positionId,
+          beforeState,
+          afterState,
+          input.signature || null
+        ]
+      );
+
+      if (shouldManageTx) await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      if (shouldManageTx) await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      if (shouldManageTx) client.release();
+    }
+  }
+
+  public async administrativeCorrectionWithEvidence(
+    input: AdministrativeCorrectionWithEvidenceInput,
+    externalClient?: PoolClient
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    return this.applyExplicitAdministrativeCorrection(input, externalClient);
+  }
+
+  public async reconcilePositionCustody(
+    input: ReconcilePositionCustodyInput,
+    externalClient?: PoolClient
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    return this.applyReconciliationAdjustment(input, externalClient);
   }
 }
 

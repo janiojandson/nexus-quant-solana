@@ -15,6 +15,7 @@ import {
   ApplyFillParams,
   ApplyConfirmedFillInput,
   ApplyReconciliationAdjustmentInput,
+  ReconcilePositionCustodyInput,
   ArbitraryBalanceMutationRejectedError,
   ExternalBalanceDivergenceAdjustment,
   StalePositionVersionError,
@@ -23,8 +24,11 @@ import {
   PositionNotFoundError,
   InvalidFinalFillResidualError,
   AdministrativeCorrectionInput,
+  AdministrativeCorrectionWithEvidenceInput,
   DEFAULT_TOKEN_PROGRAM_ID
 } from './types.js';
+import { SystemAuditEvent } from '../journal/types.js';
+import { nowWallMs } from '../types/telemetry.js';
 
 export interface IPositionRepository {
   createPosition(input: CreatePositionInput, client?: any): Promise<DurablePosition>;
@@ -36,10 +40,7 @@ export interface IPositionRepository {
     client?: any
   ): Promise<DurablePosition | null>;
   getAllPositions(filter?: { walletId?: string; status?: PositionStatus }): Promise<DurablePosition[]>;
-  updatePositionCAS(params: UpdatePositionCASParams, client?: any): Promise<{
-    position: DurablePosition;
-    mutation: PositionMutationRecord;
-  }>;
+  // NOTE: updatePositionCAS removed from public interface per Finding 32 / P1-07
   applyFill(params: ApplyFillParams, client?: any): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
@@ -54,8 +55,19 @@ export interface IPositionRepository {
     position: DurablePosition;
     mutation: PositionMutationRecord;
   }>;
+  reconcilePositionCustody(input: ReconcilePositionCustodyInput, client?: any): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }>;
   applyExplicitAdministrativeCorrection(
     input: AdministrativeCorrectionInput,
+    client?: any
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }>;
+  administrativeCorrectionWithEvidence(
+    input: AdministrativeCorrectionWithEvidenceInput,
     client?: any
   ): Promise<{
     position: DurablePosition;
@@ -77,7 +89,8 @@ export class InMemoryPositionRepository implements IPositionRepository {
   private positions = new Map<string, DurablePosition>();
   private mutations: PositionMutationRecord[] = [];
   private fillMutationKeys = new Set<string>(); // "positionId:fillId"
-  private signatureMutationKeys = new Set<string>(); // "positionId:signature"
+  private legMutationKeys = new Set<string>(); // "positionId:signature:chainLegIndex:instructionIndex:innerInstructionIndex"
+  private auditEvents: SystemAuditEvent[] = [];
 
   public async createPosition(input: CreatePositionInput): Promise<DurablePosition> {
     const tokenProgram = input.tokenProgram || DEFAULT_TOKEN_PROGRAM_ID;
@@ -244,7 +257,8 @@ export class InMemoryPositionRepository implements IPositionRepository {
     }
     if (params.signature) {
       pos.lastChainSignature = params.signature;
-      this.signatureMutationKeys.add(`${pos.positionId}:${params.signature}`);
+      const legKey = `${pos.positionId}:${params.signature}:${params.chainLegIndex ?? 0}:${params.instructionIndex ?? -1}:${params.innerInstructionIndex ?? -1}`;
+      this.legMutationKeys.add(legKey);
     }
     if (params.reconciliationRequired !== undefined) {
       pos.reconciliationRequired = params.reconciliationRequired;
@@ -258,6 +272,9 @@ export class InMemoryPositionRepository implements IPositionRepository {
       mutationType: params.mutationType,
       fillId: params.fillId ?? null,
       signature: params.signature ?? null,
+      chainLegIndex: params.chainLegIndex ?? 0,
+      instructionIndex: params.instructionIndex ?? -1,
+      innerInstructionIndex: params.innerInstructionIndex ?? -1,
       tokenAmountBefore: amountBefore,
       tokenAmountAfter: amountAfter,
       deltaAtomic: delta,
@@ -282,13 +299,25 @@ export class InMemoryPositionRepository implements IPositionRepository {
       throw new PositionNotFoundError(`Position ${input.positionId} not found`, input.positionId);
     }
 
-    // Idempotency: verify if this fill was already applied to this position by fillId OR by signature
+    // Idempotency: verify if this fill was already applied to this position by fillId OR by composite leg identity
+    const legIndex = input.chainLegIndex ?? 0;
+    const instIndex = input.instructionIndex ?? -1;
+    const innerInstIndex = input.innerInstructionIndex ?? -1;
     const fillKey = `${input.positionId}:${input.fillId}`;
-    const sigKey = input.signature ? `${input.positionId}:${input.signature}` : null;
-    if (this.fillMutationKeys.has(fillKey) || (sigKey && this.signatureMutationKeys.has(sigKey))) {
+    const legKey = input.signature
+      ? `${input.positionId}:${input.signature}:${legIndex}:${instIndex}:${innerInstIndex}`
+      : null;
+
+    if (this.fillMutationKeys.has(fillKey) || (legKey && this.legMutationKeys.has(legKey))) {
       const existing = this.mutations.find(
         m => m.positionId === input.positionId && (
-          m.fillId === input.fillId || (input.signature && m.signature === input.signature)
+          m.fillId === input.fillId || (
+            input.signature &&
+            m.signature === input.signature &&
+            (m.chainLegIndex ?? 0) === legIndex &&
+            (m.instructionIndex ?? -1) === instIndex &&
+            (m.innerInstructionIndex ?? -1) === innerInstIndex
+          )
         )
       );
       if (existing) {
@@ -352,6 +381,9 @@ export class InMemoryPositionRepository implements IPositionRepository {
       proceedsDeltaLamports: input.grossProceedsLamports,
       fillId: input.fillId,
       signature: input.signature,
+      chainLegIndex: legIndex,
+      instructionIndex: instIndex,
+      innerInstructionIndex: innerInstIndex,
       mutationType
     });
 
@@ -372,6 +404,9 @@ export class InMemoryPositionRepository implements IPositionRepository {
       expectedVersion: params.expectedVersion,
       fillId: params.fillId,
       signature: params.signature,
+      chainLegIndex: params.chainLegIndex,
+      instructionIndex: params.instructionIndex,
+      innerInstructionIndex: params.innerInstructionIndex,
       confirmedActualDebitAtomic: params.fillAmountAtomic,
       grossProceedsLamports: params.proceedsLamports,
       isFinal: params.isFinal
@@ -502,14 +537,28 @@ export class InMemoryPositionRepository implements IPositionRepository {
         input.positionId
       );
     }
+    if (!input.evidence || input.evidence.trim().length === 0) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Evidence is strictly required for explicit administrative correction',
+        input.positionId
+      );
+    }
     if (input.newAmountAtomic < 0n) {
       throw new ArbitraryBalanceMutationRejectedError(
         `Position amount cannot be negative: ${input.newAmountAtomic}`,
         input.positionId
       );
     }
+
+    const pos = this.positions.get(input.positionId);
+    if (!pos) {
+      throw new PositionNotFoundError(`Position ${input.positionId} not found`, input.positionId);
+    }
+    const beforeState = pos.tokenAmountAtomic.toString();
+    const afterState = input.newAmountAtomic.toString();
+
     const newStatus: PositionStatus = input.newAmountAtomic === 0n ? 'CLOSED' : 'OPEN';
-    return this.updatePositionCAS({
+    const res = await this.updatePositionCAS({
       positionId: input.positionId,
       expectedVersion: input.expectedVersion,
       newAmountAtomic: input.newAmountAtomic,
@@ -518,6 +567,44 @@ export class InMemoryPositionRepository implements IPositionRepository {
       signature: input.signature || null,
       reconciliationRequired: false
     });
+
+    this.auditEvents.push({
+      eventId: `audit-admin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      actor: input.actor,
+      reason: `${input.reason} [evidence: ${input.evidence}]`,
+      mutationClass: 'FINANCIAL_STATE_MUTATION',
+      entityType: 'Position',
+      entityId: input.positionId,
+      beforeState,
+      afterState,
+      correlationId: input.signature || undefined,
+      createdAtWallMs: nowWallMs()
+    });
+
+    return res;
+  }
+
+  public async administrativeCorrectionWithEvidence(
+    input: AdministrativeCorrectionWithEvidenceInput
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    return this.applyExplicitAdministrativeCorrection(input);
+  }
+
+  public async reconcilePositionCustody(
+    input: ReconcilePositionCustodyInput
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    return this.applyReconciliationAdjustment(input);
+  }
+
+  public getSystemAuditEvents(entityId?: string): SystemAuditEvent[] {
+    if (!entityId) return [...this.auditEvents];
+    return this.auditEvents.filter(e => e.entityId === entityId);
   }
 
   public getMutations(positionId?: string): PositionMutationRecord[] {
@@ -529,5 +616,7 @@ export class InMemoryPositionRepository implements IPositionRepository {
     this.positions.clear();
     this.mutations = [];
     this.fillMutationKeys.clear();
+    this.legMutationKeys.clear();
+    this.auditEvents = [];
   }
 }

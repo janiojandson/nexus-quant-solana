@@ -121,7 +121,8 @@ test('Nexus V2.3-R2 — Economic Identity & Final Balance Invariants', async (t)
         expectedVersion: 1n,
         newAmountAtomic: 800n,
         actor: '',
-        reason: 'Manual custody adjustment'
+        reason: 'Manual custody adjustment',
+        evidence: 'solana-explorer:tx-settlement-proof'
       }),
       ArbitraryBalanceMutationRejectedError
     );
@@ -133,21 +134,39 @@ test('Nexus V2.3-R2 — Economic Identity & Final Balance Invariants', async (t)
         expectedVersion: 1n,
         newAmountAtomic: 800n,
         actor: 'operator_1',
-        reason: '   '
+        reason: '   ',
+        evidence: 'solana-explorer:tx-settlement-proof'
       }),
       ArbitraryBalanceMutationRejectedError
     );
 
-    // Valid administrative correction succeeds
+    // Empty evidence rejected (Finding 33)
+    await assert.rejects(
+      () => memRepo.applyExplicitAdministrativeCorrection({
+        positionId: pos.positionId,
+        expectedVersion: 1n,
+        newAmountAtomic: 800n,
+        actor: 'operator_1',
+        reason: 'Manual custody adjustment',
+        evidence: ''
+      }),
+      ArbitraryBalanceMutationRejectedError
+    );
+
+    // Valid administrative correction succeeds with evidence and audit
     const correctionRes = await memRepo.applyExplicitAdministrativeCorrection({
       positionId: pos.positionId,
       expectedVersion: 1n,
       newAmountAtomic: 800n,
       actor: 'lead_operator',
-      reason: 'On-chain manual settlement synchronization'
+      reason: 'On-chain manual settlement synchronization',
+      evidence: 'solana-explorer:tx-settlement-proof'
     });
     assert.strictEqual(correctionRes.position.tokenAmountAtomic, 800n);
     assert.strictEqual(correctionRes.mutation.mutationType, 'MANUAL_CORRECTION');
+    const audits = memRepo.getSystemAuditEvents(pos.positionId);
+    assert.strictEqual(audits.length, 1);
+    assert.strictEqual(audits[0].actor, 'lead_operator');
   });
 
   // 3. PostgreSQL tests (R-P1-01 and R-P1-03 on real DB)

@@ -656,21 +656,8 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     this.fills.set(fill.id, { ...fill });
     this.fillsByOnChainIdentity.set(onChainKey, fill.id);
 
-    // Update parent intent status: fully filled -> APPLIED, partially filled -> CONFIRMED
-    if (intent) {
-      const fillsForIntent = Array.from(this.fills.values()).filter(f => f.intentId === fill.intentId);
-      const totalFilledAtomic = fillsForIntent.reduce((sum, f) => sum + BigInt(f.actualAmountAtomic), 0n);
-      const isFullyFilled = totalFilledAtomic >= BigInt(intent.requestedAmountAtomic);
-      if (isFullyFilled) {
-        assertValidIntentTransition(intent.status, 'APPLIED');
-        intent.status = 'APPLIED';
-        intent.reconciliationDebt = false;
-      } else {
-        assertValidIntentTransition(intent.status, 'CONFIRMED');
-        intent.status = 'CONFIRMED';
-      }
-    }
-
+    // Finding 30: recordFill only records raw observed fill in fill_ledger;
+    // does not move intent to CONFIRMED or APPLIED (reserved for atomic position debit).
     return { fill: { ...fill }, created: true };
   }
 

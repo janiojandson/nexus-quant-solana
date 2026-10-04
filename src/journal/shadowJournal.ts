@@ -119,7 +119,7 @@ export async function reconstructIncidentJournal(
 
     await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 60_000 });
 
-    // 2. Attempt 1 & Fill 1: PARTIAL EXIT
+    // 2. Prepare both attempts while intent is in eligible CLAIMED state
     const attPartial = await repo.prepareAttempt({
       attemptId: syntheticReplayId('attempt', incidentKey, 'partial') as any,
       intentId: intentRes.intent.id,
@@ -128,6 +128,15 @@ export async function reconstructIncidentJournal(
       initialState: 'ORDER_READY'
     }, 1);
 
+    const attFinal = await repo.prepareAttempt({
+      attemptId: syntheticReplayId('attempt', incidentKey, 'final') as any,
+      intentId: intentRes.intent.id,
+      provider: 'JUPITER_V2',
+      requestedAmountAtomic: finalTokens,
+      initialState: 'ORDER_READY'
+    }, 1);
+
+    // 3. Confirm Attempt 1 & Fill 1: PARTIAL EXIT
     await repo.updateAttemptState(attPartial.attemptId, 'SUBMITTED', { signature: partialTx.signature as any }, 1);
     await repo.updateAttemptState(attPartial.attemptId, 'CONFIRMED', {}, 1);
 
@@ -156,15 +165,7 @@ export async function reconstructIncidentJournal(
       createdAtWallMs: 1_700_000_000_000 as any
     }, 1);
 
-    // 3. Attempt 2 & Fill 2: FINAL EXIT
-    const attFinal = await repo.prepareAttempt({
-      attemptId: syntheticReplayId('attempt', incidentKey, 'final') as any,
-      intentId: intentRes.intent.id,
-      provider: 'JUPITER_V2',
-      requestedAmountAtomic: finalTokens,
-      initialState: 'ORDER_READY'
-    }, 1);
-
+    // 4. Confirm Attempt 2 & Fill 2: FINAL EXIT
     await repo.updateAttemptState(attFinal.attemptId, 'SUBMITTED', { signature: finalTx.signature as any }, 1);
     await repo.updateAttemptState(attFinal.attemptId, 'CONFIRMED', {}, 1);
 
@@ -205,6 +206,12 @@ export async function reconstructIncidentJournal(
     const accPartial = applyFillToAccounting(initialAcc, fillPartial.fill);
     const finalAcc = applyFillToAccounting(accPartial, fillFinal.fill);
     const totalProceeds = BigInt(partialProceeds) + BigInt(finalProceeds);
+
+    if (repo.releaseTerminalIntent) {
+      await repo.releaseTerminalIntent(intentRes.intent.id, 'APPLIED', 1);
+    } else {
+      (intentRes.intent as any).status = 'APPLIED';
+    }
 
     return {
       incidentId,
@@ -279,6 +286,20 @@ export async function reconstructIncidentJournal(
     initialState: 'ORDER_READY'
   }, 1);
 
+  // 3. Eventual Confirmed on-chain transaction & fill prepared before timeout moves intent to UNKNOWN
+  const finalProceedsLamports = String(Math.round(expected.finalProceedsSol * 1e9)); // '3183856'
+  const databaseRecordedLamports = String(Math.round(expected.databaseRecordedExitSol * 1e9)); // '10301000'
+  const divergenceLamports = BigInt(databaseRecordedLamports) - BigInt(finalProceedsLamports); // 7117144n
+  const rentRecovered = ataTx?.walletDelta ? BigInt(Math.round(ataTx.walletDelta * 1e9)) : 1508840n;
+
+  const attFinal = await repo.prepareAttempt({
+    attemptId: syntheticReplayId('attempt', 'superpig', 'final_confirmed') as any,
+    intentId: intentRes.intent.id,
+    provider: 'JUPITER_V2',
+    requestedAmountAtomic: boughtTokens,
+    initialState: 'ORDER_READY'
+  }, 1);
+
   await repo.updateAttemptState(attTimeout.attemptId, 'SUBMITTED', {
     signature: 'unconfirmed_tx_signature_placeholder' as any
   }, 1);
@@ -303,20 +324,6 @@ export async function reconstructIncidentJournal(
   });
 
   attempts.push((await repo.getAttemptById(attTimeout.attemptId))!);
-
-  // 3. Eventual Confirmed on-chain transaction & fill
-  const finalProceedsLamports = String(Math.round(expected.finalProceedsSol * 1e9)); // '3183856'
-  const databaseRecordedLamports = String(Math.round(expected.databaseRecordedExitSol * 1e9)); // '10301000'
-  const divergenceLamports = BigInt(databaseRecordedLamports) - BigInt(finalProceedsLamports); // 7117144n
-  const rentRecovered = ataTx?.walletDelta ? BigInt(Math.round(ataTx.walletDelta * 1e9)) : 1508840n;
-
-  const attFinal = await repo.prepareAttempt({
-    attemptId: syntheticReplayId('attempt', 'superpig', 'final_confirmed') as any,
-    intentId: intentRes.intent.id,
-    provider: 'JUPITER_V2',
-    requestedAmountAtomic: boughtTokens,
-    initialState: 'ORDER_READY'
-  }, 1);
 
   await repo.updateAttemptState(attFinal.attemptId, 'SUBMITTED', {
     signature: (finalExitTx?.signature || expected.finalExitTxSignature) as any

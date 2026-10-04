@@ -166,15 +166,6 @@ export async function recordLiveExitIntent(input: LiveExitAttemptInput): Promise
 
     const claimEpoch = claimed?.claimEpoch ?? 1n;
 
-    // Immediately record durable reconciliation debt before network broadcast
-    try {
-      if (repo.markReconciliationDebt) {
-        await repo.markReconciliationDebt(intent.id, true, claimEpoch);
-      }
-    } catch {
-      // In-memory repo or custom repo fallback
-    }
-
     const attemptId = `SAFETY:att_${input.mint.slice(0, 8)}_${Date.now()}` as ExecutionAttemptId;
 
     await repo.prepareAttempt({
@@ -185,6 +176,15 @@ export async function recordLiveExitIntent(input: LiveExitAttemptInput): Promise
       requestedAmountAtomic: String(input.requestedAmountAtomic),
       initialState: 'ORDER_READY'
     }, claimEpoch);
+
+    // Immediately record durable reconciliation debt before network broadcast
+    try {
+      if (repo.markReconciliationDebt) {
+        await repo.markReconciliationDebt(intent.id, true, claimEpoch);
+      }
+    } catch {
+      // In-memory repo or custom repo fallback
+    }
 
     const record: LiveAttemptRecord = {
       intentId: intent.id,

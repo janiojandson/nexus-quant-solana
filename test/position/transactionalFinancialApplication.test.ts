@@ -265,9 +265,16 @@ test('Nexus V2.3-R — Transactional Financial Application & Custody Policy (R4)
         intentId: intent.id,
         provider: 'JUPITER_V2',
         requestedAmountAtomic: '2000',
-        initialState: 'ORDER_READY',
-        nowMs: baseTime
       }, claimed!.claimEpoch);
+
+      await journalRepo.updateAttemptState(
+        attempt.attemptId,
+        'SUBMITTED',
+        { signature: `sig_atomic_${Date.now()}` as any },
+        claimed!.claimEpoch
+      );
+
+      const latestAttempt = (await journalRepo.getAttemptById(attempt.attemptId))!;
 
       const fillPayload: FillRecord = {
         id: `fill_atomic_${Date.now()}` as any,
@@ -275,7 +282,7 @@ test('Nexus V2.3-R — Transactional Financial Application & Custody Policy (R4)
         positionId: testPosId as any,
         intentId: intent.id,
         attemptId: attempt.attemptId,
-        signature: `sig_atomic_${Date.now()}` as any,
+        signature: latestAttempt.signature!,
         realizationSequence: 1,
         chainLegIndex: 0,
         instructionIndex: 3,

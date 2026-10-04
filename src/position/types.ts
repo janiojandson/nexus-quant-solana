@@ -95,6 +95,9 @@ export interface PositionMutationRecord {
   readonly mutationType: PositionMutationType;
   readonly fillId?: string | null;
   readonly signature?: string | null;
+  readonly chainLegIndex?: number;
+  readonly instructionIndex?: number;
+  readonly innerInstructionIndex?: number;
   readonly tokenAmountBefore: bigint;
   readonly tokenAmountAfter: bigint;
   readonly deltaAtomic: bigint;
@@ -125,6 +128,9 @@ export interface UpdatePositionCASParams {
   proceedsDeltaLamports?: bigint;
   fillId?: string | null;
   signature?: string | null;
+  chainLegIndex?: number;
+  instructionIndex?: number;
+  innerInstructionIndex?: number;
   mutationType: PositionMutationType;
   reconciliationRequired?: boolean;
 }
@@ -134,6 +140,9 @@ export interface ApplyFillParams {
   expectedVersion: PositionVersion;
   fillId: string;
   signature: string;
+  chainLegIndex?: number;
+  instructionIndex?: number;
+  innerInstructionIndex?: number;
   fillAmountAtomic: bigint;
   proceedsLamports: bigint;
   isFinal?: boolean;
@@ -232,6 +241,7 @@ export interface AdministrativeCorrectionInput {
   newAmountAtomic: bigint;
   actor: string;
   reason: string;
+  evidence: string;
   signature?: string;
 }
 
@@ -241,6 +251,9 @@ export interface ApplyConfirmedFillInput {
   expectedVersion: PositionVersion;
   fillId: string;
   signature: string;
+  chainLegIndex?: number;
+  instructionIndex?: number;
+  innerInstructionIndex?: number;
   confirmedActualDebitAtomic: bigint;
   grossProceedsLamports: bigint;
   evidenceType?: string;
@@ -261,6 +274,9 @@ export interface ApplyReconciliationAdjustmentInput {
   observedBalanceAtomic: bigint;
   evidence: ReconciliationEvidenceMetadata;
 }
+
+export type AdministrativeCorrectionWithEvidenceInput = AdministrativeCorrectionInput;
+export type ReconcilePositionCustodyInput = ApplyReconciliationAdjustmentInput;
 
 /**
  * Creates an immutable PositionSnapshot from a DurablePosition.
