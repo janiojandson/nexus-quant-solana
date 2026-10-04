@@ -422,3 +422,29 @@ test('Jupiter V2: saída explícita preserva slippage 500bps', async () => {
   assert.strictEqual(result.status, 'SUCCESS');
   assert.strictEqual(seenParams.slippageBps, 500);
 });
+
+test('RTSE over cap requests exactly one fresh capped order before simulation', async () => {
+ const seen: any[] = [];
+ axios.get = (async (_url:string, config:any) => {
+   seen.push({...config.params});
+   return {data:{transaction:buildSwapTransactionB64(testSigner),requestId:'capped-'+seen.length,
+    inAmount:String(baseRequest.amountLamports),outAmount:'987654',slippageBps:seen.length===1?1000:500}};
+ }) as any;
+ const {conn,state}=makeConnection({err:null});
+ const result=await makeEngine(conn).simulateSwap({...baseRequest,maxAutoSlippageBps:500});
+ assert.strictEqual(result.success,true);
+ assert.strictEqual(seen.length,2);
+ assert.strictEqual(seen[0].slippageBps,undefined);
+ assert.strictEqual(seen[1].slippageBps,500);
+ assert.strictEqual(state.simulateCalls,1);
+});
+test('capped replacement rejected if provider ignores cap; no simulation or execution', async () => {
+ let getCalls=0,postCalls=0;
+ axios.get=(async()=>{getCalls++;return {data:{transaction:buildSwapTransactionB64(testSigner),requestId:'unsafe',slippageBps:1000}};}) as any;
+ axios.post=(async()=>{postCalls++;throw Error('never');}) as any;
+ const {conn,state}=makeConnection({err:null});
+ const result=await makeEngine(conn).simulateSwap(baseRequest);
+ assert.strictEqual(result.success,false);assert.strictEqual(getCalls,2);
+ assert.strictEqual(state.simulateCalls,0);assert.strictEqual(postCalls,0);
+ assert.match(result.error||'',/hard-cap/);
+});

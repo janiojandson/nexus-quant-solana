@@ -138,7 +138,7 @@ describe('Escada adaptativa sob erro 6014 (SlippageExceeded)', () => {
     const msg = res.error || '';
     assert.match(msg, /SIMULATION_REJECTED/);
     assert.match(msg, /6014/);
-    assert.match(msg, /profundidade insuficiente/i);
+    assert.doesNotMatch(msg, /profundidade insuficiente|SlippageExceeded/i);
     // A mensagem antiga era enganosa: dizia que o Price Impact não atingiu o teto
     assert.doesNotMatch(msg, /nenhum lote.*atingiu Price Impact/i);
   });
