@@ -511,6 +511,94 @@ export class SolanaWalletService {
   }
 
   /**
+   * Reconciles a transaction strictly by its EXACT signature (Finding R-P0-03).
+   * It never scans arbitrary wallet transactions to avoid attributing third-party
+   * transactions (transfers, airdrops, other swaps) to this execution attempt.
+   */
+  public async reconcileExactTransaction(params: {
+    signature: string;
+    mintAddress: string;
+    expectedOwner?: string;
+    direction?: 'IN' | 'OUT' | 'ANY';
+    context?: { traceId?: string; tradeId?: TradeId };
+  }): Promise<{
+    signature: string;
+    deltaAtomic: string;
+    walletLamportDelta: number;
+    feeLamports: number;
+    blockTimeMs: number;
+    success: boolean;
+    error?: string;
+  } | null> {
+    if (!params.signature || params.signature.trim() === '') {
+      return null;
+    }
+
+    try {
+      const owner = params.expectedOwner || this.keypair.publicKey.toBase58();
+      const tx = await this.measureRpcCall(
+        'getParsedTransaction',
+        () => this.connection.getParsedTransaction(params.signature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0
+        }),
+        { commitment: 'confirmed', traceId: params.context?.traceId, tradeId: params.context?.tradeId }
+      );
+
+      if (!tx) {
+        return null; // Not found on-chain yet or dropped
+      }
+
+      if (tx.meta?.err) {
+        return {
+          signature: params.signature,
+          deltaAtomic: '0',
+          walletLamportDelta: 0,
+          feeLamports: Number(tx.meta.fee || 0),
+          blockTimeMs: Number(tx.blockTime || 0) * 1000,
+          success: false,
+          error: `Transaction failed on-chain: ${JSON.stringify(tx.meta.err)}`
+        };
+      }
+
+      const sumForOwner = (balances: any[] | null | undefined): bigint => {
+        let total = 0n;
+        for (const balance of balances || []) {
+          if (balance?.mint !== params.mintAddress || balance?.owner !== owner) continue;
+          const raw = String(balance?.uiTokenAmount?.amount ?? '0');
+          if (/^\d+$/.test(raw)) total += BigInt(raw);
+        }
+        return total;
+      };
+
+      const delta = sumForOwner(tx.meta?.postTokenBalances) - sumForOwner(tx.meta?.preTokenBalances);
+      const direction = params.direction || 'ANY';
+      if (direction === 'IN' && delta <= 0n) return null;
+      if (direction === 'OUT' && delta >= 0n) return null;
+
+      const accountKeys = tx.transaction.message.accountKeys.map((key: any) =>
+        key.pubkey?.toBase58 ? key.pubkey.toBase58() : String(key.pubkey || key)
+      );
+      const ownerIndex = accountKeys.indexOf(owner);
+      const walletLamportDelta = ownerIndex >= 0 && tx.meta?.postBalances && tx.meta?.preBalances
+        ? Number(tx.meta.postBalances[ownerIndex] - tx.meta.preBalances[ownerIndex])
+        : 0;
+
+      return {
+        signature: params.signature,
+        deltaAtomic: delta.toString(),
+        walletLamportDelta,
+        feeLamports: Number(tx.meta?.fee || 0),
+        blockTimeMs: Number(tx.blockTime || 0) * 1000,
+        success: true
+      };
+    } catch (err: any) {
+      console.warn(`⚠️ [Wallet:ReconcileExact] Falha ao consultar assinatura ${params.signature}: ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  /**
    * Reconcilia uma execução V2 cuja resposta HTTP ficou incerta.
    * Procura transações recentes da própria wallet e devolve o delta real do mint.
    * Não transmite nada.

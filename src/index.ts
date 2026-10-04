@@ -205,13 +205,19 @@ const jupiterEngine = new JupiterExecutionEngine({
 const pumpSellExecutor = new PumpSellExecutor(
   wallet.getConnection() as any,
   {
-    reconcileRecentSell: async (mintAddress, sinceTimestampMs, expectedAmountAtomic) => {
-      const found = await wallet.findRecentTokenDeltaTransaction(
+    reconcileRecentSell: async (mintAddress, sinceTimestampMs, expectedAmountAtomic, signature) => {
+      if (!signature || signature.trim() === '') {
+        // Finding R-P0-03: Proibido procurar transações aleatórias da wallet.
+        // Sem assinatura comprovada da tentativa, o resultado é UNKNOWN / null.
+        return null;
+      }
+      const found = await wallet.reconcileExactTransaction({
+        signature,
         mintAddress,
-        sinceTimestampMs,
-        'OUT'
-      );
-      if (!found) return null;
+        expectedOwner: OFFICIAL_PHANTOM_WALLET,
+        direction: 'OUT'
+      });
+      if (!found || !found.success) return null;
       const soldAtomic = BigInt(found.deltaAtomic) < 0n
         ? -BigInt(found.deltaAtomic)
         : BigInt(found.deltaAtomic);
@@ -231,25 +237,30 @@ const exitRouter = new ExitRouter({
   pumpFallbackEnabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED
 });
 
-async function reconcileUncertainV2Execution(
+// Finding R-P0-03: Proibido reconciliar escaneando transações recentes arbitrárias da wallet.
+// Toda reconciliação deve ser orientada à assinatura exata da tentativa.
+async function reconcileExactSignatureWithRetries(
+  signature: string | undefined,
   mint: string,
-  sinceTimestampMs: number,
   direction: 'IN' | 'OUT',
   attempts = 4
 ) {
+  if (!signature || signature.trim() === '' || signature.startsWith('dry_run_')) return null;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    const found = await wallet.findRecentTokenDeltaTransaction(
-      mint,
-      sinceTimestampMs,
+    const found = await wallet.reconcileExactTransaction({
+      signature,
+      mintAddress: mint,
+      expectedOwner: OFFICIAL_PHANTOM_WALLET,
       direction
-    );
-    if (found) return found;
+    });
+    if (found && found.success) return found;
     if (attempt < attempts - 1) {
       await new Promise(resolve => setTimeout(resolve, 1_500));
     }
   }
   return null;
 }
+
 
 const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
@@ -691,36 +702,39 @@ async function executeExitOrderUnlocked(
   }
 
   if (exitSwap.status === 'SUBMITTED_UNCONFIRMED') {
-    console.warn(
-      `⚠️ [Jupiter V2: RECONCILIAÇÃO] ${pos.symbol}: resposta /execute inconclusiva; ` +
-      'procurando delta confirmado na wallet antes de qualquer nova ordem.'
-    );
-    const reconciled = await reconcileUncertainV2Execution(
-      pos.mint,
-      exitAttemptStartedAt,
-      'OUT'
-    );
+    if (exitSwap.txSignature && !exitSwap.txSignature.startsWith('dry_run_')) {
+      console.warn(
+        `⚠️ [Jupiter V2: RECONCILIAÇÃO] ${pos.symbol}: resposta /execute inconclusiva; ` +
+        `consultando assinatura exata ${exitSwap.txSignature} on-chain.`
+      );
+      const reconciled = await wallet.reconcileExactTransaction({
+        signature: exitSwap.txSignature,
+        mintAddress: pos.mint,
+        expectedOwner: OFFICIAL_PHANTOM_WALLET,
+        direction: 'OUT'
+      });
 
-    if (reconciled) {
-      const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
-      if (Number.isSafeInteger(soldAtomic) && soldAtomic >= Math.floor(exitAmountAtomic * 0.99)) {
-        const grossSolLamports = reconciled.walletLamportDelta + reconciled.feeLamports;
-        exitSwap = {
-          ...exitSwap,
-          status: 'SUCCESS',
-          txSignature: reconciled.signature,
-          inAmount: soldAtomic,
-          outAmount: grossSolLamports > 0
-            ? grossSolLamports
-            : Math.max(1, Math.round(exitSolValue * 1e9)),
-          error: undefined
-        };
-        uncertainExitMints.delete(pos.mint);
-        financialExitSafetyGuard.clearUnresolvedDebt(pos.mint);
-        console.log(
-          `✅ [Jupiter V2: RECONCILIADO ON-CHAIN] ${pos.symbol} | tx=${reconciled.signature} ` +
-          `| vendido=${soldAtomic} atomic`
-        );
+      if (reconciled && reconciled.success) {
+        const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
+        if (Number.isSafeInteger(soldAtomic) && soldAtomic >= Math.floor(exitAmountAtomic * 0.99)) {
+          const grossSolLamports = reconciled.walletLamportDelta + reconciled.feeLamports;
+          exitSwap = {
+            ...exitSwap,
+            status: 'SUCCESS',
+            txSignature: reconciled.signature,
+            inAmount: soldAtomic,
+            outAmount: grossSolLamports > 0
+              ? grossSolLamports
+              : Math.max(1, Math.round(exitSolValue * 1e9)),
+            error: undefined
+          };
+          uncertainExitMints.delete(pos.mint);
+          financialExitSafetyGuard.clearUnresolvedDebt(pos.mint);
+          console.log(
+            `✅ [Jupiter V2: RECONCILIADO ON-CHAIN] ${pos.symbol} | tx=${reconciled.signature} ` +
+            `| vendido=${soldAtomic} atomic`
+          );
+        }
       }
     }
 
@@ -730,7 +744,7 @@ async function executeExitOrderUnlocked(
       executionUncertainReason =
         `Saída V2 inconclusiva em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
       console.error(
-        `🛑 [Jupiter V2: ESTADO INCERTO] ${pos.symbol}: não foi possível reconciliar on-chain. ` +
+        `🛑 [Jupiter V2: ESTADO INCERTO] ${pos.symbol}: não foi possível reconciliar on-chain pela assinatura exata. ` +
         'Nova saída deste mint e novas entradas ficam BLOQUEADAS para evitar duplicidade.'
       );
     }
@@ -847,9 +861,14 @@ async function executeExitOrderUnlocked(
       } else if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
         exitSwap.confirmationStage = 'CHAIN_CONFIRMED';
       } else {
-        // Tenta reconciliar via delta token da wallet
-        const reconciled = await reconcileUncertainV2Execution(pos.mint, exitAttemptStartedAt, 'OUT', 2);
-        if (reconciled) {
+        // Tenta reconciliar estritamente pela assinatura exata da tentativa (Finding R-P0-03)
+        const reconciled = await wallet.reconcileExactTransaction({
+          signature: exitSwap.txSignature,
+          mintAddress: pos.mint,
+          expectedOwner: OFFICIAL_PHANTOM_WALLET,
+          direction: 'OUT'
+        });
+        if (reconciled && reconciled.success) {
           exitSwap.confirmationStage = 'ECONOMICALLY_RECONCILED';
           const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
           if (soldAtomic > 0) {
@@ -2555,11 +2574,11 @@ async function executeAutonomousCycle() {
         if (swapSim.status === 'SUBMITTED_UNCONFIRMED') {
           console.warn(
             `⚠️ [Jupiter V2: RECONCILIAÇÃO DE ENTRADA] ${topCandidate.symbol}: ` +
-            'resposta /execute inconclusiva; procurando delta confirmado na wallet.'
+            `resposta /execute inconclusiva; verificando assinatura exata ${swapSim.txSignature || 'N/A'} on-chain.`
           );
-          const reconciled = await reconcileUncertainV2Execution(
+          const reconciled = await reconcileExactSignatureWithRetries(
+            swapSim.txSignature,
             topCandidate.mint,
-            entryAttemptStartedAt,
             'IN'
           );
 

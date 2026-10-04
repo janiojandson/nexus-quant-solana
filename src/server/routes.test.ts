@@ -1,8 +1,15 @@
-import test from 'node:test';
+import test, { beforeEach } from 'node:test';
 import assert from 'node:assert';
 import { handleApiRoutes } from './routes.js';
+import { setFinancialReadiness } from '../core/financialReadiness.js';
 
 const TEST_ADMIN_TOKEN = 'unit-test-admin-token';
+
+beforeEach(() => {
+  setFinancialReadiness('READY');
+});
+
+
 
 test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   const mockReq = { url: '/api/status', method: 'GET', headers: {} } as any;

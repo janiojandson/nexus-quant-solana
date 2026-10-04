@@ -91,7 +91,8 @@ export interface PumpSellReconciler {
   reconcileRecentSell(
     mintAddress: string,
     sinceTimestampMs: number,
-    expectedAmountAtomic: bigint
+    expectedAmountAtomic: bigint,
+    signature?: string
   ): Promise<PumpSellReconciledTrade | null>;
 }
 
@@ -427,8 +428,9 @@ export class PumpSellExecutor {
 
     const built = simulation.built;
     const submissionStartedAt = Date.now();
+    let txSignature: string | undefined;
     try {
-      const txSignature = await this.connection.sendRawTransaction(
+      txSignature = await this.connection.sendRawTransaction(
         built.transaction.serialize(),
         { skipPreflight: false, maxRetries: 0 }
       );
@@ -465,7 +467,8 @@ export class PumpSellExecutor {
           const reconciled = await this.reconciler.reconcileRecentSell(
             request.mint.toBase58(),
             submissionStartedAt,
-            request.tokenAmountAtomic
+            request.tokenAmountAtomic,
+            txSignature
           );
           if (
             reconciled &&
