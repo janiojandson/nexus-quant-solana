@@ -86,4 +86,38 @@ test('Nexus V2.0 Specification Documents Validation', async (t) => {
     assert.ok(content.includes('SOLANA_RPC'), 'Missing SOLANA_RPC');
     assert.ok(content.includes('approxEventToObservationMs'), 'Missing approxEventToObservationMs');
   });
+
+  // V2.1 Specification Documents Validation
+  await t.test('8. todos os 5 documentos de especificacao V2.1A existem e sao substanciais (> 1KB)', () => {
+    const v21Docs = [
+      'NEXUS_V2_1_JOURNAL_SPEC.md',
+      'NEXUS_V2_1_STATE_MACHINE.md',
+      'NEXUS_V2_1_RECONCILIATION.md',
+      'NEXUS_V2_1_ACCOUNTING.md',
+      'NEXUS_V2_1_READINESS.md'
+    ];
+    for (const doc of v21Docs) {
+      const docPath = path.join(SPECS_DIR, doc);
+      assert.ok(fs.existsSync(docPath), `Missing V2.1 spec document: ${doc}`);
+      const stats = fs.statSync(docPath);
+      assert.ok(stats.size > 1000, `V2.1 spec document ${doc} is too small (${stats.size} bytes)`);
+    }
+  });
+
+  await t.test('9. NEXUS_V2_1_JOURNAL_SPEC separa IMPLEMENTED, PROPOSED e NAO IMPLEMENTADO', () => {
+    const content = fs.readFileSync(path.join(SPECS_DIR, 'NEXUS_V2_1_JOURNAL_SPEC.md'), 'utf8');
+    assert.ok(content.includes('IMPLEMENTED'), 'Missing IMPLEMENTED tag in V2.1 spec');
+    assert.ok(content.includes('PROPOSED'), 'Missing PROPOSED tag in V2.1 spec');
+    assert.ok(content.includes('NÃO IMPLEMENTADO') || content.includes('NAO IMPLEMENTADO'), 'Missing NAO IMPLEMENTADO tag in V2.1 spec');
+    assert.ok(content.includes('claim_epoch'), 'Missing claim_epoch documentation');
+    assert.ok(content.includes('SKIP LOCKED'), 'Missing SKIP LOCKED documentation');
+  });
+
+  await t.test('10. NEXUS_V2_1_RECONCILIATION documenta regra UNKNOWN !== FAILED_DEFINITIVE', () => {
+    const content = fs.readFileSync(path.join(SPECS_DIR, 'NEXUS_V2_1_RECONCILIATION.md'), 'utf8');
+    assert.ok(content.includes('reconciliationDebt') || content.includes('reconciliation_debt'), 'Missing reconciliationDebt');
+    assert.ok(content.includes('UNKNOWN !== FAILED_DEFINITIVE'), 'Missing UNKNOWN !== FAILED_DEFINITIVE rule');
+    assert.ok(content.includes('CAN_RETRY'), 'Missing CAN_RETRY verdict');
+    assert.ok(content.includes('MUST_RECONCILE'), 'Missing MUST_RECONCILE verdict');
+  });
 });
