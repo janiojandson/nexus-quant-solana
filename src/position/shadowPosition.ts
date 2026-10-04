@@ -24,6 +24,16 @@ export function isPositionShadowEnabled(): boolean {
   return process.env.NEXUS_V2_POSITION_SHADOW_ENABLED === 'true';
 }
 
+let activeShadowPositionRepository: IPositionRepository | null = null;
+
+export function setShadowPositionRepository(repo: IPositionRepository | null): void {
+  activeShadowPositionRepository = repo;
+}
+
+export function getShadowPositionRepository(): IPositionRepository | null {
+  return activeShadowPositionRepository;
+}
+
 export interface FeatureFlagMatrix {
   readonly journalShadow: boolean;
   readonly positionShadow: boolean;

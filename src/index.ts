@@ -55,11 +55,15 @@ import {
   parseAtomicAmountBigInt
 } from './execution/financialExitSafetyGuard.js';
 import type { SwapExecutionResponse } from './blockchain/jupiterExecutionEngine.js';
+import { PostgresJournalRepository } from './journal/postgresRepository.js';
+import { PostgresPositionRepository } from './position/postgresPositionRepository.js';
 import {
   shadowOnExitDecision,
   shadowOnFillConfirmed,
-  shadowOnLegacyPositionUpdate
+  shadowOnLegacyPositionUpdate,
+  setShadowRepository
 } from './journal/shadowHooks.js';
+import { setShadowPositionRepository } from './position/shadowPosition.js';
 
 
 dotenv.config();
@@ -243,6 +247,15 @@ const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
 const postgresRepo = new SolanaPostgresRepository();
 const pgPool = postgresRepo.getPool();
+
+// Wire V2 shadow repositories if pool is available (P1-01)
+if (pgPool) {
+  const shadowJournalRepo = new PostgresJournalRepository({ pool: pgPool });
+  const shadowPositionRepo = new PostgresPositionRepository({ pool: pgPool });
+  setShadowRepository(shadowJournalRepo);
+  setShadowPositionRepository(shadowPositionRepo);
+  console.log('🔗 [V2 Wiring] PostgresJournalRepository & PostgresPositionRepository wired to shadow execution hooks');
+}
 const pumpStrategyRepository = new PumpStrategyRepository(pgPool as any);
 let latestShadowEntryLadderLamports = [PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS];
 const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
@@ -3056,6 +3069,54 @@ async function rehydratePositionsFromWalletOnBoot() {
 }
 
 /**
+ * 🔒 REIDRATAÇÃO DE DÍVIDAS DURÁVEIS DE REINÍCIO (P0-02)
+ *
+ * Se o processo foi interrompido (crash / deploy / SIGTERM) enquanto uma tentativa
+ * de saída estava em trânsito (SUBMITTED, UNKNOWN ou com reconciliation_debt = true),
+ * o bot NUNCA deve iniciar loops limpos sem blindar os tokens afetados.
+ *
+ * Bloqueia imediatamente as mints correspondentes em financialExitSafetyGuard
+ * e uncertainExitMints, impedindo vendas concorrentes e novas entradas até a reconciliação.
+ */
+export async function rehydrateDurableExitDebtsOnBoot(): Promise<{ recoveredCount: number; lockedMints: string[] }> {
+  const pool = postgresRepo.getPool();
+  const lockedMints: string[] = [];
+  if (!pool) return { recoveredCount: 0, lockedMints };
+
+  try {
+    const checkTableRes = await pool.query(
+      "SELECT to_regclass('public.exit_intents') as table_exists"
+    );
+    if (!checkTableRes.rows[0]?.table_exists) {
+      return { recoveredCount: 0, lockedMints };
+    }
+
+    const debtRes = await pool.query(`
+      SELECT DISTINCT mint, id, status, reconciliation_debt, claimed_by
+      FROM exit_intents
+      WHERE status IN ('SUBMITTED', 'UNKNOWN')
+         OR reconciliation_debt = true
+    `);
+
+    if (debtRes.rows.length > 0) {
+      console.warn(`🚨 [BOOT: Durable Debt Recovery] Encontradas ${debtRes.rows.length} intenções não resolvidas com dívida de blockchain pendente!`);
+      for (const row of debtRes.rows) {
+        const mint = String(row.mint);
+        console.warn(`🔒 [BOOT: Debt Fencing Ativo] Token ${mint} bloqueado por intenção pendente ${row.id} (status=${row.status}, debt=${row.reconciliation_debt})`);
+        financialExitSafetyGuard.registerUnresolvedDebt(mint);
+        uncertainExitMints.add(mint);
+        lockedMints.push(mint);
+      }
+    } else {
+      console.log('✅ [BOOT: Durable Debt Recovery] Zero dívidas pendentes de saída em exit_intents.');
+    }
+  } catch (err: any) {
+    console.warn(`⚠️ [BOOT: Durable Debt Recovery] Falha ao verificar exit_intents no boot: ${err?.message || err}`);
+  }
+  return { recoveredCount: lockedMints.length, lockedMints };
+}
+
+/**
  * 🛡️ REIDRATAÇÃO DA QUARENTENA NO BOOT (Fim da Amnésia pós-Deploy)
  * Carrega todos os tokens com quarentena ativa do PostgreSQL
  * e força o bloqueio preventivo do token 'all/inCat' por 6 horas.
@@ -3167,6 +3228,9 @@ async function main() {
 
   // 1. Reidratação da Quarentena do Banco (Fim da Amnésia pós-Deploy)
   await rehydrateQuarantineFromDbOnBoot();
+
+  // 1.5. Reidratação de Dívidas Duráveis de Saída (P0-02 Fencing de Reinício)
+  await rehydrateDurableExitDebtsOnBoot();
 
   // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
   await rehydratePositionsFromWalletOnBoot();
