@@ -106,7 +106,7 @@ describe('Nexus V2.1B — Shadow Lifecycle Hooks in Execution Flow (C3)', () => 
     assert.strictEqual(attemptsAfterOrder.length, 1);
     assert.strictEqual(attemptsAfterOrder[0].state, 'ORDER_READY');
     assert.strictEqual(attemptsAfterOrder[0].requestId, 'req_jup_v2_101');
-    assert.strictEqual(attemptsAfterOrder[0].lastValidBlockHeight, 310550100);
+    assert.strictEqual(attemptsAfterOrder[0].lastValidBlockHeight, 310550100n);
 
     // 3. LOCAL SIGN
     const sig = '5wK4ptpZ58...sig_shadow_101';

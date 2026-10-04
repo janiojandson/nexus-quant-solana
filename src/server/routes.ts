@@ -16,8 +16,8 @@ export interface RouteContext {
   liquidateHolding?: (payload: { mint: string; symbol: string; amount: number; decimals: number }) => Promise<any>;
   getAllOpenPositions?: () => any[];
   sweepRent?: () => Promise<any>;
-  panicToken?: (mint: string) => Promise<{ success: boolean; txid?: string; message?: string; error?: string }>;
-  panicAll?: () => Promise<{ success: boolean; liquidationsCount: number; message?: string; error?: string }>;
+  panicToken?: (mint: string) => Promise<{ success: boolean; status?: string; txid?: string; message?: string; error?: string }>;
+  panicAll?: () => Promise<{ success: boolean; status?: string; liquidationsCount: number; pendingCount?: number; failureCount?: number; results?: any[]; message?: string; error?: string }>;
   runCalibration?: () => Promise<any>;
   getSnapshots?: (limit: number) => Promise<any[]>;
   pgPool?: Pool | null;
@@ -356,7 +356,10 @@ export async function handleApiRoutes(
     if (isPanicMint && ctx.panicToken) {
       try {
         const result = await ctx.panicToken(mint);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const isConfirmed = result?.status === 'CONFIRMED' || (result?.success && !result?.status);
+        const isPending = result?.status === 'PENDING_RECONCILIATION';
+        const statusCode = isConfirmed ? 200 : isPending ? 202 : 400;
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
       } catch (err: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -402,7 +405,17 @@ export async function handleApiRoutes(
     if (isLegacyPanicAll && ctx.panicAll) {
       try {
         const result = await ctx.panicAll();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        const hasConfirmed = result?.results?.some((r: any) => r.status === 'CONFIRMED' || r.success === true);
+        const hasPending = result?.results?.some((r: any) => r.status === 'PENDING_RECONCILIATION');
+        const hasFailure = result?.results?.some((r: any) => r.status === 'FAILED_DEFINITIVE' || r.success === false);
+        const statusCode = result?.success
+          ? 200
+          : (hasConfirmed && (hasPending || hasFailure))
+            ? 207
+            : hasPending
+              ? 202
+              : 400;
+        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ results: [], ...result }));
       } catch (err: any) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -501,7 +514,10 @@ export async function handleApiRoutes(
 
         if (ctx.liquidateHolding) {
           const resExit = await ctx.liquidateHolding(payload);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
+          const isConfirmed = resExit?.status === 'CONFIRMED' || (resExit?.success && !resExit?.status);
+          const isPending = resExit?.status === 'PENDING_RECONCILIATION';
+          const statusCode = isConfirmed ? 200 : isPending ? 202 : 400;
+          res.writeHead(statusCode, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(resExit));
         } else {
           res.writeHead(501, { 'Content-Type': 'application/json' });

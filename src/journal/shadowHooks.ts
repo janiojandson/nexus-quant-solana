@@ -18,6 +18,7 @@ import {
   ExecutionAttemptId,
   ExitIntentSeverity,
   ExitIntentReason,
+  ExitIntentAmountPolicy,
   ExecutionAttemptState,
   FillRecord,
   nowWallMs,
@@ -187,20 +188,29 @@ export async function shadowOnExitDecision(input: OnExitDecisionInput): Promise<
     const tokenProgram = input.tokenProgram || 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 
     const severity: ExitIntentSeverity =
-      input.reason.includes('CRITICAL') || input.reason.includes('EMERGENCY')
-        ? 'CRITICAL'
+      input.reason.includes('CRITICAL') || input.reason.includes('EMERGENCY') || input.reason === 'MANUAL'
+        ? 'EMERGENCY'
         : input.reason.includes('HIGH') || input.reason.includes('STOP')
           ? 'HIGH'
-          : 'ROUTINE';
+          : 'NORMAL';
 
     const mappedReason: ExitIntentReason =
-      input.reason === 'PARTIAL_TAKE_PROFIT_50'
-        ? 'TAKE_PROFIT_ROUTINE'
-        : input.reason.includes('STOP')
-          ? 'STOP_LOSS_CRITICAL'
-          : input.reason.includes('EMERGENCY')
-            ? 'RPC_TIMEOUT_EMERGENCY'
-            : 'TAKE_PROFIT_ROUTINE';
+      input.reason === 'PARTIAL_TAKE_PROFIT_50' || input.reason === 'TAKE_PROFIT'
+        ? 'TAKE_PROFIT_PARTIAL'
+        : input.reason === 'STOP_LOSS'
+          ? 'STOP_LOSS'
+          : input.reason === 'TRAILING_STOP'
+            ? 'TRAILING_STOP'
+            : input.reason === 'TIME_STOP'
+              ? 'TIME_STOP'
+              : input.reason === 'WATCHDOG_EXIT'
+                ? 'WATCHDOG'
+                : input.reason === 'MANUAL'
+                  ? 'PANIC'
+                  : 'STOP_LOSS';
+
+    const amountPolicy: ExitIntentAmountPolicy =
+      input.reason === 'PARTIAL_TAKE_PROFIT_50' ? 'PARTIAL_50' : 'FULL_REMAINDER';
 
     const { intent } = await repo.createOrGetIntent({
       id: `SHADOW_GENERATED:intent_${input.mint.slice(0, 8)}_${Date.now()}` as any,
@@ -210,7 +220,7 @@ export async function shadowOnExitDecision(input: OnExitDecisionInput): Promise<
       mint: input.mint,
       tokenProgram,
       requestedAmountAtomic: String(input.requestedAmountAtomic),
-      amountPolicy: input.reason === 'PARTIAL_TAKE_PROFIT_50' ? 'RATIO_BPS' : 'FULL_REMAINDER',
+      amountPolicy,
       initialSeverity: severity,
       reason: mappedReason,
       policyVersion: input.policyVersion || 'v2.1b_shadow'
@@ -311,7 +321,7 @@ export async function shadowOnSubmit(input: OnSubmitInput): Promise<void> {
 
     await repo.updateAttemptState(ctx.currentAttemptId, 'SUBMITTED', {
       signature: input.signature || ctx.signature,
-      lastValidBlockHeight: input.lastValidBlockHeight,
+      lastValidBlockHeight: input.lastValidBlockHeight != null ? BigInt(input.lastValidBlockHeight) : undefined,
       submittedAtWallMs: nowWallMs()
     });
   });
@@ -373,7 +383,7 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
       rentMovementLamports: String(input.rentMovementLamports ?? 0),
       slot: input.slot,
       confirmedAtWallMs: nowWallMs(),
-      evidenceType: 'JUPITER_RECEIPT_V2',
+      evidenceType: 'JUPITER_V2_RECEIPT',
       createdAtWallMs: nowWallMs()
     };
 

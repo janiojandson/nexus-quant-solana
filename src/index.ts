@@ -44,6 +44,12 @@ import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
 import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
 import { isShadowJournalEnabled } from './journal/shadowJournal.js';
 import {
+  financialExitSafetyGuard,
+  safeBigIntToNumber,
+  parseAtomicAmountBigInt
+} from './execution/financialExitSafetyGuard.js';
+import type { SwapExecutionResponse } from './blockchain/jupiterExecutionEngine.js';
+import {
   shadowOnExitDecision,
   shadowOnFillConfirmed,
   shadowOnLegacyPositionUpdate
@@ -506,7 +512,7 @@ async function executeExitOrder(
   exitSolValue: number,
   options?: ExitOrderOptions
 ): Promise<ExitOrderResult> {
-  if (uncertainExitMints.has(mint)) {
+  if (uncertainExitMints.has(mint) || financialExitSafetyGuard.hasUnresolvedDebt(mint)) {
     return {
       success: false,
       error: `V2_EXECUTION_UNCERTAIN:${mint}: nova saída bloqueada até reconciliação/restart seguro`
@@ -677,6 +683,7 @@ async function executeExitOrderUnlocked(
           error: undefined
         };
         uncertainExitMints.delete(pos.mint);
+        financialExitSafetyGuard.clearUnresolvedDebt(pos.mint);
         console.log(
           `✅ [Jupiter V2: RECONCILIADO ON-CHAIN] ${pos.symbol} | tx=${reconciled.signature} ` +
           `| vendido=${soldAtomic} atomic`
@@ -686,6 +693,7 @@ async function executeExitOrderUnlocked(
 
     if (exitSwap.status === 'SUBMITTED_UNCONFIRMED') {
       uncertainExitMints.add(pos.mint);
+      financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
       executionUncertainReason =
         `Saída V2 inconclusiva em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
       console.error(
@@ -777,6 +785,7 @@ async function executeExitOrderUnlocked(
     exitSwap.status === 'SUBMITTED_UNCONFIRMED'
   ) {
     uncertainExitMints.add(pos.mint);
+    financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
     executionUncertainReason =
       `Pump direct sell inconclusivo em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
     console.error(
@@ -1126,64 +1135,50 @@ const server = http.createServer(async (req, res) => {
       const { mint, symbol } = payload;
       console.log(`🚨 [AÇÃO ON-CHAIN MANUAL] Liquidando token avulso ${symbol} (${mint})`);
 
+      if (financialExitSafetyGuard.hasUnresolvedDebt(mint) || uncertainExitMints.has(mint)) {
+        return {
+          success: false,
+          status: 'PENDING_RECONCILIATION',
+          error: `UNRESOLVED_EXECUTION_DEBT:${mint}: holding possui dívida ou execução pendente; nova liquidação bloqueada até reconciliação.`
+        };
+      }
+
       // Nunca confiar no amount/decimals enviados pelo browser para construir a ordem.
       const splAccounts = await wallet.getSplTokenAccounts();
       const holding = splAccounts.find(t => t.mint === mint);
       if (!holding) {
-        return { success: false, error: 'Holding SPL positivo não encontrado na carteira.' };
+        return { success: false, status: 'FAILED_DEFINITIVE', error: 'Holding SPL positivo não encontrado na carteira.' };
       }
-      const rawLamports = assertAtomicAmountToNumber(holding.atomicAmount);
 
-      const exitSwap = await jupiterEngine.executeSwap({
-        inputMint: mint,
-        outputMint: 'So11111111111111111111111111111111111111112',
-        amountLamports: rawLamports,
-        userPublicKey: OFFICIAL_PHANTOM_WALLET,
-        keypair: wallet.getKeypair(),
-        slippageBps: 500,
-        priorityLevel: 'high',
-        trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
-      });
+      let atomicAmount: bigint;
+      try {
+        atomicAmount = parseAtomicAmountBigInt(holding.atomicAmount);
+      } catch (err: any) {
+        return { success: false, status: 'FAILED_DEFINITIVE', error: `Saldo atômico inválido para ${mint}: ${err?.message}` };
+      }
 
-      if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
+      if (atomicAmount <= 0n) {
+        return { success: false, status: 'FAILED_DEFINITIVE', error: `Saldo atômico zero para ${mint}.` };
+      }
+
+      const lockResult = financialExitSafetyGuard.acquireExitLock(mint, atomicAmount);
+      if (!lockResult.allowed) {
         return {
           success: false,
-          error: exitSwap.error || 'Swap de liquidação falhou; posição e ATA foram preservadas.'
+          status: lockResult.code === 'UNRESOLVED_RECONCILIATION_DEBT' ? 'PENDING_RECONCILIATION' : 'FAILED_DEFINITIVE',
+          error: lockResult.reason
         };
       }
 
-      if (exitSwap.status === 'DRY_RUN_SUCCESS') {
-        return { success: true, simulated: true, txSignature: exitSwap.txSignature };
-      }
+      try {
+        let rawLamports: number;
+        try {
+          rawLamports = safeBigIntToNumber(atomicAmount, 'liquidateHolding_amountLamports');
+        } catch (err: any) {
+          return { success: false, status: 'FAILED_DEFINITIVE', error: err?.message || 'Valor excede limite numérico seguro' };
+        }
 
-      positionEngine.removePosition(mint);
-      antiSpamMemory.recordVeto(mint, 'Quarentena Pós-Liquidação Manual On-Chain', 24 * 60 * 60 * 1000);
-
-      await new Promise(r => setTimeout(r, 2000));
-      const closeResult = await wallet.closeTokenAccount(mint);
-
-      return {
-        success: true,
-        txSignature: exitSwap.txSignature,
-        rentRecovered: closeResult.success,
-        warning: closeResult.success ? undefined : 'Swap concluído, mas a ATA não pôde ser fechada.'
-      };
-    },
-    getAllOpenPositions: () => positionEngine.getAllPositions(),
-    sweepRent: () => runRentRecoverySweep('MANUAL'),
-    panicToken: async (mint: string) => {
-      console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter Swap V2...`);
-      positionEngine.removePosition(mint);
-
-      const splAccounts = await wallet.getSplTokenAccounts();
-      const holding = splAccounts.find(t => t.mint === mint);
-      const amount = holding ? holding.tokenAmount : 0;
-      const decimals = holding ? holding.decimals : 9;
-      const rawLamports = Math.floor(amount * Math.pow(10, decimals));
-
-      let txSignature: string | null = null;
-      if (rawLamports > 0) {
-        const swapRes = await jupiterEngine.executeSwap({
+        const exitSwap = await jupiterEngine.executeSwap({
           inputMint: mint,
           outputMint: 'So11111111111111111111111111111111111111112',
           amountLamports: rawLamports,
@@ -1191,28 +1186,184 @@ const server = http.createServer(async (req, res) => {
           keypair: wallet.getKeypair(),
           slippageBps: 500,
           priorityLevel: 'high',
-          trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
+          trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
         });
-        txSignature = swapRes.txSignature;
+
+        if (exitSwap.status === 'SUBMITTED_UNCONFIRMED') {
+          uncertainExitMints.add(mint);
+          financialExitSafetyGuard.registerUnresolvedDebt(mint);
+          return {
+            success: false,
+            status: 'PENDING_RECONCILIATION',
+            txSignature: exitSwap.txSignature,
+            error: 'Swap submetido mas não confirmado na blockchain (inconclusivo). Posição e ATA preservadas.'
+          };
+        }
+
+        if (exitSwap.status !== 'SUCCESS' && exitSwap.status !== 'DRY_RUN_SUCCESS') {
+          return {
+            success: false,
+            status: 'FAILED_DEFINITIVE',
+            error: exitSwap.error || 'Swap de liquidação falhou; posição e ATA foram preservadas.'
+          };
+        }
+
+        if (exitSwap.status === 'DRY_RUN_SUCCESS') {
+          return { success: true, status: 'CONFIRMED', simulated: true, txSignature: exitSwap.txSignature };
+        }
+
+        positionEngine.removePosition(mint);
+        antiSpamMemory.recordVeto(mint, 'Quarentena Pós-Liquidação Manual On-Chain', 24 * 60 * 60 * 1000);
+
+        await new Promise(r => setTimeout(r, 2000));
+        const closeResult = await wallet.closeTokenAccount(mint);
+
+        return {
+          success: true,
+          status: 'CONFIRMED',
+          txSignature: exitSwap.txSignature,
+          rentRecovered: closeResult.success,
+          warning: closeResult.success ? undefined : 'Swap concluído, mas a ATA não pôde ser fechada.'
+        };
+      } finally {
+        financialExitSafetyGuard.releaseExitLock(mint);
+      }
+    },
+    getAllOpenPositions: () => positionEngine.getAllPositions(),
+    sweepRent: () => runRentRecoverySweep('MANUAL'),
+    panicToken: async (mint: string) => {
+      console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter Swap V2...`);
+
+      if (financialExitSafetyGuard.hasUnresolvedDebt(mint) || uncertainExitMints.has(mint)) {
+        return {
+          success: false,
+          status: 'PENDING_RECONCILIATION',
+          error: `UNRESOLVED_EXECUTION_DEBT:${mint}: moeda possui dívida ou execução pendente; nova liquidação bloqueada até reconciliação.`
+        };
       }
 
-      await rentRecovery.closeTokenAccount(mint);
-      antiSpamMemory.recordVeto(mint, 'Pânico Manual Individual On-Chain', 24 * 60 * 60 * 1000);
-      updateDashboardViews();
+      const splAccounts = await wallet.getSplTokenAccounts();
+      const holding = splAccounts.find(t => t.mint === mint);
+      if (!holding) {
+        return {
+          success: false,
+          status: 'FAILED_DEFINITIVE',
+          error: `Holding SPL não encontrado na carteira para ${mint}.`
+        };
+      }
 
-      return {
-        success: true,
-        txid: txSignature || 'PANIC_SUCCESS',
-        message: 'Moeda liquidada e aluguel de ~0.00204 SOL recuperado.'
-      };
+      let atomicAmount: bigint;
+      try {
+        atomicAmount = parseAtomicAmountBigInt(holding.atomicAmount);
+      } catch (err: any) {
+        return {
+          success: false,
+          status: 'FAILED_DEFINITIVE',
+          error: `Saldo atômico inválido para moeda ${mint}: ${err?.message}`
+        };
+      }
+
+      if (atomicAmount <= 0n) {
+        return {
+          success: false,
+          status: 'FAILED_DEFINITIVE',
+          error: `Saldo atômico zero para moeda ${mint}.`
+        };
+      }
+
+      const lockResult = financialExitSafetyGuard.acquireExitLock(mint, atomicAmount);
+      if (!lockResult.allowed) {
+        return {
+          success: false,
+          status: lockResult.code === 'UNRESOLVED_RECONCILIATION_DEBT' ? 'PENDING_RECONCILIATION' : 'FAILED_DEFINITIVE',
+          error: lockResult.reason
+        };
+      }
+
+      try {
+        let rawLamports: number;
+        try {
+          rawLamports = safeBigIntToNumber(atomicAmount, 'panicToken_amountLamports');
+        } catch (err: any) {
+          return {
+            success: false,
+            status: 'FAILED_DEFINITIVE',
+            error: err?.message || 'Valor excede limite numérico seguro'
+          };
+        }
+
+        let swapRes: SwapExecutionResponse;
+        try {
+          swapRes = await jupiterEngine.executeSwap({
+            inputMint: mint,
+            outputMint: 'So11111111111111111111111111111111111111112',
+            amountLamports: rawLamports,
+            userPublicKey: OFFICIAL_PHANTOM_WALLET,
+            keypair: wallet.getKeypair(),
+            slippageBps: 500,
+            priorityLevel: 'high',
+            trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
+          });
+        } catch (err: any) {
+          return {
+            success: false,
+            status: 'FAILED_DEFINITIVE',
+            error: err?.message || 'Falha ao executar swap de pânico.'
+          };
+        }
+
+        if (swapRes.status === 'SUBMITTED_UNCONFIRMED') {
+          uncertainExitMints.add(mint);
+          financialExitSafetyGuard.registerUnresolvedDebt(mint);
+          return {
+            success: false,
+            status: 'PENDING_RECONCILIATION',
+            txid: swapRes.txSignature,
+            error: 'Swap submetido mas não confirmado na blockchain (inconclusivo). Posição e ATA preservadas.'
+          };
+        }
+
+        if (swapRes.status !== 'SUCCESS' && swapRes.status !== 'DRY_RUN_SUCCESS') {
+          return {
+            success: false,
+            status: 'FAILED_DEFINITIVE',
+            txid: swapRes.txSignature || undefined,
+            error: swapRes.error || 'Swap de pânico falhou na execução; posição e ATA preservadas.'
+          };
+        }
+
+        // Posição só é removida após confirmação comprovada
+        positionEngine.removePosition(mint);
+        antiSpamMemory.recordVeto(mint, 'Pânico Manual Individual On-Chain', 24 * 60 * 60 * 1000);
+
+        let rentRecovered = false;
+        try {
+          const closeRes = await rentRecovery.closeTokenAccount(mint);
+          rentRecovered = Boolean(closeRes?.success);
+        } catch (e: any) {
+          console.warn(`⚠️ [PANIC TOKEN] Não foi possível fechar ATA de ${mint}:`, e?.message || e);
+        }
+
+        updateDashboardViews();
+
+        return {
+          success: true,
+          status: 'CONFIRMED',
+          txid: swapRes.txSignature || 'PANIC_SUCCESS',
+          message: rentRecovered
+            ? 'Moeda liquidada e aluguel de ~0.00204 SOL recuperado.'
+            : 'Moeda liquidada com sucesso; ATA mantida ou já fechada.'
+        };
+      } finally {
+        financialExitSafetyGuard.releaseExitLock(mint);
+      }
     },
     panicAll: async () => {
-      console.log('🚨 [API PANIC ALL] Desarmando Sentinel, liquidando todos os tokens e fechando ATAs...');
+      console.log('🚨 [API PANIC ALL] Desarmando Sentinel e iniciando liquidação token a token...');
       latestState.circuitBreakerActive = true;
       axios.post(`${MACRO_SENTINEL_URL}/v1/sentinel/breaker/trip`, {}).catch(() => {});
 
-      positionEngine.clearPositions();
-
+      // REGRA P0-04: NUNCA chamar positionEngine.clearPositions() antes das liquidações!
       const splAccounts = await wallet.getSplTokenAccounts();
       const BASE_MINTS = new Set([
         'So11111111111111111111111111111111111111112',
@@ -1220,12 +1371,52 @@ const server = http.createServer(async (req, res) => {
         'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
       ]);
 
+      const results: Array<{
+        mint: string;
+        status: 'CONFIRMED' | 'PENDING_RECONCILIATION' | 'FAILED_DEFINITIVE';
+        success: boolean;
+        txSignature?: string;
+        error?: string;
+      }> = [];
+
       let liquidationsCount = 0;
       for (const spl of splAccounts) {
-        if (BASE_MINTS.has(spl.mint) || spl.tokenAmount <= 0) continue;
+        if (BASE_MINTS.has(spl.mint)) continue;
+
+        let atomicAmount: bigint;
         try {
-          const rawLamports = Math.floor(spl.tokenAmount * Math.pow(10, spl.decimals));
-          await jupiterEngine.executeSwap({
+          atomicAmount = parseAtomicAmountBigInt(spl.atomicAmount);
+        } catch (err: any) {
+          console.warn(`⚠️ [PANIC ALL] Saldo atômico inválido para ${spl.mint}:`, err?.message);
+          continue;
+        }
+
+        if (atomicAmount <= 0n) continue;
+
+        if (financialExitSafetyGuard.hasUnresolvedDebt(spl.mint) || uncertainExitMints.has(spl.mint)) {
+          results.push({
+            mint: spl.mint,
+            status: 'PENDING_RECONCILIATION',
+            success: false,
+            error: 'Bloqueado por reconciliação pendente ou dívida não resolvida.'
+          });
+          continue;
+        }
+
+        const lock = financialExitSafetyGuard.acquireExitLock(spl.mint, atomicAmount);
+        if (!lock.allowed) {
+          results.push({
+            mint: spl.mint,
+            status: lock.code === 'UNRESOLVED_RECONCILIATION_DEBT' ? 'PENDING_RECONCILIATION' : 'FAILED_DEFINITIVE',
+            success: false,
+            error: lock.reason
+          });
+          continue;
+        }
+
+        try {
+          const rawLamports = safeBigIntToNumber(atomicAmount, 'panicAll_amountLamports');
+          const swapRes = await jupiterEngine.executeSwap({
             inputMint: spl.mint,
             outputMint: 'So11111111111111111111111111111111111111112',
             amountLamports: rawLamports,
@@ -1235,20 +1426,67 @@ const server = http.createServer(async (req, res) => {
             priorityLevel: 'high',
             trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
           });
-          await rentRecovery.closeTokenAccount(spl.mint);
-          liquidationsCount++;
+
+          if (swapRes.status === 'SUBMITTED_UNCONFIRMED') {
+            uncertainExitMints.add(spl.mint);
+            financialExitSafetyGuard.registerUnresolvedDebt(spl.mint);
+            results.push({
+              mint: spl.mint,
+              status: 'PENDING_RECONCILIATION',
+              success: false,
+              txSignature: swapRes.txSignature,
+              error: 'Swap submetido mas não confirmado na blockchain.'
+            });
+          } else if (swapRes.status !== 'SUCCESS' && swapRes.status !== 'DRY_RUN_SUCCESS') {
+            results.push({
+              mint: spl.mint,
+              status: 'FAILED_DEFINITIVE',
+              success: false,
+              txSignature: swapRes.txSignature,
+              error: swapRes.error || 'Swap de pânico falhou na execução.'
+            });
+          } else {
+            // Confirmado: só agora remove posição e fecha ATA
+            positionEngine.removePosition(spl.mint);
+            try {
+              await rentRecovery.closeTokenAccount(spl.mint);
+            } catch (closeErr: any) {
+              console.warn(`⚠️ [PANIC ALL] Falha ao fechar ATA de ${spl.mint}:`, closeErr?.message);
+            }
+            liquidationsCount++;
+            results.push({
+              mint: spl.mint,
+              status: 'CONFIRMED',
+              success: true,
+              txSignature: swapRes.txSignature
+            });
+          }
         } catch (err: any) {
-          console.warn(`⚠️ [PANIC ALL] Falha ao liquidar ${spl.mint}:`, err?.message || err);
+          console.warn(`⚠️ [PANIC ALL] Erro ao liquidar ${spl.mint}:`, err?.message || err);
+          results.push({
+            mint: spl.mint,
+            status: 'FAILED_DEFINITIVE',
+            success: false,
+            error: err?.message || String(err)
+          });
+        } finally {
+          financialExitSafetyGuard.releaseExitLock(spl.mint);
         }
       }
 
       await rentRecovery.sweepOrphanAccounts();
       updateDashboardViews();
 
+      const pendingCount = results.filter(r => r.status === 'PENDING_RECONCILIATION').length;
+      const failureCount = results.filter(r => r.status === 'FAILED_DEFINITIVE').length;
+
       return {
-        success: true,
+        success: failureCount === 0 && pendingCount === 0,
         liquidationsCount,
-        message: 'Pânico geral executado com sucesso.'
+        pendingCount,
+        failureCount,
+        results,
+        message: `${liquidationsCount} moeda(s) liquidada(s) com sucesso; ${pendingCount} pendente(s); ${failureCount} falha(s).`
       };
     },
     runCalibration: async () => {

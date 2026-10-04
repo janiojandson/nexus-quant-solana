@@ -314,7 +314,7 @@ export class SolanaWalletService {
     }
   ): Promise<T> {
     const startMonoNs = nowMonotonicNs();
-    let rawResult: T;
+    let rawResult: T | undefined = undefined;
     let succeeded = false;
     let callError: any = null;
 

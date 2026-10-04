@@ -236,40 +236,42 @@ export class HistoricalReplayEngine {
     const gapMetrics: ObservationGapMetrics = this._calculateGaps(gaps);
 
     // 2. Peak Executable Value (SOL)
-    let peakExecutableValue: number | null | 'UNKNOWN' = null;
+    let peakNumeric: number | null = null;
     observations.forEach(o => {
       if (o.jupiterExecutableValueSol !== null) {
-        if (peakExecutableValue === null || o.jupiterExecutableValueSol > peakExecutableValue) {
-          peakExecutableValue = o.jupiterExecutableValueSol;
+        if (peakNumeric === null || o.jupiterExecutableValueSol > peakNumeric) {
+          peakNumeric = o.jupiterExecutableValueSol;
         }
       }
     });
-    if (peakExecutableValue === null && expected.peakObservedPnlPct) {
+    if (peakNumeric === null && expected.peakObservedPnlPct) {
       // If individual executable value in SOL was not logged per step, use entry * (1 + peak/100) * remaining
       const initialCost = expected.capitalSwapSol;
       const frac = expected.partialTaken ? 0.5 : 1.0;
-      peakExecutableValue = Number(((initialCost * frac) * (1 + expected.peakObservedPnlPct / 100)).toFixed(9));
+      peakNumeric = Number(((initialCost * frac) * (1 + expected.peakObservedPnlPct / 100)).toFixed(9));
     }
+    const peakExecutableValue: number | null | 'UNKNOWN' = peakNumeric;
 
     // 3. MFE (Maximum Favorable Excursion % PnL)
-    let mfe: number | null | 'UNKNOWN' = null;
+    let mfeNumeric: number | null = null;
     observations.forEach(o => {
       if (o.peakPct !== null) {
-        if (mfe === null || o.peakPct > mfe) mfe = o.peakPct;
+        if (mfeNumeric === null || o.peakPct > mfeNumeric) mfeNumeric = o.peakPct;
       }
       if (o.pnlPct !== null) {
-        if (mfe === null || o.pnlPct > mfe) mfe = o.pnlPct;
+        if (mfeNumeric === null || o.pnlPct > mfeNumeric) mfeNumeric = o.pnlPct;
       }
     });
-    if (mfe === null) mfe = expected.peakObservedPnlPct ?? 'UNKNOWN';
+    const mfe: number | null | 'UNKNOWN' = mfeNumeric ?? (expected.peakObservedPnlPct ?? 'UNKNOWN');
 
     // 4. MAE (Maximum Adverse Excursion % PnL)
-    let mae: number | null | 'UNKNOWN' = null;
+    let maeNumeric: number | null = null;
     observations.forEach(o => {
       if (o.pnlPct !== null) {
-        if (mae === null || o.pnlPct < mae) mae = o.pnlPct;
+        if (maeNumeric === null || o.pnlPct < maeNumeric) maeNumeric = o.pnlPct;
       }
     });
+    const mae: number | null | 'UNKNOWN' = maeNumeric;
 
     // 5. Signal Executable Value & Drawdown from MFE
     // Find final exit observation where full exit was triggered (TRAILING_STOP, STOP_LOSS, EXIT_SUCCESS_RETRY)

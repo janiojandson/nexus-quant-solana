@@ -378,7 +378,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       expectedOutAtomic: input.expectedOutAtomic,
       minimumOutAtomic: input.minimumOutAtomic,
       state: input.initialState ?? 'INITIALIZED',
-      lastValidBlockHeight: input.lastValidBlockHeight,
+      lastValidBlockHeight: input.lastValidBlockHeight !== undefined && input.lastValidBlockHeight !== null ? BigInt(input.lastValidBlockHeight) : undefined,
       startedAtWallMs: now,
       preparedAtWallMs: input.initialState === 'ORDER_READY' || input.initialState === 'SIGNED' ? now : undefined
     };
