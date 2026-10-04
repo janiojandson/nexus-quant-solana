@@ -99,7 +99,7 @@ To guarantee zero secret leakage into logs or telemetry:
 4. **Context-Aware Public Identifiers:** Fields named `signature`, `txSignature`, `mint`, or `wallet` preserve Base58 strings **ONLY IF** they satisfy strict cryptographic lengths (32 bytes Base58 for PublicKeys, 64 bytes Base58 for Signatures). Any unrecognized or malformed Base58 string is conservatively redacted.
 
 ### 4.3 Bounded In-Memory Ring Buffer
-- **Capacity:** Fixed capacity of 1,000 spans (`DEFAULT_RING_BUFFER_CAPACITY = 1000`).
+- **Capacity:** Default effective capacity of 5,000 spans (`globalTelemetryBuffer` initialized with `capacity = 5000`, configurable via `TelemetryBufferOptions`).
 - **Overflow Policy:** `DROP_OLDEST`. When buffer reaches capacity, the oldest span is dropped, and `droppedSpansCount` is atomically incremented.
 - **Safety Guarantee:** Telemetry buffer operations are enclosed in unconditional try/catch blocks. Telemetry never throws exceptions to caller code.
 
@@ -112,24 +112,24 @@ To guarantee zero secret leakage into logs or telemetry:
 ## 5. Jupiter & Solana RPC Instrumentation
 
 ### 5.1 Jupiter Pipeline Metrics
-The execution pipeline through Jupiter Aggregator V6 is decomposed into segregated spans:
+The execution pipeline through Jupiter Swap API V2 is decomposed into segregated spans:
 1. `JUPITER_QUEUE_WAIT_MS`: Time spent queued waiting for concurrency permit in `JupiterTrafficCoordinator`.
 2. `JUPITER_COORDINATOR_TOTAL_MS`: Total time in coordinator (queue wait + execution callback).
-3. `JUPITER_QUOTE_HTTP_MS`: HTTP round-trip duration for `/quote`. Marked with `quoteSource: 'NETWORK'` or `'CACHE'`.
-4. `JUPITER_ORDER_HTTP_MS`: HTTP round-trip duration for `/swap` transaction generation.
+3. `JUPITER_QUOTE_HTTP_MS`: HTTP round-trip duration for quote without taker (via `GET /order` on `https://api.jup.ag/swap/v2/order` without `taker` parameter, functioning as V2 price check). Marked with `quoteSource: 'NETWORK'` or `'CACHE'`.
+4. `JUPITER_ORDER_HTTP_MS`: HTTP round-trip duration for order with taker (via `GET /order` on `https://api.jup.ag/swap/v2/order` with `taker: userPublicKey` returning transaction and `requestId`).
 5. `LOCAL_SIGN_MS`: Monotonic duration of local private key signature.
 6. `SOLANA_SIMULATION_MS`: Monotonic duration of pre-flight RPC simulation.
-7. `JUPITER_EXECUTE_HTTP_MS`: HTTP round-trip duration of `/swap-instructions` or execution dispatch.
+7. `JUPITER_EXECUTE_HTTP_MS`: HTTP round-trip duration of execution dispatch (via `POST /execute` on `https://api.jup.ag/swap/v2/execute`).
 
 ### 5.2 Solana RPC Instrumentation & Provider Provenance
-Every outbound RPC call via `SolanaWallet` is instrumented:
+Every outbound RPC call via `SolanaWallet` is instrumented across all 7 supported wallet methods:
 - **Provider Alias Classification:** Sanitizes endpoint URLs to high-level aliases:
   - `HELIUS`: `*helius*`
   - `QUICKNODE`: `*quiknode*` / `*quicknode*`
   - `SOLANA_PUBLIC`: `*solana.com*`
   - `CUSTOM_PRIVATE`: Any authenticated custom RPC URL (URL and API key stripped)
   - `UNKNOWN`: Unrecognized hostnames
-- **Method Duration:** Monotonic execution duration measured per method (`getBalance`, `getAccountInfo`, `getParsedTransaction`, `sendRawTransaction`).
+- **Method Duration:** Monotonic execution duration measured per method across all 7 instrumented Solana RPC calls: `getBalance`, `getParsedTransaction`, `getSignaturesForAddress`, `getParsedTokenAccountsByOwner`, `getAccountInfo`, `getLatestBlockhash`, `sendAndConfirmTransaction`.
 - **Slot Capture:** Captured strictly from RPC response context (`context.slot`). ZERO synthetic `getSlot()` requests are generated to avoid adding RPC overhead.
 
 ---

@@ -45,12 +45,12 @@ To ensure absolute audit clarity, every stage is classified into one of three st
 | **1. Ingestion** | On-chain swap landed → Nexus receives event | Solana BlockTime vs Wall Clock | **COARSE HISTORICAL ONLY** (Replay)<br>**NOT YET MEASURED** (Live) | `approxEventToObservationMs`<br>(bounds: ±1000ms) | < 250 ms (via WS/gRPC in V2.4) |
 | **2. Decision** | Evaluation of exit criteria / Laya System 1 | Process Monotonic / Wall Clock | **MEASURED NOW** | `observationGapMs`<br>`layaTriagemMs` | < 50 ms |
 | **3. Queue Wait** | `JupiterTrafficCoordinator` permit acquisition | Process Monotonic | **MEASURED NOW** | `JUPITER_QUEUE_WAIT_MS` | < 50 ms |
-| **4. Quote HTTP** | Round-trip HTTP to Jupiter `/quote` endpoint | Process Monotonic | **MEASURED NOW** | `JUPITER_QUOTE_HTTP_MS` | < 150 ms |
-| **5. Order HTTP** | Round-trip HTTP to Jupiter `/swap` endpoint | Process Monotonic | **MEASURED NOW** | `JUPITER_ORDER_HTTP_MS` | < 200 ms |
+| **4. Quote HTTP** | Round-trip HTTP for quote without taker (via `GET /order` price check) | Process Monotonic | **MEASURED NOW** | `JUPITER_QUOTE_HTTP_MS` | < 150 ms |
+| **5. Order HTTP** | Round-trip HTTP for order with taker (via `GET /order` with taker) | Process Monotonic | **MEASURED NOW** | `JUPITER_ORDER_HTTP_MS` | < 200 ms |
 | **6a. Sign** | Local transaction signing with Ed25519 keypair | Process Monotonic | **MEASURED NOW** | `LOCAL_SIGN_MS` | < 5 ms |
 | **6b. Simulate** | Pre-flight transaction simulation on Solana RPC | Process Monotonic | **MEASURED NOW** | `SOLANA_SIMULATION_MS` | < 120 ms |
-| **7. Execute HTTP** | Round-trip HTTP dispatching transaction | Process Monotonic | **MEASURED NOW** | `JUPITER_EXECUTE_HTTP_MS` | < 300 ms |
-| **8. Reconcile** | Polling confirmation & wallet balance update | Process Monotonic & Wall Clock | **MEASURED NOW** (RPC methods)<br>**NOT YET MEASURED** (FillLedger) | `SOLANA_RPC` duration<br>`decisionToExecutionMs` | < 1,500 ms |
+| **7. Execute HTTP** | Round-trip HTTP dispatching transaction (via `POST /execute`) | Process Monotonic | **MEASURED NOW** | `JUPITER_EXECUTE_HTTP_MS` | < 300 ms |
+| **8. Reconcile** | Polling confirmation & wallet balance update (7 RPC methods) | Process Monotonic & Wall Clock | **MEASURED NOW** (RPC methods)<br>**NOT YET MEASURED** (FillLedger) | `SOLANA_RPC` duration<br>`decisionToExecutionMs` | < 1,500 ms |
 
 ---
 

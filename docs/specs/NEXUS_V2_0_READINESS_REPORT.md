@@ -19,11 +19,11 @@ Nexus V2.0 completes the **Observability & Historical Benchmark Foundation**. Al
 
 ### 2.1 O Que a V2.0 Já Consegue Medir?
 1. **Live Jupiter Queue Latency:** Exact milliseconds waiting in the concurrency queue (`JUPITER_QUEUE_WAIT_MS`) via process monotonic clock, completely isolated from network transit.
-2. **Live Jupiter Remote Transit:** Direct HTTP duration for `/quote`, `/swap` (order), and execution dispatch, differentiating cache hits (`quoteSource: 'CACHE'`) from live network calls.
+2. **Live Jupiter Remote Transit:** Direct HTTP duration for quote without taker (via `GET /order` price check), order with taker (via `GET /order`), and execution dispatch (via `POST /execute`), differentiating cache hits (`quoteSource: 'CACHE'`) from live network calls.
 3. **Live Local Signing & Simulation:** Precise monotonic duration of Ed25519 CPU signature (`LOCAL_SIGN_MS`) and RPC simulation (`SOLANA_SIMULATION_MS`).
-4. **Live Solana RPC Provenance & Latency:** Latency measured per RPC method (`getBalance`, `getAccountInfo`, `getParsedTransaction`) mapped to sanitized provider aliases (`HELIUS`, `QUICKNODE`, `SOLANA_PUBLIC`, `CUSTOM_PRIVATE`), with zero credential leakage and zero synthetic slot requests.
+4. **Live Solana RPC Provenance & Latency:** Latency measured across all 7 supported wallet RPC methods (`getBalance`, `getParsedTransaction`, `getSignaturesForAddress`, `getParsedTokenAccountsByOwner`, `getAccountInfo`, `getLatestBlockhash`, `sendAndConfirmTransaction`) mapped to sanitized provider aliases (`HELIUS`, `QUICKNODE`, `SOLANA_PUBLIC`, `CUSTOM_PRIVATE`), with zero credential leakage and zero synthetic slot requests.
 5. **Namespaced Program Errors:** Disambiguation of custom program error codes via mandatory `(programId, customCode)` pairs (e.g. Jupiter `6014` = Incorrect Token Program ID, NOT slippage).
-6. **Telemetry Health & Non-Disruption:** Atomic tracking of dropped spans (`droppedSpansCount`) and internal formatting exceptions (`telemetryInternalErrorCount`) with guaranteed non-blocking execution.
+6. **Telemetry Health & Non-Disruption:** Atomic tracking of dropped spans (`droppedSpansCount`, ring buffer capacity 5,000) and internal formatting exceptions (`telemetryInternalErrorCount`) with guaranteed non-blocking execution.
 7. **Deterministic Replay Benchmarking:** Full historical reconstruction of 4 market crashes (Tesla, SSI, Mr Beast, SUPERPIG) measuring `fillVsSignalQuotePct`, `drawdownFromMfe`, `confirmedProceeds`, and accounting divergence with zero lookahead and zero network calls.
 
 ### 2.2 O Que a V2.0 Ainda NÃO Consegue Medir?
@@ -32,7 +32,7 @@ Nexus V2.0 completes the **Observability & Historical Benchmark Foundation**. Al
 3. **Process-Independent Position State:** Multi-fill position state across hard process restarts is not yet persistent in a dedicated database ledger.
 
 ### 2.3 O Que Continua Bloqueando a V2.1?
-- **NADA.** V2.0 observability and benchmarking prerequisites are 100% complete and verified (420 passing tests). Phase V2.1 (`FillLedger` + `ExitIntents`) is formally unblocked.
+- **NADA.** V2.0 observability and benchmarking prerequisites are 100% complete and verified (428 passing tests). Phase V2.1 (`FillLedger` + `ExitIntents`) is formally unblocked.
 
 ### 2.4 O Que Continua Bloqueando o WebSocket?
 - **V2.1 (Fill Ledger) + V2.2 (Decoupled Monitor) + V2.3 (Position Versioning).**
@@ -61,12 +61,12 @@ The table below catalogs every metric in Nexus V2.0. Every metric is assigned a 
 |---|---|---|---|---|---|---|---|
 | `JUPITER_QUEUE_WAIT_MS` | `JupiterTrafficCoordinator` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Time waiting for coordinator concurrency permit |
 | `JUPITER_COORDINATOR_TOTAL_MS` | `JupiterTrafficCoordinator` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | NO (Informational) | Queue wait + operation execution callback |
-| `JUPITER_QUOTE_HTTP_MS` | `DexAggregatorService` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Outbound HTTP time for `/quote` (0 if cached) |
-| `JUPITER_ORDER_HTTP_MS` | `DexAggregatorService` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Outbound HTTP time for `/swap` |
+| `JUPITER_QUOTE_HTTP_MS` | `DexAggregatorService` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Outbound HTTP time for quote without taker via `GET /order` (0 if cached) |
+| `JUPITER_ORDER_HTTP_MS` | `DexAggregatorService` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Outbound HTTP time for order with taker via `GET /order` |
 | `LOCAL_SIGN_MS` | `SolanaWallet` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Ed25519 local keypair signature |
 | `SOLANA_SIMULATION_MS` | `SolanaWallet` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Pre-flight transaction simulation duration |
-| `JUPITER_EXECUTE_HTTP_MS` | `DexAggregatorService` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Transaction submission round-trip |
-| `SOLANA_RPC [by method]` | `SolanaWallet` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | RPC duration per method (`getBalance`, etc.) |
+| `JUPITER_EXECUTE_HTTP_MS` | `DexAggregatorService` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | Transaction submission round-trip via `POST /execute` |
+| `SOLANA_RPC [by method]` | `SolanaWallet` | Monotonic (`hrtime`) | < 0.1 ms | `LIVE_MEASURED` | YES | YES | RPC duration per method across 7 methods (`getBalance`, `getParsedTransaction`, etc.) |
 | `observationGapMs` | Polling Engine / Replay | Monotonic / Wall | ~1 ms | `LIVE_MEASURED` / `HISTORICAL_RECONSTRUCTED` | YES | YES | Gap between consecutive monitor iterations |
 | `approxEventToObservationMs` | Replay Engine | BlockTime vs Wall | COARSE (~1s) | `ESTIMATED` / `HISTORICAL_RECONSTRUCTED` | YES | NO (Coarse only) | Bounds: `lowerBoundMs` to `upperBoundMs` |
 | `fillVsSignalQuotePct` | Replay / Financial Contract | Numeric Quote | 0.0001% | `HISTORICAL_RECONSTRUCTED` | YES | YES | Formula: `((fill - quote) / quote) * 100` |
