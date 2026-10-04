@@ -9,6 +9,13 @@ import {
   getGlobalJupiterTrafficCoordinator,
   type JupiterPriority
 } from './jupiterTrafficCoordinator.js';
+import {
+  nowMonotonicNs,
+  diffMonotonicMs,
+  nowWallMs,
+  type TelemetrySpan
+} from '../types/telemetry.js';
+import { globalTelemetryBuffer } from '../telemetry/telemetryBuffer.js';
 
 export interface SwapQuoteParams {
   inputMint: string;
@@ -20,6 +27,8 @@ export interface SwapQuoteParams {
   maxAutoSlippageBps?: number;
   poolLiquidityUsd?: number | null;
   trafficPriority?: JupiterPriority;
+  traceId?: string;
+  operationType?: string;
 }
 
 export interface SwapQuoteResult {
@@ -36,6 +45,13 @@ export interface SwapQuoteResult {
   feeBps?: number;
   feeMint?: string;
   rawQuote?: any;
+  quoteSource?: 'CACHE' | 'NETWORK';
+  timingProfile?: {
+    quoteHttpMs: number;
+    quoteParseMs: number;
+    quoteTotalMs: number;
+    quoteSource: 'CACHE' | 'NETWORK';
+  };
 }
 
 export interface DexAggregatorConfig {
@@ -58,7 +74,7 @@ export class JupiterQuoteException extends Error {
 }
 
 /**
- * Cotação oficial Jupiter Swap API V2.
+ * Cotação oficial Jupiter Swap API V2 instrumentada para V2.0.
  *
  * /order sem taker funciona como price check: retorna preço/rota, mas não
  * retorna transação. Para autoSlippage=true não enviamos override de slippage,
@@ -71,7 +87,7 @@ export class DexAggregatorService {
   private rateLimitMs: number;
   private cacheTtlMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
-  private quoteCache = new Map<string, { expiresAt: number; result: SwapQuoteResult }>();
+  private quoteCache = new Map<string, { cachedAt: number; expiresAt: number; result: SwapQuoteResult }>();
 
   public static readonly MAX_ALLOWED_SLIPPAGE_BPS = HARD_CAP_SLIPPAGE_BPS;
   public static readonly MIN_SLIPPAGE_FLOOR_BPS = 250;
@@ -142,7 +158,6 @@ export class DexAggregatorService {
     };
 
     if (params.autoSlippage) {
-      // Swap V2 /order aplica RTSE automaticamente quando não há override.
       const collisionUsd =
         params.autoSlippageCollisionUsdValue ?? computeCollisionUsd(params.poolLiquidityUsd);
       console.log(
@@ -157,15 +172,43 @@ export class DexAggregatorService {
       queryParams.slippageBps = requestedSlippageBps;
     }
 
-    const cacheKey = JSON.stringify({queryParams, slippageCapBps: requestedSlippageBps});
+    const cacheKey = JSON.stringify({ queryParams, slippageCapBps: requestedSlippageBps });
     const cached = this.quoteCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.result;
+
+    // 1. Distinguir CACHE HIT de NETWORK REQUEST
+    if (cached && cached.expiresAt > Date.now()) {
+      const cacheAgeMs = Date.now() - cached.cachedAt;
+      this.emitQuoteTelemetry({
+        traceId: params.traceId,
+        operationType: params.operationType || 'quote',
+        quoteSource: 'CACHE',
+        cacheHit: true,
+        cacheAgeMs,
+        durationMs: 0,
+        status: 'SUCCESS',
+        attemptNumber: 1
+      });
+      return {
+        ...cached.result,
+        quoteSource: 'CACHE',
+        timingProfile: {
+          quoteHttpMs: 0,
+          quoteParseMs: 0,
+          quoteTotalMs: 0,
+          quoteSource: 'CACHE'
+        }
+      };
+    }
     if (cached) this.quoteCache.delete(cacheKey);
 
     let response: any;
     let lastError: any;
+    let successfulAttempt = 1;
+    let successfulHttpMs = 0;
+    let successfulParseMs = 0;
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      const requestStartedMonoNs = nowMonotonicNs();
       try {
         response = await this.trafficCoordinator.schedule(
           params.trafficPriority ?? 5,
@@ -174,12 +217,34 @@ export class DexAggregatorService {
             timeout: 8000,
             headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
           }),
-          'general'
+          'general',
+          { traceId: params.traceId, operationType: params.operationType || 'quote' }
         );
+
+        const responseReceivedMonoNs = nowMonotonicNs();
+        successfulAttempt = attempt + 1;
+        successfulHttpMs = diffMonotonicMs(requestStartedMonoNs, responseReceivedMonoNs);
         break;
       } catch (err: any) {
         lastError = err;
+        const responseReceivedMonoNs = nowMonotonicNs();
+        const attemptHttpMs = diffMonotonicMs(requestStartedMonoNs, responseReceivedMonoNs);
         const status = err?.response?.status;
+        const isTimeout = Boolean(err?.code === 'ECONNABORTED' || String(err?.message || '').toLowerCase().includes('timeout'));
+
+        this.emitQuoteTelemetry({
+          traceId: params.traceId,
+          operationType: params.operationType || 'quote',
+          quoteSource: 'NETWORK',
+          cacheHit: false,
+          durationMs: attemptHttpMs,
+          status: 'ERROR',
+          httpStatus: status,
+          attemptNumber: attempt + 1,
+          timedOut: isTimeout,
+          errorClass: err?.name || 'AxiosError'
+        });
+
         if (status === 429 && attempt === 0) {
           const retryAfterHeader = Number(err?.response?.headers?.['retry-after'] || 0);
           const configuredBackoff = /fake\.invalid/i.test(this.jupiterApiBaseUrl)
@@ -212,6 +277,7 @@ export class DexAggregatorService {
       );
     }
 
+    const parseStartMonoNs = nowMonotonicNs();
     const data = response.data;
     if (!data || data.inAmount === undefined || data.outAmount === undefined) {
       throw new JupiterQuoteException(
@@ -238,6 +304,10 @@ export class DexAggregatorService {
       ? Number(data.priceImpact)
       : priceImpactFromPercent;
 
+    const parseEndMonoNs = nowMonotonicNs();
+    successfulParseMs = diffMonotonicMs(parseStartMonoNs, parseEndMonoNs);
+    const quoteTotalMs = successfulHttpMs + successfulParseMs;
+
     const result: SwapQuoteResult = {
       inputMint: params.inputMint,
       outputMint: params.outputMint,
@@ -254,7 +324,14 @@ export class DexAggregatorService {
       requestId: data.requestId ? String(data.requestId) : undefined,
       feeBps: Number.isFinite(Number(data.feeBps)) ? Number(data.feeBps) : undefined,
       feeMint: data.feeMint ? String(data.feeMint) : undefined,
-      rawQuote: data
+      rawQuote: data,
+      quoteSource: 'NETWORK',
+      timingProfile: {
+        quoteHttpMs: successfulHttpMs,
+        quoteParseMs: successfulParseMs,
+        quoteTotalMs,
+        quoteSource: 'NETWORK'
+      }
     };
 
     console.log(
@@ -263,13 +340,86 @@ export class DexAggregatorService {
       `| Rota=${result.routePlanSummary}`
     );
 
+    this.emitQuoteTelemetry({
+      traceId: params.traceId,
+      operationType: params.operationType || 'quote',
+      quoteSource: 'NETWORK',
+      cacheHit: false,
+      durationMs: quoteTotalMs,
+      status: 'SUCCESS',
+      httpStatus: 200,
+      attemptNumber: successfulAttempt,
+      quoteHttpMs: successfulHttpMs,
+      quoteParseMs: successfulParseMs,
+      quoteTotalMs,
+      slippageBps: returnedSlippageBps,
+      requestId: result.requestId,
+      router: result.router,
+      mode: result.mode
+    });
+
     if (this.cacheTtlMs > 0) {
       this.quoteCache.set(cacheKey, {
+        cachedAt: Date.now(),
         expiresAt: Date.now() + this.cacheTtlMs,
         result
       });
     }
 
     return result;
+  }
+
+  private emitQuoteTelemetry(metadata: {
+    traceId?: string;
+    operationType: string;
+    quoteSource: 'CACHE' | 'NETWORK';
+    cacheHit: boolean;
+    cacheAgeMs?: number;
+    durationMs: number;
+    status: 'SUCCESS' | 'ERROR';
+    httpStatus?: number;
+    attemptNumber: number;
+    timedOut?: boolean;
+    errorClass?: string;
+    quoteHttpMs?: number;
+    quoteParseMs?: number;
+    quoteTotalMs?: number;
+    slippageBps?: number;
+    requestId?: string;
+    router?: string;
+    mode?: string;
+  }): void {
+    try {
+      const traceId = metadata.traceId || `quote_${Date.now()}`;
+      const span: TelemetrySpan = {
+        id: `span_quote_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        traceId,
+        spanName: 'jupiter_quote',
+        providerAlias: 'JUPITER',
+        durationMs: metadata.durationMs,
+        status: metadata.status,
+        createdAtWallMs: nowWallMs(),
+        metadata: {
+          operationType: metadata.operationType,
+          quoteSource: metadata.quoteSource,
+          cacheHit: metadata.cacheHit,
+          cacheAgeMs: metadata.cacheAgeMs,
+          httpStatus: metadata.httpStatus,
+          attemptNumber: metadata.attemptNumber,
+          timedOut: metadata.timedOut,
+          errorClass: metadata.errorClass,
+          quoteHttpMs: metadata.quoteHttpMs,
+          quoteParseMs: metadata.quoteParseMs,
+          quoteTotalMs: metadata.quoteTotalMs,
+          slippageBps: metadata.slippageBps,
+          requestId: metadata.requestId,
+          router: metadata.router,
+          mode: metadata.mode
+        }
+      };
+      globalTelemetryBuffer.push(span);
+    } catch {
+      // Non-blocking: never allow telemetry to fail quotes
+    }
   }
 }

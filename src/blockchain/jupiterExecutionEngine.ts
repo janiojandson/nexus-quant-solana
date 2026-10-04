@@ -5,6 +5,13 @@ import {
   JupiterTrafficCoordinator,
   type JupiterPriority
 } from './jupiterTrafficCoordinator.js';
+import {
+  nowMonotonicNs,
+  diffMonotonicMs,
+  nowWallMs,
+  type TelemetrySpan
+} from '../types/telemetry.js';
+import { globalTelemetryBuffer } from '../telemetry/telemetryBuffer.js';
 
 const MAX_SLIPPAGE_BPS = 750;
 
@@ -25,6 +32,10 @@ export interface SwapExecutionRequest {
   skipPreflight?: boolean;
   maxPriorityFeeLamports?: number;
   trafficPriority?: JupiterPriority;
+  traceId?: string;
+  tradeId?: string;
+  positionId?: string;
+  decisionId?: string;
 }
 
 export interface SwapExecutionResponse {
@@ -41,6 +52,12 @@ export interface SwapExecutionResponse {
   feeBps?: number;
   feeMint?: string;
   slippageBps?: number;
+  timingProfile?: {
+    orderHttpMs?: number;
+    localSignMs?: number;
+    simulationMs?: number;
+    executeHttpMs?: number;
+  };
 }
 
 export interface JupiterEngineConfig {
@@ -52,7 +69,6 @@ export interface JupiterEngineConfig {
   apiKey?: string;
   v2BaseUrl?: string;
   trafficCoordinator?: JupiterTrafficCoordinator;
-  // Mantidos apenas para compatibilidade com configuração antiga.
   buyMaxPriorityFeeLamports?: number;
   sellMaxPriorityFeeLamports?: number;
 }
@@ -130,14 +146,16 @@ export class JupiterExecutionEngine {
     outputMint: string,
     amountLamports: number,
     slippageBps = 400,
-    trafficPriority: JupiterPriority = 3
+    trafficPriority: JupiterPriority = 3,
+    traceId?: string
   ) {
     return this.dexAggregator.getQuote({
       inputMint,
       outputMint,
       amountLamports,
       slippageBps,
-      trafficPriority
+      trafficPriority,
+      traceId
     });
   }
 
@@ -159,7 +177,7 @@ export class JupiterExecutionEngine {
     return requested;
   }
 
-  private async getOrder(req: SwapExecutionRequest): Promise<JupiterV2OrderResponse> {
+  private async getOrder(req: SwapExecutionRequest): Promise<{ order: JupiterV2OrderResponse; orderHttpMs: number }> {
     if (!this.apiKey) {
       throw new Error('JUPITER_API_KEY ausente para Jupiter Swap API V2.');
     }
@@ -175,6 +193,8 @@ export class JupiterExecutionEngine {
     if (slippageBps !== undefined) params.slippageBps = slippageBps;
 
     let response: any;
+    const orderStartMonoNs = nowMonotonicNs();
+
     try {
       response = await this.trafficCoordinator.schedule(
         req.trafficPriority ?? 4,
@@ -183,9 +203,23 @@ export class JupiterExecutionEngine {
           timeout: 10_000,
           headers: { 'x-api-key': this.apiKey }
         }),
-        'general'
+        'general',
+        { traceId: req.traceId, operationType: 'order' }
       );
     } catch (err: any) {
+      const orderEndMonoNs = nowMonotonicNs();
+      const orderElapsedMs = diffMonotonicMs(orderStartMonoNs, orderEndMonoNs);
+      this.emitSpan({
+        traceId: req.traceId,
+        spanName: 'jupiter_order',
+        durationMs: orderElapsedMs,
+        status: 'ERROR',
+        metadata: {
+          requestedAmountAtomic: String(req.amountLamports),
+          errorClass: err?.name || 'Error'
+        }
+      });
+
       const detail =
         err?.response?.data?.error ??
         err?.response?.data?.message ??
@@ -196,8 +230,21 @@ export class JupiterExecutionEngine {
       );
     }
 
+    const orderEndMonoNs = nowMonotonicNs();
+    const orderHttpMs = diffMonotonicMs(orderStartMonoNs, orderEndMonoNs);
+
     const order = response.data as JupiterV2OrderResponse;
     if (!order?.requestId || !order?.transaction) {
+      this.emitSpan({
+        traceId: req.traceId,
+        spanName: 'jupiter_order',
+        durationMs: orderHttpMs,
+        status: 'ERROR',
+        metadata: {
+          errorCode: order?.errorCode,
+          errorMessage: order?.errorMessage
+        }
+      });
       throw new Error(
         `Jupiter V2 /order sem transação: router=${order?.router || 'unknown'} ` +
         `code=${order?.errorCode ?? 'n/a'} message=${order?.errorMessage || 'n/a'}`
@@ -217,12 +264,29 @@ export class JupiterExecutionEngine {
       );
     }
 
+    // Telemetria da ordem sem expor a transação base64
+    this.emitSpan({
+      traceId: req.traceId,
+      spanName: 'jupiter_order',
+      durationMs: orderHttpMs,
+      status: 'SUCCESS',
+      metadata: {
+        requestedAmountAtomic: String(req.amountLamports),
+        expectedOutAtomic: order.outAmount,
+        minimumOutAtomic: order.otherAmountThreshold,
+        slippageBps: rtseSlippage,
+        router: order.router,
+        mode: order.mode,
+        requestId: order.requestId
+      }
+    });
+
     console.log(
       `🧭 [Jupiter V2 /order] router=${order.router || 'unknown'} mode=${order.mode || 'unknown'} ` +
       `| slippage=${rtseSlippage}bps | fee=${order.feeBps ?? 'n/d'}bps | out=${order.outAmount}`
     );
     this.assertOrderNotExpired(order);
-    return order;
+    return { order, orderHttpMs };
   }
 
   private assertOrderNotExpired(order: JupiterV2OrderResponse): void {
@@ -236,8 +300,10 @@ export class JupiterExecutionEngine {
   private signOrder(
     order: JupiterV2OrderResponse,
     req: SwapExecutionRequest
-  ): { transaction: VersionedTransaction; signedTransaction: string } {
+  ): { transaction: VersionedTransaction; signedTransaction: string; localSignMs: number } {
     if (!req.keypair) throw new Error('Keypair ausente para assinatura Jupiter V2.');
+
+    const signStartMonoNs = nowMonotonicNs();
 
     const transaction = VersionedTransaction.deserialize(
       Buffer.from(order.transaction as string, 'base64')
@@ -257,35 +323,97 @@ export class JupiterExecutionEngine {
       );
     }
 
-    // VersionedTransaction.sign permite assinatura parcial. Isso é necessário
-    // para JupiterZ, onde o market maker adiciona outro signer no /execute.
     transaction.sign([req.keypair]);
+
+    const signEndMonoNs = nowMonotonicNs();
+    const localSignMs = diffMonotonicMs(signStartMonoNs, signEndMonoNs);
+
+    // Medição local de assinatura (sem expor chave privada nem bytes assinados)
+    this.emitSpan({
+      traceId: req.traceId,
+      spanName: 'local_sign',
+      durationMs: localSignMs,
+      status: 'SUCCESS',
+      metadata: {
+        wallet: req.userPublicKey
+      }
+    });
 
     return {
       transaction,
-      signedTransaction: Buffer.from(transaction.serialize()).toString('base64')
+      signedTransaction: Buffer.from(transaction.serialize()).toString('base64'),
+      localSignMs
     };
   }
 
   private async simulateSignedTransaction(
-    transaction: VersionedTransaction
-  ): Promise<{ success: boolean; error?: string; unitsConsumed?: number }> {
+    transaction: VersionedTransaction,
+    traceId?: string
+  ): Promise<{ success: boolean; error?: string; unitsConsumed?: number; simulationMs: number }> {
+    const simStartMonoNs = nowMonotonicNs();
     try {
       const simRes = await this.connection.simulateTransaction(transaction);
+      const simEndMonoNs = nowMonotonicNs();
+      const simulationMs = diffMonotonicMs(simStartMonoNs, simEndMonoNs);
+
       if (simRes.value.err) {
+        this.emitSpan({
+          traceId,
+          spanName: 'solana_simulation',
+          providerAlias: 'SOLANA_PUBLIC',
+          durationMs: simulationMs,
+          status: 'ERROR',
+          metadata: {
+            method: 'simulateTransaction',
+            success: false,
+            unitsConsumed: simRes.value.unitsConsumed,
+            errorDetails: JSON.stringify(simRes.value.err)
+          }
+        });
         return {
           success: false,
           unitsConsumed: simRes.value.unitsConsumed,
+          simulationMs,
           error: `Simulação pré-voo rejeitada: ${JSON.stringify(simRes.value.err)}`
         };
       }
+
+      this.emitSpan({
+        traceId,
+        spanName: 'solana_simulation',
+        providerAlias: 'SOLANA_PUBLIC',
+        durationMs: simulationMs,
+        status: 'SUCCESS',
+        metadata: {
+          method: 'simulateTransaction',
+          success: true,
+          unitsConsumed: simRes.value.unitsConsumed
+        }
+      });
+
       return {
         success: true,
-        unitsConsumed: simRes.value.unitsConsumed
+        unitsConsumed: simRes.value.unitsConsumed,
+        simulationMs
       };
     } catch (err: any) {
+      const simEndMonoNs = nowMonotonicNs();
+      const simulationMs = diffMonotonicMs(simStartMonoNs, simEndMonoNs);
+      this.emitSpan({
+        traceId,
+        spanName: 'solana_simulation',
+        providerAlias: 'SOLANA_PUBLIC',
+        durationMs: simulationMs,
+        status: 'ERROR',
+        metadata: {
+          method: 'simulateTransaction',
+          success: false,
+          errorDetails: err?.message || String(err)
+        }
+      });
       return {
         success: false,
+        simulationMs,
         error: `Falha RPC na simulação V2: ${err?.message || err}`
       };
     }
@@ -299,9 +427,10 @@ export class JupiterExecutionEngine {
       if (!req.keypair) {
         return { success: false, error: 'Keypair ausente para simulação V2.' };
       }
-      const order = await this.getOrder(req);
+      const { order } = await this.getOrder(req);
       const { transaction } = this.signOrder(order, req);
-      return await this.simulateSignedTransaction(transaction);
+      const res = await this.simulateSignedTransaction(transaction, req.traceId);
+      return { success: res.success, error: res.error, unitsConsumed: res.unitsConsumed };
     } catch (err: any) {
       return {
         success: false,
@@ -310,16 +439,20 @@ export class JupiterExecutionEngine {
     }
   }
 
-  private async postExecute(payload: {
-    signedTransaction: string;
-    requestId: string;
-    lastValidBlockHeight?: string | number;
-  }, priority: JupiterPriority): Promise<{ response?: JupiterV2ExecuteResponse; uncertainError?: string }> {
+  private async postExecute(
+    payload: {
+      signedTransaction: string;
+      requestId: string;
+      lastValidBlockHeight?: string | number;
+    },
+    priority: JupiterPriority,
+    traceId?: string
+  ): Promise<{ response?: JupiterV2ExecuteResponse; uncertainError?: string; executeHttpMs: number }> {
     let lastError: any;
+    let totalExecuteHttpMs = 0;
 
-    // Retry somente do MESMO requestId + MESMA transação assinada.
-    // Nunca cria uma segunda ordem em caso de timeout.
     for (let attempt = 0; attempt < 2; attempt++) {
+      const execStartMonoNs = nowMonotonicNs();
       try {
         const response = await this.trafficCoordinator.schedule(
           priority,
@@ -334,16 +467,58 @@ export class JupiterExecutionEngine {
               }
             }
           ),
-          'execute'
+          'execute',
+          { traceId, operationType: 'execute' }
         );
-        return { response: response.data as JupiterV2ExecuteResponse };
+
+        const execEndMonoNs = nowMonotonicNs();
+        const executeHttpMs = diffMonotonicMs(execStartMonoNs, execEndMonoNs);
+        totalExecuteHttpMs += executeHttpMs;
+
+        const executeData = response.data as JupiterV2ExecuteResponse;
+
+        this.emitSpan({
+          traceId,
+          spanName: 'jupiter_execute',
+          providerAlias: 'JUPITER',
+          durationMs: executeHttpMs,
+          status: executeData.status === 'Success' ? 'SUCCESS' : 'ERROR',
+          metadata: {
+            stage: executeData.status === 'Success' ? 'PROVIDER_SUCCESS_RECEIPT' : 'EXECUTE_HTTP_RESPONSE',
+            attemptNumber: attempt + 1,
+            requestId: payload.requestId,
+            code: executeData.code,
+            signature: executeData.signature
+          }
+        });
+
+        return { response: executeData, executeHttpMs: totalExecuteHttpMs };
       } catch (err: any) {
         lastError = err;
+        const execEndMonoNs = nowMonotonicNs();
+        const executeHttpMs = diffMonotonicMs(execStartMonoNs, execEndMonoNs);
+        totalExecuteHttpMs += executeHttpMs;
+
         const status = Number(err?.response?.status || 0);
         const body = err?.response?.data;
 
+        this.emitSpan({
+          traceId,
+          spanName: 'jupiter_execute',
+          providerAlias: 'JUPITER',
+          durationMs: executeHttpMs,
+          status: 'ERROR',
+          metadata: {
+            stage: 'EXECUTE_HTTP_RESPONSE',
+            attemptNumber: attempt + 1,
+            requestId: payload.requestId,
+            httpStatus: status,
+            errorClass: err?.name || 'AxiosError'
+          }
+        });
+
         if (body && (body.status === 'Success' || body.status === 'Failed')) {
-          return { response: body as JupiterV2ExecuteResponse };
+          return { response: body as JupiterV2ExecuteResponse, executeHttpMs: totalExecuteHttpMs };
         }
 
         const retryable = !status || status === 429 || status >= 500;
@@ -366,7 +541,8 @@ export class JupiterExecutionEngine {
     return {
       uncertainError:
         `/execute sem resposta conclusiva após retry idempotente: ` +
-        `${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`
+        `${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`,
+      executeHttpMs: totalExecuteHttpMs
     };
   }
 
@@ -381,7 +557,8 @@ export class JupiterExecutionEngine {
           autoSlippage: req.autoSlippage,
           maxAutoSlippageBps: req.maxAutoSlippageBps,
           poolLiquidityUsd: req.poolLiquidityUsd,
-          trafficPriority: req.trafficPriority ?? 5
+          trafficPriority: req.trafficPriority ?? 5,
+          traceId: req.traceId
         });
 
         return {
@@ -395,7 +572,12 @@ export class JupiterExecutionEngine {
           requestId: quote.requestId,
           feeBps: quote.feeBps,
           feeMint: quote.feeMint,
-          slippageBps: quote.slippageBps
+          slippageBps: quote.slippageBps,
+          timingProfile: {
+            quoteHttpMs: quote.timingProfile?.quoteHttpMs,
+            quoteParseMs: quote.timingProfile?.quoteParseMs,
+            quoteTotalMs: quote.timingProfile?.quoteTotalMs
+          } as any
         };
       } catch (err: any) {
         return {
@@ -411,13 +593,17 @@ export class JupiterExecutionEngine {
     }
 
     try {
-      const order = await this.getOrder(req);
-      const { transaction, signedTransaction } = this.signOrder(order, req);
+      const { order, orderHttpMs } = await this.getOrder(req);
+      const { transaction, signedTransaction, localSignMs } = this.signOrder(order, req);
 
       let unitsConsumed: number | undefined;
+      let simulationMs: number | undefined;
+
       if (!req.skipPreflight) {
-        const simulation = await this.simulateSignedTransaction(transaction);
+        const simulation = await this.simulateSignedTransaction(transaction, req.traceId);
         unitsConsumed = simulation.unitsConsumed;
+        simulationMs = simulation.simulationMs;
+
         if (!simulation.success) {
           console.warn(
             `🛑 [Jupiter V2:Preflight] transmissão cancelada: ${simulation.error}`
@@ -435,7 +621,12 @@ export class JupiterExecutionEngine {
             feeBps: order.feeBps,
             feeMint: order.feeMint,
             slippageBps: Number(order.slippageBps || 0),
-            error: simulation.error
+            error: simulation.error,
+            timingProfile: {
+              orderHttpMs,
+              localSignMs,
+              simulationMs
+            }
           };
         }
       }
@@ -449,7 +640,7 @@ export class JupiterExecutionEngine {
           : {})
       };
 
-      const executed = await this.postExecute(payload, req.trafficPriority ?? 4);
+      const executed = await this.postExecute(payload, req.trafficPriority ?? 4, req.traceId);
 
       if (!executed.response) {
         return {
@@ -465,6 +656,12 @@ export class JupiterExecutionEngine {
           feeBps: order.feeBps,
           feeMint: order.feeMint,
           slippageBps: Number(order.slippageBps || 0),
+          timingProfile: {
+            orderHttpMs,
+            localSignMs,
+            simulationMs,
+            executeHttpMs: executed.executeHttpMs
+          },
           error:
             `${executed.uncertainError || 'Execução V2 inconclusiva'}. ` +
             'Não criar nova ordem até reconciliar o requestId/on-chain.'
@@ -488,18 +685,20 @@ export class JupiterExecutionEngine {
           feeBps: order.feeBps,
           feeMint: order.feeMint,
           slippageBps: Number(order.slippageBps || 0),
+          timingProfile: {
+            orderHttpMs,
+            localSignMs,
+            simulationMs,
+            executeHttpMs: executed.executeHttpMs
+          },
           error:
             `Jupiter V2 /execute falhou code=${result.code}: ` +
             `${result.error || 'sem detalhe'}`
         };
       }
 
-      const actualInput = Number(
-        result.totalInputAmount ?? NaN
-      );
-      const actualOutput = Number(
-        result.totalOutputAmount ?? NaN
-      );
+      const actualInput = Number(result.totalInputAmount ?? NaN);
+      const actualOutput = Number(result.totalOutputAmount ?? NaN);
 
       if (!signature || !Number.isSafeInteger(actualInput) || actualInput <= 0 || !Number.isSafeInteger(actualOutput) || actualOutput <= 0) {
         return {
@@ -515,6 +714,12 @@ export class JupiterExecutionEngine {
           feeBps: order.feeBps,
           feeMint: order.feeMint,
           slippageBps: Number(order.slippageBps || 0),
+          timingProfile: {
+            orderHttpMs,
+            localSignMs,
+            simulationMs,
+            executeHttpMs: executed.executeHttpMs
+          },
           error: 'Jupiter V2 Success missing a valid signature or final wallet totals; reconcile before another order.'
         };
       }
@@ -536,7 +741,13 @@ export class JupiterExecutionEngine {
         requestId: order.requestId,
         feeBps: order.feeBps,
         feeMint: order.feeMint,
-        slippageBps: Number(order.slippageBps || 0)
+        slippageBps: Number(order.slippageBps || 0),
+        timingProfile: {
+          orderHttpMs,
+          localSignMs,
+          simulationMs,
+          executeHttpMs: executed.executeHttpMs
+        }
       };
     } catch (err: any) {
       console.error('❌ [JUPITER V2 ERROR]:', err?.message || err);
@@ -549,6 +760,32 @@ export class JupiterExecutionEngine {
         executionPath: 'V2_META_AGGREGATOR',
         error: err?.message || String(err)
       };
+    }
+  }
+
+  private emitSpan(spanData: {
+    traceId?: string;
+    spanName: string;
+    providerAlias?: 'JUPITER' | 'SOLANA_PUBLIC';
+    durationMs: number;
+    status: 'SUCCESS' | 'ERROR';
+    metadata?: Record<string, unknown>;
+  }): void {
+    try {
+      const traceId = spanData.traceId || `jup_${Date.now()}`;
+      const span: TelemetrySpan = {
+        id: `span_${spanData.spanName}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        traceId,
+        spanName: spanData.spanName,
+        providerAlias: spanData.providerAlias || 'JUPITER',
+        durationMs: spanData.durationMs,
+        status: spanData.status,
+        createdAtWallMs: nowWallMs(),
+        metadata: spanData.metadata
+      };
+      globalTelemetryBuffer.push(span);
+    } catch {
+      // Non-blocking: never allow telemetry to fail execution
     }
   }
 }
