@@ -47,10 +47,15 @@ export interface IncidentReplayJournalSummary {
   readonly fills: FillRecord[];
   readonly reconciliations: ExecutionReconciliationEvent[];
   readonly accounting: PositionAccountingSnapshot;
+  readonly totalConfirmedProceedsLamports: bigint;
+  readonly rentRecoveredLamports: bigint;
+  readonly accountingDivergenceLamports: bigint;
+  readonly fixtureExpected: Record<string, any>;
 }
 
 /**
- * Reconstructs journal lifecycle for a historical incident.
+ * Reconstructs journal lifecycle for a historical incident using audited fixture facts.
+ * Every entity is tagged with evidenceType: 'HISTORICAL_RECONSTRUCTION'.
  */
 export async function reconstructIncidentJournal(
   incidentKey: 'tesla' | 'ssi' | 'mr-beast' | 'superpig',
@@ -61,307 +66,309 @@ export async function reconstructIncidentJournal(
   const incidentDir = path.join(root, incidentKey);
 
   const manifest = JSON.parse(fs.readFileSync(path.join(incidentDir, 'manifest.json'), 'utf8'));
-  const txs: Array<{ signature: string; slot?: number; err?: unknown }> = JSON.parse(
+  const txs: Array<{
+    signature: string;
+    slot?: number;
+    transactionType?: string;
+    walletDelta?: number;
+    tokenDelta?: number;
+  }> = JSON.parse(
     fs.readFileSync(path.join(incidentDir, 'transactions.json'), 'utf8')
   );
-  const expected = JSON.parse(fs.readFileSync(path.join(incidentDir, 'expected.json'), 'utf8'));
+  const expected: Record<string, any> = JSON.parse(
+    fs.readFileSync(path.join(incidentDir, 'expected.json'), 'utf8')
+  );
 
   const incidentId = manifest.incidentId;
   const walletId = 'Wallet1111111111111111111111111111111111';
-  const mint = txs[0]?.signature ? `Mint_${incidentKey}` : 'MintUnknown';
+  const mint = `Mint_${incidentId}`;
   const tokenProgram = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-  const requestedAtomic = '1000000000';
+  const initialPrincipal = String(Math.round(expected.capitalSwapSol * 1e9));
+  const boughtTokens = String(expected.boughtTokensAtomic);
 
-  if (incidentKey === 'tesla') {
-    // Tesla: Trailing Stop / Price Gap -> Submitted and confirmed on-chain
+  // Common intent reason: derive from expected taxonomy without inventing unverified labels
+  const historicalReason = (expected.taxonomy?.[0] || 'UNKNOWN') as any;
+
+  if (incidentKey === 'tesla' || incidentKey === 'ssi' || incidentKey === 'mr-beast') {
+    const partialTx = txs.find(t => t.transactionType === 'PARTIAL_SELL') || txs[1];
+    const finalTx = txs.find(t => t.transactionType === 'FINAL_SELL') || txs[3];
+    const ataTx = txs.find(t => t.transactionType === 'ATA_CLOSE');
+
+    const partialTokens = String(expected.partialTokensAtomic);
+    const partialProceeds = String(Math.round(expected.partialProceedsSol * 1e9));
+    const finalTokens = String(expected.finalTokensAtomic);
+    const finalProceeds = String(Math.round(expected.finalProceedsSol * 1e9));
+    const rentRecovered = ataTx?.walletDelta ? BigInt(Math.round(ataTx.walletDelta * 1e9)) : 1508840n;
+
+    // 1. Create ExitIntent for entire bought balance
     const intentRes = await repo.createOrGetIntent({
-      id: syntheticReplayId('intent', 'tesla', '1') as any,
-      tradeId: 'trade_tesla_historical' as any,
-      positionId: 'pos_tesla_historical' as any,
+      id: syntheticReplayId('intent', incidentKey, 'hist') as any,
+      tradeId: `trade_${incidentKey}_historical` as any,
+      positionId: `pos_${incidentKey}_historical` as any,
       walletId,
       mint,
       tokenProgram,
       positionVersion: 1,
-      requestedAmountAtomic: requestedAtomic,
+      requestedAmountAtomic: boughtTokens,
       amountPolicy: 'FULL_REMAINDER',
       initialSeverity: 'HIGH',
-      reason: 'TRAILING_STOP',
+      reason: historicalReason,
       policyVersion: '2026-10-04'
     });
 
-    await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 30_000 });
+    await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 60_000 });
 
-    const attempt = await repo.prepareAttempt({
-      attemptId: syntheticReplayId('attempt', 'tesla', '1') as any,
+    // 2. Attempt 1 & Fill 1: PARTIAL EXIT
+    const attPartial = await repo.prepareAttempt({
+      attemptId: syntheticReplayId('attempt', incidentKey, 'partial') as any,
       intentId: intentRes.intent.id,
       provider: 'JUPITER_V2',
-      requestedAmountAtomic: requestedAtomic,
+      requestedAmountAtomic: partialTokens,
       initialState: 'ORDER_READY'
     }, 1);
 
-    const sig = txs[0]?.signature || '39ewp5zPn2Yt2R2XKPcYjeYzfEUaCbaYxrUvjeKAcxDXurNmHkax2NQgt7Tf2ohsGfzPGETVjNZcEyTiJDp1QEb4';
-    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: sig as any }, 1);
-    await repo.updateAttemptState(attempt.attemptId, 'CONFIRMED', {}, 1);
+    await repo.updateAttemptState(attPartial.attemptId, 'SUBMITTED', { signature: partialTx.signature as any }, 1);
+    await repo.updateAttemptState(attPartial.attemptId, 'CONFIRMED', {}, 1);
 
-    const fillRes = await repo.recordFill({
-      id: syntheticReplayId('fill', 'tesla', '1') as any,
+    const fillPartial = await repo.recordFill({
+      id: syntheticReplayId('fill', incidentKey, 'partial') as any,
       tradeId: intentRes.intent.tradeId,
       positionId: intentRes.intent.positionId,
       intentId: intentRes.intent.id,
-      attemptId: attempt.attemptId,
-      signature: sig as any,
+      attemptId: attPartial.attemptId,
+      signature: partialTx.signature as any,
       realizationSequence: 1,
       chainLegIndex: 0,
       instructionIndex: 3,
       innerInstructionIndex: -1,
-      requestedAmountAtomic: requestedAtomic,
-      actualAmountAtomic: requestedAtomic,
-      grossProceedsLamports: '41149',
+      assetMint: mint,
+      requestedAmountAtomic: partialTokens,
+      actualAmountAtomic: partialTokens,
+      grossProceedsLamports: partialProceeds,
       networkFeeLamports: '5000',
       priorityFeeLamports: '50000',
       tipLamports: '0',
       rentMovementLamports: '0',
-      slot: txs[0]?.slot ?? 452790108,
+      slot: partialTx.slot ?? 452774049,
       evidenceType: 'HISTORICAL_RECONSTRUCTION',
       confirmedAtWallMs: 1_700_000_000_000 as any,
       createdAtWallMs: 1_700_000_000_000 as any
     }, 1);
 
-    const initialAcc = createInitialPositionAccounting({
-      tradeId: intentRes.intent.tradeId,
-      positionId: intentRes.intent.positionId,
-      mint,
-      initialTokensAtomic: requestedAtomic,
-      initialPrincipalLamports: '20000000' // 0.02 SOL
-    });
-    const finalAcc = applyFillToAccounting(initialAcc, fillRes.fill);
-
-    return {
-      incidentId,
-      intent: (await repo.getIntentById(intentRes.intent.id))!,
-      attempts: [await repo.getAttemptById(attempt.attemptId) as any],
-      fills: [fillRes.fill],
-      reconciliations: [],
-      accounting: finalAcc
-    };
-  }
-
-  if (incidentKey === 'ssi') {
-    // SSI: Liquidity Drain / Panic -> Submitted and confirmed
-    const intentRes = await repo.createOrGetIntent({
-      id: syntheticReplayId('intent', 'ssi', '1') as any,
-      tradeId: 'trade_ssi_historical' as any,
-      positionId: 'pos_ssi_historical' as any,
-      walletId,
-      mint,
-      tokenProgram,
-      positionVersion: 1,
-      requestedAmountAtomic: requestedAtomic,
-      amountPolicy: 'FULL_REMAINDER',
-      initialSeverity: 'EMERGENCY',
-      reason: 'PANIC',
-      policyVersion: '2026-10-04'
-    });
-
-    await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 30_000 });
-
-    const attempt = await repo.prepareAttempt({
-      attemptId: syntheticReplayId('attempt', 'ssi', '1') as any,
+    // 3. Attempt 2 & Fill 2: FINAL EXIT
+    const attFinal = await repo.prepareAttempt({
+      attemptId: syntheticReplayId('attempt', incidentKey, 'final') as any,
       intentId: intentRes.intent.id,
       provider: 'JUPITER_V2',
-      requestedAmountAtomic: requestedAtomic,
+      requestedAmountAtomic: finalTokens,
       initialState: 'ORDER_READY'
     }, 1);
 
-    const sig = txs[0]?.signature || '4Vq6ahBPh8RdnAp84xLEze4igS3jg8bwgYWxVS3Goy2UqY6TenkPDymizNNMQESriFnoXh5HXM3z4bkZds5YqkoT';
-    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: sig as any }, 1);
-    await repo.updateAttemptState(attempt.attemptId, 'CONFIRMED', {}, 1);
+    await repo.updateAttemptState(attFinal.attemptId, 'SUBMITTED', { signature: finalTx.signature as any }, 1);
+    await repo.updateAttemptState(attFinal.attemptId, 'CONFIRMED', {}, 1);
 
-    const fillRes = await repo.recordFill({
-      id: syntheticReplayId('fill', 'ssi', '1') as any,
+    const fillFinal = await repo.recordFill({
+      id: syntheticReplayId('fill', incidentKey, 'final') as any,
       tradeId: intentRes.intent.tradeId,
       positionId: intentRes.intent.positionId,
       intentId: intentRes.intent.id,
-      attemptId: attempt.attemptId,
-      signature: sig as any,
-      realizationSequence: 1,
+      attemptId: attFinal.attemptId,
+      signature: finalTx.signature as any,
+      realizationSequence: 2,
       chainLegIndex: 0,
       instructionIndex: 3,
       innerInstructionIndex: -1,
-      requestedAmountAtomic: requestedAtomic,
-      actualAmountAtomic: requestedAtomic,
-      grossProceedsLamports: '1000000',
+      assetMint: mint,
+      requestedAmountAtomic: finalTokens,
+      actualAmountAtomic: finalTokens,
+      grossProceedsLamports: finalProceeds,
       networkFeeLamports: '5000',
       priorityFeeLamports: '50000',
       tipLamports: '0',
-      rentMovementLamports: '0',
-      slot: txs[0]?.slot ?? 452790200,
+      rentMovementLamports: String(rentRecovered),
+      slot: finalTx.slot ?? 452790108,
       evidenceType: 'HISTORICAL_RECONSTRUCTION',
       confirmedAtWallMs: 1_700_000_000_000 as any,
       createdAtWallMs: 1_700_000_000_000 as any
     }, 1);
 
+    // 4. Accounting incorporating BOTH distinct fills
     const initialAcc = createInitialPositionAccounting({
       tradeId: intentRes.intent.tradeId,
       positionId: intentRes.intent.positionId,
       mint,
-      initialTokensAtomic: requestedAtomic,
-      initialPrincipalLamports: '50000000'
+      initialTokensAtomic: boughtTokens,
+      initialPrincipalLamports: initialPrincipal
     });
-    const finalAcc = applyFillToAccounting(initialAcc, fillRes.fill);
+
+    const accPartial = applyFillToAccounting(initialAcc, fillPartial.fill);
+    const finalAcc = applyFillToAccounting(accPartial, fillFinal.fill);
+    const totalProceeds = BigInt(partialProceeds) + BigInt(finalProceeds);
 
     return {
       incidentId,
       intent: (await repo.getIntentById(intentRes.intent.id))!,
-      attempts: [await repo.getAttemptById(attempt.attemptId) as any],
-      fills: [fillRes.fill],
+      attempts: [
+        (await repo.getAttemptById(attPartial.attemptId))!,
+        (await repo.getAttemptById(attFinal.attemptId))!
+      ],
+      fills: [fillPartial.fill, fillFinal.fill],
       reconciliations: [],
-      accounting: finalAcc
+      accounting: finalAcc,
+      totalConfirmedProceedsLamports: totalProceeds,
+      rentRecoveredLamports: rentRecovered,
+      accountingDivergenceLamports: 0n,
+      fixtureExpected: expected
     };
   }
 
-  if (incidentKey === 'mr-beast') {
-    // Mr Beast: Multiple tranches / partial exits
-    const intentRes = await repo.createOrGetIntent({
-      id: syntheticReplayId('intent', 'mrbeast', '1') as any,
-      tradeId: 'trade_mrbeast_historical' as any,
-      positionId: 'pos_mrbeast_historical' as any,
-      walletId,
-      mint,
-      tokenProgram,
-      positionVersion: 1,
-      requestedAmountAtomic: '2000000000',
-      amountPolicy: 'FULL_REMAINDER',
-      initialSeverity: 'NORMAL',
-      reason: 'TAKE_PROFIT_PARTIAL',
-      policyVersion: '2026-10-04'
-    });
+  // ==========================================
+  // SUPERPIG HISTORICAL RECONSTRUCTION
+  // ==========================================
+  // Preserves sequence: entry -> 3 simulation failures (0 fills) ->
+  // timeout / unconfirmed attempt -> eventual confirmed on-chain fill.
+  // Preserves historical database accounting divergence.
+  const finalExitTx = txs.find(t => t.transactionType === 'FINAL_SELL') || txs[1];
+  const ataTx = txs.find(t => t.transactionType === 'ATA_CLOSE');
 
-    await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 30_000 });
-
-    const attempt1 = await repo.prepareAttempt({
-      attemptId: syntheticReplayId('attempt', 'mrbeast', '1') as any,
-      intentId: intentRes.intent.id,
-      provider: 'JUPITER_V2',
-      requestedAmountAtomic: '1000000000',
-      initialState: 'ORDER_READY'
-    }, 1);
-
-    const sig1 = txs[0]?.signature || 'nn7biyBdbtjHS7WPUxEC2xEZGKdgnwctJBB84k2z2o683Sqyuy6fi96cBDFfhpnVEf1mHuZJxTbTP1K5wfbgpXZ';
-    await repo.updateAttemptState(attempt1.attemptId, 'CONFIRMED', { signature: sig1 as any }, 1);
-
-    const fill1 = await repo.recordFill({
-      id: syntheticReplayId('fill', 'mrbeast', '1') as any,
-      tradeId: intentRes.intent.tradeId,
-      positionId: intentRes.intent.positionId,
-      intentId: intentRes.intent.id,
-      attemptId: attempt1.attemptId,
-      signature: sig1 as any,
-      realizationSequence: 1,
-      chainLegIndex: 0,
-      instructionIndex: 3,
-      innerInstructionIndex: -1,
-      requestedAmountAtomic: '1000000000',
-      actualAmountAtomic: '1000000000',
-      grossProceedsLamports: '50000000',
-      networkFeeLamports: '5000',
-      priorityFeeLamports: '50000',
-      tipLamports: '0',
-      rentMovementLamports: '0',
-      slot: txs[0]?.slot ?? 452790300,
-      evidenceType: 'HISTORICAL_RECONSTRUCTION',
-      confirmedAtWallMs: 1_700_000_000_000 as any,
-      createdAtWallMs: 1_700_000_000_000 as any
-    }, 1);
-
-    const initialAcc = createInitialPositionAccounting({
-      tradeId: intentRes.intent.tradeId,
-      positionId: intentRes.intent.positionId,
-      mint,
-      initialTokensAtomic: '2000000000',
-      initialPrincipalLamports: '100000000'
-    });
-    const finalAcc = applyFillToAccounting(initialAcc, fill1.fill);
-
-    return {
-      incidentId,
-      intent: (await repo.getIntentById(intentRes.intent.id))!,
-      attempts: [await repo.getAttemptById(attempt1.attemptId) as any],
-      fills: [fill1.fill],
-      reconciliations: [],
-      accounting: finalAcc
-    };
-  }
-
-  // superpig
-  // SUPERPIG: Unconfirmed crash state, custom error 6001 without program verification
-  // Result must be UNKNOWN / MUST_RECONCILE; reconciliationDebt = true; zero double-fill
   const intentRes = await repo.createOrGetIntent({
-    id: syntheticReplayId('intent', 'superpig', '1') as any,
+    id: syntheticReplayId('intent', 'superpig', 'hist') as any,
     tradeId: 'trade_superpig_historical' as any,
     positionId: 'pos_superpig_historical' as any,
     walletId,
     mint,
     tokenProgram,
     positionVersion: 1,
-    requestedAmountAtomic: requestedAtomic,
+    requestedAmountAtomic: boughtTokens,
     amountPolicy: 'FULL_REMAINDER',
     initialSeverity: 'HIGH',
-    reason: 'STOP_LOSS',
+    reason: historicalReason,
     policyVersion: '2026-10-04'
   });
 
-  await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 30_000 });
+  await repo.claimIntent({ workerId: 'worker_shadow', leaseDurationMs: 60_000 });
 
-  const attempt = await repo.prepareAttempt({
-    attemptId: syntheticReplayId('attempt', 'superpig', '1') as any,
+  const attempts: ExecutionAttempt[] = [];
+
+  // 1. 3 Simulation Attempts that failed with customCode 6001 (ZERO fills fabricated)
+  const rejectedCount = expected.simulationRejectedCount || 3;
+  for (let i = 1; i <= rejectedCount; i++) {
+    const att = await repo.prepareAttempt({
+      attemptId: syntheticReplayId('attempt', 'superpig', `sim_${i}`) as any,
+      intentId: intentRes.intent.id,
+      provider: 'JUPITER_V2',
+      requestedAmountAtomic: boughtTokens,
+      initialState: 'ORDER_READY'
+    }, 1);
+
+    await repo.updateAttemptState(att.attemptId, 'FAILED', {
+      failureReason: `Simulation failed: custom code 6001 (attempt ${i})`,
+      errorClassification: 'UNKNOWN' // Not Jupiter slippage without verified programId
+    }, 1);
+
+    attempts.push((await repo.getAttemptById(att.attemptId))!);
+  }
+
+  // 2. Timeout / Unconfirmed Attempt (UNKNOWN state, reconciliation debt active)
+  const attTimeout = await repo.prepareAttempt({
+    attemptId: syntheticReplayId('attempt', 'superpig', 'timeout') as any,
     intentId: intentRes.intent.id,
     provider: 'JUPITER_V2',
-    requestedAmountAtomic: requestedAtomic,
+    requestedAmountAtomic: boughtTokens,
     initialState: 'ORDER_READY'
   }, 1);
 
-  const sig = txs[0]?.signature || 'JxgrAAHwEqBbfpaXYD1T6cVYW97Fk6qgHGLX2Dbdh13HVo19egPNxq9QneBefEuSbLsmeD9GgyMSr6vvUZUq8Rq';
-  await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: sig as any }, 1);
+  await repo.updateAttemptState(attTimeout.attemptId, 'SUBMITTED', {
+    signature: 'unconfirmed_tx_signature_placeholder' as any
+  }, 1);
 
-  // Crash / timeout occurs -> transition to UNKNOWN
-  await repo.updateAttemptState(attempt.attemptId, 'UNKNOWN', {
-    failureReason: 'UNCONFIRMED_TX_STATE',
+  await repo.updateAttemptState(attTimeout.attemptId, 'UNKNOWN', {
+    failureReason: 'CONFIRMATION_TIMEOUT',
     errorClassification: 'UNKNOWN'
   }, 1);
 
-  // Reconciliation evaluation: inconclusive on-chain evidence
   const evalResult = evaluateReconciliationState(
-    (await repo.getAttemptById(attempt.attemptId))!,
+    (await repo.getAttemptById(attTimeout.attemptId))!,
     { httpTimeout: true, rpcError: 'RPC confirmation timeout' }
   );
 
   const recEvent = await repo.recordReconciliationEvent({
-    attemptId: attempt.attemptId,
-    signature: sig as any,
+    attemptId: attTimeout.attemptId,
+    signature: 'unconfirmed_tx_signature_placeholder' as any,
     verdict: evalResult.verdict,
     reason: evalResult.reason,
     onChainStatus: evalResult.onChainStatus,
     blockhashValid: true
   });
 
+  attempts.push((await repo.getAttemptById(attTimeout.attemptId))!);
+
+  // 3. Eventual Confirmed on-chain transaction & fill
+  const finalProceedsLamports = String(Math.round(expected.finalProceedsSol * 1e9)); // '3183856'
+  const databaseRecordedLamports = String(Math.round(expected.databaseRecordedExitSol * 1e9)); // '10301000'
+  const divergenceLamports = BigInt(databaseRecordedLamports) - BigInt(finalProceedsLamports); // 7117144n
+  const rentRecovered = ataTx?.walletDelta ? BigInt(Math.round(ataTx.walletDelta * 1e9)) : 1508840n;
+
+  const attFinal = await repo.prepareAttempt({
+    attemptId: syntheticReplayId('attempt', 'superpig', 'final_confirmed') as any,
+    intentId: intentRes.intent.id,
+    provider: 'JUPITER_V2',
+    requestedAmountAtomic: boughtTokens,
+    initialState: 'ORDER_READY'
+  }, 1);
+
+  await repo.updateAttemptState(attFinal.attemptId, 'SUBMITTED', {
+    signature: (finalExitTx?.signature || expected.finalExitTxSignature) as any
+  }, 1);
+
+  await repo.updateAttemptState(attFinal.attemptId, 'CONFIRMED', {}, 1);
+  attempts.push((await repo.getAttemptById(attFinal.attemptId))!);
+
+  const fillFinal = await repo.recordFill({
+    id: syntheticReplayId('fill', 'superpig', 'final_confirmed') as any,
+    tradeId: intentRes.intent.tradeId,
+    positionId: intentRes.intent.positionId,
+    intentId: intentRes.intent.id,
+    attemptId: attFinal.attemptId,
+    signature: (finalExitTx?.signature || expected.finalExitTxSignature) as any,
+    realizationSequence: 1,
+    chainLegIndex: 0,
+    instructionIndex: 3,
+    innerInstructionIndex: -1,
+    assetMint: mint,
+    requestedAmountAtomic: boughtTokens,
+    actualAmountAtomic: boughtTokens,
+    grossProceedsLamports: finalProceedsLamports,
+    networkFeeLamports: '5000',
+    priorityFeeLamports: '50000',
+    tipLamports: '0',
+    rentMovementLamports: String(rentRecovered),
+    slot: finalExitTx?.slot ?? 452800149,
+    evidenceType: 'HISTORICAL_RECONSTRUCTION',
+    confirmedAtWallMs: 1_700_000_000_000 as any,
+    createdAtWallMs: 1_700_000_000_000 as any
+  }, 1);
+
   const initialAcc = createInitialPositionAccounting({
     tradeId: intentRes.intent.tradeId,
     positionId: intentRes.intent.positionId,
     mint,
-    initialTokensAtomic: requestedAtomic,
-    initialPrincipalLamports: '50000000'
+    initialTokensAtomic: boughtTokens,
+    initialPrincipalLamports: initialPrincipal
   });
 
-  // Intent MUST have reconciliationDebt = true and NO fill recorded
-  const currentIntent = (await repo.getIntentById(intentRes.intent.id))!;
+  const finalAcc = applyFillToAccounting(initialAcc, fillFinal.fill);
 
   return {
     incidentId,
-    intent: currentIntent,
-    attempts: [await repo.getAttemptById(attempt.attemptId) as any],
-    fills: [], // Zero fills created for unconfirmed SUPERPIG crash
+    intent: (await repo.getIntentById(intentRes.intent.id))!,
+    attempts,
+    fills: [fillFinal.fill],
     reconciliations: [recEvent],
-    accounting: initialAcc
+    accounting: finalAcc,
+    totalConfirmedProceedsLamports: BigInt(finalProceedsLamports),
+    rentRecoveredLamports: rentRecovered,
+    accountingDivergenceLamports: divergenceLamports,
+    fixtureExpected: expected
   };
 }

@@ -85,24 +85,27 @@ describe('Nexus V2.1B — Compare Mode & Restart Matrix (C4)', () => {
 
       assert.strictEqual(replay.incidentId, 'TESLA');
       assert.strictEqual(replay.intent.status, 'APPLIED');
-      assert.strictEqual(replay.fills.length, 1);
-      assert.strictEqual(replay.accounting.totalGrossProceedsLamports, 41149n);
+      assert.strictEqual(replay.fills.length, 2);
+      assert.strictEqual(replay.accounting.totalGrossProceedsLamports, 13574497n);
+      assert.strictEqual(replay.fills[0].grossProceedsLamports, '13533348');
+      assert.strictEqual(replay.fills[1].grossProceedsLamports, '41149');
+      assert.strictEqual(replay.rentRecoveredLamports, 1508840n);
 
       const report = compareLegacyVsShadow(
         {
-          requestedAmountAtomic: '1000000000',
+          requestedAmountAtomic: replay.intent.requestedAmountAtomic,
           signature: replay.fills[0].signature,
           providerResult: 'SUCCESS',
-          proceedsLamports: '41149',
-          isPartial: false,
+          proceedsLamports: '13574497',
+          isPartial: true,
           terminalState: 'APPLIED'
         },
         {
           requestedAmountAtomic: replay.intent.requestedAmountAtomic,
           signature: replay.fills[0].signature,
           providerResult: 'SUCCESS',
-          proceedsLamports: replay.fills[0].grossProceedsLamports,
-          isPartial: false,
+          proceedsLamports: replay.accounting.totalGrossProceedsLamports.toString(),
+          isPartial: true,
           terminalState: replay.intent.status
         }
       );
@@ -110,24 +113,28 @@ describe('Nexus V2.1B — Compare Mode & Restart Matrix (C4)', () => {
       assert.strictEqual(report.matches, true);
     });
 
-    it('SSI: saída de emergência preserva integridade do fill', async () => {
+    it('SSI: saída com 2 fills auditados preserva integridade financeira', async () => {
       const repo = new InMemoryJournalRepository();
       const replay = await reconstructIncidentJournal('ssi', repo);
 
       assert.strictEqual(replay.incidentId, 'SSI');
       assert.strictEqual(replay.intent.status, 'APPLIED');
-      assert.strictEqual(replay.fills.length, 1);
-      assert.strictEqual(replay.accounting.totalGrossProceedsLamports, 1000000n);
+      assert.strictEqual(replay.fills.length, 2);
+      assert.strictEqual(replay.accounting.totalGrossProceedsLamports, 16991449n);
+      assert.strictEqual(replay.fills[0].grossProceedsLamports, '14854168');
+      assert.strictEqual(replay.fills[1].grossProceedsLamports, '2137281');
     });
 
-    it('Mr Beast: saída parcial com 50% preserva identidade e proceeds exatos', async () => {
+    it('Mr Beast: saída com 2 fills parciais auditados preserva integridade financeira', async () => {
       const repo = new InMemoryJournalRepository();
       const replay = await reconstructIncidentJournal('mr-beast', repo);
 
       assert.strictEqual(replay.incidentId, 'MR_BEAST');
       assert.strictEqual(replay.intent.status, 'APPLIED');
-      assert.strictEqual(replay.fills.length, 1);
-      assert.strictEqual(replay.accounting.totalGrossProceedsLamports, 50000000n);
+      assert.strictEqual(replay.fills.length, 2);
+      assert.strictEqual(replay.accounting.totalGrossProceedsLamports, 17058055n);
+      assert.strictEqual(replay.fills[0].grossProceedsLamports, '15402873');
+      assert.strictEqual(replay.fills[1].grossProceedsLamports, '1655182');
     });
 
     it('SUPERPIG: não fabrica fill para tentativas falhas e preserva divergência histórica', async () => {
@@ -135,9 +142,11 @@ describe('Nexus V2.1B — Compare Mode & Restart Matrix (C4)', () => {
       const replay = await reconstructIncidentJournal('superpig', repo);
 
       assert.strictEqual(replay.incidentId, 'SUPERPIG');
-      assert.strictEqual(replay.intent.status, 'UNKNOWN');
-      assert.strictEqual(replay.fills.length, 0, 'Zero fills para incidentes não pousados');
-      assert.strictEqual(replay.intent.reconciliationDebt, true);
+      assert.strictEqual(replay.intent.status, 'APPLIED');
+      assert.strictEqual(replay.attempts.length, 5);
+      assert.strictEqual(replay.fills.length, 1, 'Tentativas de simulação geram ZERO fills; fill final real é preservado');
+      assert.strictEqual(replay.fills[0].grossProceedsLamports, '3183856');
+      assert.strictEqual(replay.accountingDivergenceLamports, 7117144n);
 
       // Compare mode registra a divergência histórica
       const report = compareLegacyVsShadow(
@@ -151,9 +160,9 @@ describe('Nexus V2.1B — Compare Mode & Restart Matrix (C4)', () => {
         },
         {
           requestedAmountAtomic: replay.intent.requestedAmountAtomic,
-          signature: '',
-          providerResult: 'UNKNOWN',
-          proceedsLamports: '0',
+          signature: replay.fills[0].signature,
+          providerResult: 'SUCCESS',
+          proceedsLamports: replay.fills[0].grossProceedsLamports,
           isPartial: false,
           terminalState: replay.intent.status
         }
@@ -219,10 +228,12 @@ describe('Nexus V2.1B — Compare Mode & Restart Matrix (C4)', () => {
     it('CONFIRMED e FILL_RECORDED_PRE_APPLY autorizam finalização idempotente sem duplicar fill', () => {
       const confAction = determineRestartAction('CONFIRMED');
       assert.strictEqual(confAction.safeAction, 'APPLY_IDEMPOTENTLY');
+      assert.strictEqual(confAction.safeToCreateNewAttempt, false);
       assert.strictEqual(confAction.canBlindlyResend, false);
 
       const postFillAction = determineRestartAction('FILL_RECORDED_PRE_APPLY');
-      assert.strictEqual(postFillAction.safeAction, 'IDEMPOTENT_RECOVERY_APPLIED');
+      assert.strictEqual(postFillAction.safeAction, 'COMPLETE_IDEMPOTENTLY');
+      assert.strictEqual(postFillAction.safeToCreateNewAttempt, false);
       assert.strictEqual(postFillAction.canBlindlyResend, false);
     });
   });

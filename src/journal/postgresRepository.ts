@@ -202,12 +202,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      if (expectedEpoch !== undefined && intentRow.claim_epoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
           intentId,
           expectedEpoch,
-          intentRow.claim_epoch
+          Number(intentRow.claim_epoch)
         );
       }
 
@@ -264,15 +264,19 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       await client.query('BEGIN');
 
       // Real SELECT ... FOR UPDATE SKIP LOCKED
+      const whereClause = input.intentId
+        ? `(id = $2) AND (status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE')))`
+        : `status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'))`;
+
       const selectSql = `
         SELECT * FROM exit_intents
-        WHERE status = 'CREATED'
-           OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'))
+        WHERE ${whereClause}
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1;
       `;
-      const candRes = await client.query(selectSql, [now]);
+      const queryParams = input.intentId ? [now, input.intentId] : [now];
+      const candRes = await client.query(selectSql, queryParams);
       if (candRes.rows.length === 0) {
         await client.query('COMMIT');
         return null;
@@ -347,12 +351,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      if (expectedEpoch !== undefined && intentRow.claim_epoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${input.intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
           input.intentId,
           expectedEpoch,
-          intentRow.claim_epoch
+          Number(intentRow.claim_epoch)
         );
       }
 
@@ -363,9 +367,9 @@ export class PostgresJournalRepository implements IExitJournalRepository {
           signature, requested_amount_atomic, expected_out_atomic, minimum_out_atomic,
           state, failure_reason, error_classification, last_valid_block_height, started_at, prepared_at
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, $12,
-          to_timestamp($13 / 1000.0),
-          CASE WHEN $11 IN ('ORDER_READY', 'SIGNED') THEN to_timestamp($13 / 1000.0) ELSE NULL END
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::varchar, NULL, NULL, $12,
+          to_timestamp($13::bigint / 1000.0),
+          CASE WHEN $11::varchar IN ('ORDER_READY', 'SIGNED') THEN to_timestamp($13::bigint / 1000.0) ELSE NULL END
         ) RETURNING *;
       `;
 
@@ -429,12 +433,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [attRow.intent_id]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (expectedEpoch !== undefined && intentRow.claim_epoch !== expectedEpoch) {
+        if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
           throw new StaleEpochError(
             `Stale claim epoch for intent ${intentRow.id}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
             intentRow.id,
             expectedEpoch,
-            intentRow.claim_epoch
+            Number(intentRow.claim_epoch)
           );
         }
       }
@@ -532,12 +536,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [fill.intentId]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (expectedEpoch !== undefined && intentRow.claim_epoch !== expectedEpoch) {
+        if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
           throw new StaleEpochError(
             `Stale claim epoch for fill on intent ${fill.intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
             fill.intentId,
             expectedEpoch,
-            intentRow.claim_epoch
+            Number(intentRow.claim_epoch)
           );
         }
       }

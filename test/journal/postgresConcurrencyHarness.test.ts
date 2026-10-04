@@ -44,10 +44,10 @@ import {
 } from '../../src/journal/reconciliation';
 
 // ==========================================
-// POSTGRES HIGH-FIDELITY WIRE HARNESS
+// SQL BEHAVIOR & PROTOCOL HARNESS
 // ==========================================
 
-class PostgresWireHarness {
+class SqlBehaviorHarness {
   public intents = new Map<string, any>();
   public attempts = new Map<string, any>();
   public severityEvents: any[] = [];
@@ -509,7 +509,7 @@ class PostgresWireHarness {
 // TEST SUITE
 // ==========================================
 
-describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration Harness (C2)', () => {
+describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
 
   it('1. Environmental check: verifica disponibilidade de banco local e loga regra de contenção', () => {
     const testDbUrl = process.env.TEST_DATABASE_URL;
@@ -545,11 +545,11 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
     assert.ok(sql.includes('actual_amount_atomic NUMERIC(38, 0) NOT NULL'));
     assert.ok(sql.includes('last_valid_block_height BIGINT NULL'));
     assert.ok(sql.includes('gross_proceeds_lamports NUMERIC(38, 0) NOT NULL'));
-    assert.ok(sql.includes('claim_epoch INTEGER NOT NULL DEFAULT 0'));
+    assert.ok(sql.includes('claim_epoch BIGINT NOT NULL DEFAULT 0'));
   });
 
-  it('3. Section 4 & 5 — Idempotência e Partial Unique Index Real: bloqueia active intent e permite novo intent apenas após terminal APPLIED', async () => {
-    const harness = new PostgresWireHarness();
+  it('3. Section 4 & 5 — Idempotência e Partial Unique Index (Protocol Harness): bloqueia active intent e permite novo intent apenas após terminal APPLIED', async () => {
+    const harness = new SqlBehaviorHarness();
     const repo = new PostgresJournalRepository({ pool: harness.createPool() });
 
     const wallet = '4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM';
@@ -635,8 +635,8 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
     assert.notStrictEqual(intentB.id, intentA.id);
   });
 
-  it('4. Section 6 — FOR UPDATE SKIP LOCKED Real: Worker A e Worker B executam claims concorrentes sem colisão', async () => {
-    const harness = new PostgresWireHarness();
+  it('4. Section 6 — FOR UPDATE SKIP LOCKED (Protocol Harness): Worker A e Worker B executam claims concorrentes sem colisão', async () => {
+    const harness = new SqlBehaviorHarness();
     const pool = harness.createPool();
     const repoA = new PostgresJournalRepository({ pool });
     const repoB = new PostgresJournalRepository({ pool });
@@ -685,8 +685,8 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
     harness.rowLocks.delete(intent1.id);
   });
 
-  it('5. Section 7 — Fencing Epoch Real: Worker zombie com epoch defasada tem escrita rejeitada com StaleEpochError', async () => {
-    const harness = new PostgresWireHarness();
+  it('5. Section 7 — Fencing Epoch (Protocol Harness): Worker zombie com epoch defasada tem escrita rejeitada com StaleEpochError', async () => {
+    const harness = new SqlBehaviorHarness();
     const repo = new PostgresJournalRepository({ pool: harness.createPool() });
 
     const { intent } = await repo.createOrGetIntent({
@@ -743,7 +743,7 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
   });
 
   it('6. Section 8 & 9 — Blockchain Pendente & SIGNED: Attempt em SUBMITTED ou SIGNED bloqueia re-claim cegamente e exige reconciliação', async () => {
-    const harness = new PostgresWireHarness();
+    const harness = new SqlBehaviorHarness();
     const repo = new PostgresJournalRepository({ pool: harness.createPool() });
 
     const { intent } = await repo.createOrGetIntent({
@@ -805,8 +805,8 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
     );
   });
 
-  it('7. Section 12 — Fill Idempotency Real: inserção concorrente do mesmo fill resulta em exatamente 1 registro sem duplicar proceeds', async () => {
-    const harness = new PostgresWireHarness();
+  it('7. Section 12 — Fill Idempotency (Protocol Harness): inserção concorrente do mesmo fill resulta em exatamente 1 registro sem duplicar proceeds', async () => {
+    const harness = new SqlBehaviorHarness();
     const repo = new PostgresJournalRepository({ pool: harness.createPool() });
 
     const fillPayload: FillRecord = {
@@ -850,7 +850,7 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
   });
 
   it('8. Section 13 & 14 — Crash Recovery entre Fill e Intent Apply: reconciliação recupera e marca APPLIED idempotentemente', async () => {
-    const harness = new PostgresWireHarness();
+    const harness = new SqlBehaviorHarness();
     const repo = new PostgresJournalRepository({ pool: harness.createPool() });
 
     // 1. Cria intent e attempt
@@ -926,7 +926,7 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
   });
 
   it('9. Section 24 — Concurrency Stress Test: 5 workers concorrentes com 25 intents independentes respeitam invariantes', async () => {
-    const harness = new PostgresWireHarness();
+    const harness = new SqlBehaviorHarness();
     const pool = harness.createPool();
     const repo = new PostgresJournalRepository({ pool });
 
@@ -989,7 +989,7 @@ describe('Nexus V2.1B — Real PostgreSQL Concurrency, SKIP LOCKED & Integration
   });
 
   it('10. Section 27 — Security Audit: nenhuma chave privada, seed ou payload base64 é persistido no journal', async () => {
-    const harness = new PostgresWireHarness();
+    const harness = new SqlBehaviorHarness();
     const repo = new PostgresJournalRepository({ pool: harness.createPool() });
 
     const { intent } = await repo.createOrGetIntent({

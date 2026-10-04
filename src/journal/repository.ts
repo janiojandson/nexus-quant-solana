@@ -95,6 +95,7 @@ export interface ClaimIntentInput {
   workerId: string;
   leaseDurationMs: number;
   nowMs?: number;
+  intentId?: string;
 }
 
 // ==========================================

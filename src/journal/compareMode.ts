@@ -149,7 +149,9 @@ export interface RestartRecoveryAction {
     | 'RECONCILE_OR_RETRY_UNSENT'
     | 'MUST_RECONCILE'
     | 'APPLY_IDEMPOTENTLY'
-    | 'IDEMPOTENT_RECOVERY_APPLIED';
+    | 'IDEMPOTENT_RECOVERY_APPLIED'
+    | 'COMPLETE_IDEMPOTENTLY';
+  safeToCreateNewAttempt: boolean;
   canBlindlyResend: boolean;
   requiresBlockchainReconciliation: boolean;
   description: string;
@@ -161,72 +163,80 @@ export function determineRestartAction(stage: LifecycleStage): RestartRecoveryAc
       return {
         stage,
         safeAction: 'CLAIM_ALLOWED',
+        safeToCreateNewAttempt: true,
         canBlindlyResend: true,
         requiresBlockchainReconciliation: false,
-        description: 'Intent recém-criado sem tentativa associada: novo claim autorizado imediatamente.'
+        description: 'Intent recém-criado sem tentativa associada: seguro criar nova tentativa após claim (SAFE_TO_CREATE_NEW_ATTEMPT).'
       };
 
     case 'CLAIMED':
       return {
         stage,
         safeAction: 'RECLAIM_AFTER_LEASE',
+        safeToCreateNewAttempt: true,
         canBlindlyResend: true,
         requiresBlockchainReconciliation: false,
-        description: 'Reivindicado sem tentativa financeira emitida: re-claim autorizado após expiração da lease.'
+        description: 'Reivindicado sem tentativa financeira emitida: seguro criar nova tentativa após expiração da lease (SAFE_TO_CREATE_NEW_ATTEMPT).'
       };
 
     case 'PREPARED':
       return {
         stage,
         safeAction: 'RECONCILE_OR_RETRY_UNSENT',
+        safeToCreateNewAttempt: true,
         canBlindlyResend: true,
         requiresBlockchainReconciliation: false,
-        description: 'Tentativa preparada localmente sem assinatura: seguro recriar ordem ou tentar novo provedor.'
+        description: 'Tentativa preparada localmente não-assinada e comprovadamente não-transmitida: seguro preparar novamente (SAFE_TO_CREATE_NEW_ATTEMPT).'
       };
 
     case 'SIGNED':
       return {
         stage,
         safeAction: 'MUST_RECONCILE',
+        safeToCreateNewAttempt: false,
         canBlindlyResend: false,
         requiresBlockchainReconciliation: true,
-        description: 'Transação assinada: processo pode ter morrido durante broadcast. Conservadoramente exige reconciliação.'
+        description: 'Transação assinada: processo pode ter morrido durante broadcast. Conservadoramente exige reconciliação (MUST_RECONCILE).'
       };
 
     case 'SUBMITTED':
       return {
         stage,
         safeAction: 'MUST_RECONCILE',
+        safeToCreateNewAttempt: false,
         canBlindlyResend: false,
         requiresBlockchainReconciliation: true,
-        description: 'Transação enviada para rede: PROIBIDO retransmitir cegamente. Exige reconciliação on-chain.'
+        description: 'Transação enviada para rede: PROIBIDO retransmitir cegamente. Exige reconciliação on-chain (MUST_RECONCILE).'
       };
 
     case 'UNKNOWN':
       return {
         stage,
         safeAction: 'MUST_RECONCILE',
+        safeToCreateNewAttempt: false,
         canBlindlyResend: false,
         requiresBlockchainReconciliation: true,
-        description: 'Timeout de transporte: estado on-chain desconhecido. Exige reconciliação antes de qualquer ação.'
+        description: 'Timeout de transporte: estado on-chain desconhecido. Exige reconciliação antes de qualquer ação (MUST_RECONCILE).'
       };
 
     case 'CONFIRMED':
       return {
         stage,
         safeAction: 'APPLY_IDEMPOTENTLY',
+        safeToCreateNewAttempt: false,
         canBlindlyResend: false,
         requiresBlockchainReconciliation: false,
-        description: 'Transação confirmada on-chain: aplicar fill idempotentemente e finalizar posição.'
+        description: 'Transação confirmada on-chain: aplicar fill idempotentemente e finalizar posição (APPLY_IDEMPOTENTLY).'
       };
 
     case 'FILL_RECORDED_PRE_APPLY':
       return {
         stage,
-        safeAction: 'IDEMPOTENT_RECOVERY_APPLIED',
+        safeAction: 'COMPLETE_IDEMPOTENTLY',
+        safeToCreateNewAttempt: false,
         canBlindlyResend: false,
         requiresBlockchainReconciliation: false,
-        description: 'Fill registrado no ledger mas crash ocorreu antes de Intent APPLIED: re-executar apply idempotente.'
+        description: 'Fill registrado no ledger mas crash ocorreu antes de Intent APPLIED: completar idempotentemente (COMPLETE_IDEMPOTENTLY).'
       };
   }
 }

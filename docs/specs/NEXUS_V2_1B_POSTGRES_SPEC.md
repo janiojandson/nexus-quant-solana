@@ -17,7 +17,7 @@ A missão V2.1B implementa a camada de persistência em PostgreSQL real (`Postgr
 1. **`exit_intents`**:
    - `id VARCHAR(64) PRIMARY KEY`
    - `economic_dedupe_key VARCHAR(64) NOT NULL UNIQUE` (Hash SHA-256 de wallet, mint, requestedAmount, amountPolicy, positionVersion).
-   - `claim_epoch INTEGER NOT NULL DEFAULT 0` (Fencing Monotônico).
+   - `claim_epoch BIGINT NOT NULL DEFAULT 0` (Fencing Monotônico de 64 bits).
    - `reconciliation_debt BOOLEAN NOT NULL DEFAULT FALSE` (Blindagem contra re-execução não auditada).
    - **Partial Unique Index**:
      ```sql
@@ -127,16 +127,33 @@ Gera divergências tipadas em `JournalComparisonMismatch { field, legacyValue, s
 
 ### 4.2 Matriz de Reinicialização (8 Crash Points)
 
-| Crash Point | Estado do Journal | Ação Segura Permitida | Reenvio Cego Autorizado? | Reconciliação Obrigatória? |
+| Crash Point | Estado do Journal | Ação Segura Permitida | Safe To Create New Attempt? | Reconciliação Obrigatória? |
 |---|---|---|:---:|:---:|
 | 1. Pós-CREATED | `CREATED` | `CLAIM_ALLOWED` | ✅ SIM | ❌ NÃO |
 | 2. Pós-CLAIMED | `CLAIMED` (sem attempt) | `RECLAIM_AFTER_LEASE` | ✅ SIM | ❌ NÃO |
-| 3. Pós-PREPARED | `ORDER_READY` | `RECONCILE_OR_RETRY_UNSENT` | ✅ SIM | ❌ NÃO |
+| 3. Pós-PREPARED | `ORDER_READY` (não-assinada / não-transmitida) | `PREPARE_AGAIN` | ✅ SIM | ❌ NÃO |
 | 4. Pós-SIGNED | `SIGNED` (dívida ativa) | `MUST_RECONCILE` | ❌ **PROIBIDO** | ✅ SIM |
 | 5. Pós-SUBMITTED | `SUBMITTED` (dívida ativa) | `MUST_RECONCILE` | ❌ **PROIBIDO** | ✅ SIM |
 | 6. Pós-UNKNOWN | `UNKNOWN` (dívida ativa) | `MUST_RECONCILE` | ❌ **PROIBIDO** | ✅ SIM |
-| 7. Pós-CONFIRMED | `CONFIRMED` | `APPLY_IDEMPOTENTLY` | ❌ NÃO | ❌ NÃO |
-| 8. Crash entre Fill e Apply | Fill gravado / Intent CONFIRMED | `IDEMPOTENT_RECOVERY_APPLIED` | ❌ NÃO | ❌ NÃO |
+| 7. Pós-CONFIRMED | `CONFIRMED` | `APPLY_IDEMPOTENTLY` | ❌ **NÃO** | ❌ NÃO |
+| 8. Crash entre Fill e Apply | Fill gravado / Intent CONFIRMED | `COMPLETE_IDEMPOTENTLY` | ❌ **NÃO** | ❌ NÃO |
+
+> **Regra de Nomenclatura Estrita:** A expressão "reenvio cego: SIM" foi substituída por `SAFE_TO_CREATE_NEW_ATTEMPT`, autorizada estritamente quando comprovado que nenhuma transação potencialmente válida existe na blockchain.
+
+### 4.3 Tabela Comparativa de Evidência: HARNESS vs POSTGRES REAL
+
+| Invariante Validado | SQL_BEHAVIOR_HARNESS RESULT | REAL POSTGRES RESULT (PostgreSQL 16.15) |
+|---|:---:|:---:|
+| **Versão Física do Servidor** | N/A (Emulado) | **PASS** (`PostgreSQL 16.15 on x86_64-pc-linux-musl`) |
+| **Aplicação de Migration & Idempotência** | **PASS** | **PASS** (DDL pura aplicada e reaplicada sem erro) |
+| **Catálogos Físicos (`information_schema`, `pg_indexes`, `pg_constraint`, `pg_trigger`)** | N/A | **PASS** (Todas as 5 tabelas, 3 FKs, PKs e triggers inspecionados) |
+| **Trigger Append-Only (`fill_ledger`)** | **PASS** | **PASS** (PostgreSQL bloqueia `UPDATE` e `DELETE` via trigger) |
+| **`FOR UPDATE SKIP LOCKED` (2 Conexões Concorrentes)** | **PASS** | **PASS** (Conexão B não bloqueia e ignora linha travada por Conexão A) |
+| **Partial Unique Index (`uq_active_intent_wallet_mint`)** | **PASS** | **PASS** (PostgreSQL emite `SQLSTATE 23505` em CREATED/SUBMITTED/UNKNOWN/CONFIRMED; autoriza após APPLIED) |
+| **Fencing Epoch (`claim_epoch` Monotônico)** | **PASS** | **PASS** (Worker zumbi com epoch defasada recebe `rowCount = 0` e dispara `StaleEpochError`) |
+| **Fill Concurrency (`COUNT(*) = 1`)** | **PASS** | **PASS** (Conexões simultâneas inserindo fill idêntico resultam em exatamente 1 registro) |
+| **Crash / Transaction Boundary (ROLLBACK vs COMMIT)** | **PASS** | **PASS** (ROLLBACK reverte 100% sem resíduo; COMMIT persiste atomicamente) |
+| **Auditoria de Vazamento de Segredos** | **PASS** | **PASS** (Varredura de colunas no banco físico comprova zero segredos) |
 
 ---
 

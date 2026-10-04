@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test src/**/*.test.ts test/**/*.test.ts",
+    "test:postgres": "tsx --test test/journal/postgresRealIntegration.test.ts",
     "db:reset-ledger": "tsx scripts/resetLedger.ts",
     "trade:canary": "tsx scripts/testCanaryTrade.ts",
     "trade:preflight-exit": "tsx scripts/validateExitNoBroadcast.ts",

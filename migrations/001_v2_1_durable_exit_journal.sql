@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS exit_intents (
     policy_version VARCHAR(32) NOT NULL,
     economic_dedupe_key VARCHAR(64) NOT NULL UNIQUE,
     claimed_by VARCHAR(64) NULL,
-    claim_epoch INTEGER NOT NULL DEFAULT 0,
+    claim_epoch BIGINT NOT NULL DEFAULT 0,
     claimed_at TIMESTAMPTZ NULL,
     lease_expires_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

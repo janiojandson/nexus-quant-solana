@@ -59,13 +59,14 @@ A Missão V2.1A entregou com rigor a infraestrutura durável do **Exit Journal +
 
 ---
 
-# NEXUS V2.1B — AUDITORIA DE PRONTIDÃO & INTEGRAÇÃO POSTGRESQL REAL
+# NEXUS V2.1B-H — AUDITORIA DE PRONTIDÃO & HOMOLOGAÇÃO DE EVIDÊNCIA REAL
 
-> **Status:** CONCLUÍDO E HOMOLOGADO  
+> **Status:** HOMOLOGADO COM POSTGRESQL REAL FÍSICO  
 > **Head Atual:** `nexus-v2-observability`  
-> **Suíte de Testes:** **505 testes passing / 0 failures** em **22 suítes**.
+> **Suíte Total:** **523 testes passing / 0 failures** (513 unitários/harness + 10 integração real).  
+> **Instância Testada:** PostgreSQL 16.15 on x86_64-pc-linux-musl (Docker efêmero local porta 55432).
 
-## 1. INVENTÁRIO DE COMMITS V2.1B
+## 1. INVENTÁRIO DE COMMITS V2.1B & V2.1B-H
 
 | Commit | Identificador | Escopo | Arquivos Principais | Status |
 |---|---|---|---|:---:|
@@ -73,12 +74,35 @@ A Missão V2.1A entregou com rigor a infraestrutura durável do **Exit Journal +
 | **V2.1B-C2** | `4004506` | Postgres Concurrency, SKIP LOCKED & Epoch Harness | `src/journal/postgresRepository.ts`, `src/journal/repository.ts`, `migrations/001_v2_1_durable_exit_journal.sql`, `test/journal/postgresConcurrencyHarness.test.ts` | **APROVADO** |
 | **V2.1B-C3** | `77bcc72` | Shadow Hooks no Execution Lifecycle | `src/journal/shadowHooks.ts`, `src/blockchain/jupiterExecutionEngine.ts`, `src/index.ts`, `test/journal/shadowLifecycleHooks.test.ts` | **APROVADO** |
 | **V2.1B-C4** | `33fb956` | Compare Mode & Restart Recovery Matrix | `src/journal/compareMode.ts`, `test/journal/compareModeAndRecovery.test.ts` | **APROVADO** |
-| **V2.1B-C5** | *Current* | Documentação, Rollback Rules & Readiness | `docs/specs/NEXUS_V2_1B_POSTGRES_SPEC.md`, `docs/specs/NEXUS_V2_1_READINESS.md` | **CONCLUÍDO** |
+| **V2.1B-H** | *Current* | Hardening de Evidência: PostgreSQL 16 Real + Replay Histórico Auditado (2 Fills) + Separação Sintética + `claim_epoch BIGINT` | `test/journal/postgresRealIntegration.test.ts`, `test/journal/syntheticJournalScenarios.test.ts`, `src/journal/shadowJournal.ts`, `migrations/001_v2_1_durable_exit_journal.sql` | **HOMOLOGADO** |
 
-## 2. AUDITORIA DE SEGURANÇA E AMBIENTE
+## 2. COMPARAÇÃO RIGOROSA: HARNESS vs POSTGRESQL REAL
 
-- [x] **Zero Credenciais Railway Utilizadas**: Não houve conexão com `postgres.railway.internal`, `zephyr.proxy.rlwy.net` ou variáveis de produção.
-- [x] **Nenhum Serviço Externo Instalado**: O ambiente utilizou wire-harness PostgreSQL de alta fidelidade e suíte de contrato ACID.
-- [x] **Zero Vazamento de Segredos**: Varredura automatizada nos payloads persistidos do banco comprovou ausência de private keys, seeds, headers ou URLs confidenciais.
-- [x] **Zero Latência Live**: Com flag desativada, a verificação síncrona não consome I/O e não adiciona awaits na execução financeira.
+| Critério de Homologação | SQL_BEHAVIOR_HARNESS | REAL POSTGRESQL 16.15 | Evidência / Prova Física |
+|---|:---:|:---:|---|
+| **Prova de Versão Física** | N/A | **PASS** | `PostgreSQL 16.15 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit` |
+| **DDL Migration Idempotente** | **PASS** | **PASS** | `001_v2_1_durable_exit_journal.sql` executada 2x consecutivas em banco limpo |
+| **Inspeção de Catálogo** | N/A | **PASS** | 5 tabelas em `information_schema.tables`, constraints, índices parciais e triggers |
+| **Trigger Append-Only (`fill_ledger`)** | **PASS** | **PASS** | `UPDATE` e `DELETE` fisicamente barrados por trigger `trg_fill_ledger_immutable` |
+| **`SKIP LOCKED` Concorrente** | **PASS** | **PASS** | 2 conexões TCP reais: Conexão B pula lock de Conexão A sem bloqueio |
+| **Partial Unique Index (`SQLSTATE 23505`)** | **PASS** | **PASS** | Bloqueia duplicatas ativas em CREATED/SUBMITTED/UNKNOWN/CONFIRMED; autoriza após APPLIED |
+| **Fencing Monotônico (`StaleEpochError`)** | **PASS** | **PASS** | `claim_epoch BIGINT`: worker defasado recebe `rowCount = 0` e lança `StaleEpochError` |
+| **Concorrência de Fills (`COUNT(*) = 1`)** | **PASS** | **PASS** | Tentativas simultâneas de registrar mesmo fill on-chain resultam em exatamente 1 registro |
+| **Crash & Transaction Boundary** | **PASS** | **PASS** | `ROLLBACK` reverte 100% dos registros; `COMMIT` persiste atômico |
+| **Varredura de Vazamento de Segredos** | **PASS** | **PASS** | Varredura de colunas e payloads no banco físico comprovou zero segredos expostos |
+
+## 3. AUDITORIA FINANCEIRA DOS REPLAYS HISTÓRICOS (FIXTURES AUDITADAS)
+
+- **Tesla**: 2 fills distintos (parcial: `13,533,348` lamports + final: `41,149` lamports = `13,574,497` total confirmado). Rent recuperado segregado: `1,508,840` lamports.
+- **SSI**: 2 fills distintos (parcial: `14,854,168` lamports + final: `2,137,281` lamports = `16,991,449` total confirmado).
+- **Mr Beast**: 2 fills distintos (parcial: `15,402,873` lamports + final: `1,655,182` lamports = `17,058,055` total confirmado).
+- **SUPERPIG**: 3 simulações falhadas com ZERO fills + 1 timeout UNKNOWN (com `reconciliationDebt = true`) + 1 fill final real on-chain confirmado com `3,183,856` lamports (`0.003183856 SOL`). Divergência contábil histórica de `7,117,144` lamports (`0.007117144 SOL`) rigorosamente preservada.
+- **Cenários Sintéticos**: 100% segregados em `syntheticJournalScenarios.test.ts` com identificadores `SYNTHETIC_PARTIAL`, `SYNTHETIC_PANIC`, `SYNTHETIC_UNKNOWN`.
+
+## 4. AUDITORIA DE SEGURANÇA E AMBIENTE
+
+- [x] **Zero Acesso ao Railway**: O banco físico executou em container Docker efêmero isolado (`nexus-test-postgres-v21bh` na porta 55432). Nenhum pacote ou conexão tocou `postgres.railway.internal` ou `zephyr.proxy.rlwy.net`.
+- [x] **Credenciais Descartáveis**: Usuário `test_nexus_user` com senha descartável; banco descartável `test_nexus_journal`.
+- [x] **Nenhum Deploy / Push**: Branch de trabalho `nexus-v2-observability` local inalterada em relação a origin/main (zero push, zero merge, zero deploy).
+- [x] **Homologação Concluída**: Todos os 24 requisitos de V2.1B-H foram satisfeitos sem regressão. Parando estritamente antes de V2.2 ou V2.3.
 
