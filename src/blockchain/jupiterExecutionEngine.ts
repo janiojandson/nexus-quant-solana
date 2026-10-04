@@ -14,6 +14,7 @@ import {
 import { globalTelemetryBuffer } from '../telemetry/telemetryBuffer.js';
 import bs58 from 'bs58';
 import { isShadowJournalEnabled } from '../journal/shadowJournal.js';
+import { isDurableExecutionSafetyActive } from '../journal/durableExecutionSafety.js';
 import {
   shadowOnJupiterOrder,
   shadowOnLocalSign,
@@ -603,7 +604,7 @@ export class JupiterExecutionEngine {
 
     try {
       const { order, orderHttpMs } = await this.getOrder(req);
-      if (isShadowJournalEnabled()) {
+      if (isShadowJournalEnabled() || isDurableExecutionSafetyActive()) {
         await shadowOnJupiterOrder({
           mint: req.inputMint,
           requestId: order.requestId,
@@ -613,7 +614,7 @@ export class JupiterExecutionEngine {
       }
 
       const { transaction, signedTransaction, localSignMs } = this.signOrder(order, req);
-      if (isShadowJournalEnabled()) {
+      if (isShadowJournalEnabled() || isDurableExecutionSafetyActive()) {
         const sigBase58 = transaction.signatures[0] ? bs58.encode(transaction.signatures[0]) : '';
         await shadowOnLocalSign({
           mint: req.inputMint,
@@ -629,7 +630,7 @@ export class JupiterExecutionEngine {
         unitsConsumed = simulation.unitsConsumed;
         simulationMs = simulation.simulationMs;
 
-        if (isShadowJournalEnabled()) {
+        if (isShadowJournalEnabled() || isDurableExecutionSafetyActive()) {
           await shadowOnSimulationResult({
             mint: req.inputMint,
             success: simulation.success,
@@ -674,7 +675,7 @@ export class JupiterExecutionEngine {
           : {})
       };
 
-      if (isShadowJournalEnabled()) {
+      if (isShadowJournalEnabled() || isDurableExecutionSafetyActive()) {
         await shadowOnSubmit({
           mint: req.inputMint,
           lastValidBlockHeight: order.lastValidBlockHeight
@@ -683,7 +684,7 @@ export class JupiterExecutionEngine {
 
       const executed = await this.postExecute(payload, req.trafficPriority ?? 4, req.traceId);
 
-      if (isShadowJournalEnabled()) {
+      if (isShadowJournalEnabled() || isDurableExecutionSafetyActive()) {
         await shadowOnProviderReceipt({
           mint: req.inputMint,
           status: executed.response

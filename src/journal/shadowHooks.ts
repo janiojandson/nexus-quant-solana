@@ -164,7 +164,7 @@ async function runShadowSafe(actionName: string, fn: () => Promise<void>): Promi
   } catch (err: any) {
     shadowJournalMetrics.shadowJournalErrorCount++;
     shadowJournalMetrics.lastShadowJournalError = `[${actionName}] ${err?.message || String(err)}`;
-    // Fail-safe: log warning, never throw to live financial caller
+    // Fail-safe: log warning, never throw to live financial caller in shadow mode
     console.warn(`[SHADOW_JOURNAL_WARN] Error in ${actionName}: ${err?.message}`);
   } finally {
     const elapsed = Date.now() - startMs;
@@ -370,6 +370,7 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
 
     const fillId = `SHADOW_GENERATED:fill_${input.signature.slice(0, 16)}_${Date.now()}`;
 
+    // Finding #12: Confirmed fill requires CHAIN_ECONOMIC_EVIDENCE (never JUPITER_V2_RECEIPT)
     const fillRecord: FillRecord = {
       id: fillId as any,
       tradeId: ctx.tradeId as any,
@@ -391,7 +392,7 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
       rentMovementLamports: String(input.rentMovementLamports ?? 0),
       slot: input.slot,
       confirmedAtWallMs: nowWallMs(),
-      evidenceType: 'JUPITER_V2_RECEIPT',
+      evidenceType: 'CHAIN_ECONOMIC_EVIDENCE',
       createdAtWallMs: nowWallMs()
     };
 

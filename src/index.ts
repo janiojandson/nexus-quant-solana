@@ -66,6 +66,14 @@ import {
   setShadowRepository
 } from './journal/shadowHooks.js';
 import {
+  setDurableSafetyRepository,
+  FinancialPersistenceUnavailableError,
+  recordLiveExitIntent,
+  updateLiveAttemptOnReceipt,
+  updateLiveAttemptOnConfirmation,
+  clearLiveAttempt
+} from './journal/durableExecutionSafety.js';
+import {
   setShadowPositionRepository,
   getShadowPositionRepository,
   validateFeatureFlagMatrix
@@ -329,7 +337,8 @@ if (pgPool) {
   const shadowPositionRepo = new PostgresPositionRepository({ pool: pgPool });
   setShadowRepository(shadowJournalRepo);
   setShadowPositionRepository(shadowPositionRepo);
-  console.log('🔗 [V2 Wiring] PostgresJournalRepository & PostgresPositionRepository wired to shadow execution hooks');
+  setDurableSafetyRepository(shadowJournalRepo);
+  console.log('🔗 [V2 Wiring] PostgresJournalRepository & PostgresPositionRepository wired to shadow and durable execution safety hooks');
 }
 const pumpStrategyRepository = new PumpStrategyRepository(pgPool as any);
 let latestShadowEntryLadderLamports = [PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS];
@@ -736,8 +745,23 @@ async function executeExitOrderUnlocked(
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
   console.log(`⚡ [Jupiter Swap V2] Saída com slippage ${initialSlippageBps}bps e landing gerenciado...`);
 
-  if (isShadowJournalEnabled()) {
-    await shadowOnExitDecision({
+  try {
+    if (isShadowJournalEnabled()) {
+      await shadowOnExitDecision({
+        walletId: OFFICIAL_PHANTOM_WALLET,
+        mint: pos.mint,
+        requestedAmountAtomic: String(exitAmountAtomic),
+        reason: exitReason,
+        pnlPct,
+        exitSolValue,
+        traceId: pos.traceId,
+        tradeId: (pos as any).tradeId,
+        positionId: (pos as any).positionId
+      });
+    }
+
+    // Finding P0-02 & V2.3-R3: Mandatory durable safety persistence for all live exits
+    await recordLiveExitIntent({
       walletId: OFFICIAL_PHANTOM_WALLET,
       mint: pos.mint,
       requestedAmountAtomic: String(exitAmountAtomic),
@@ -748,6 +772,12 @@ async function executeExitOrderUnlocked(
       tradeId: (pos as any).tradeId,
       positionId: (pos as any).positionId
     });
+  } catch (err: any) {
+    if (err instanceof FinancialPersistenceUnavailableError || err?.code === 'FINANCIAL_PERSISTENCE_UNAVAILABLE') {
+      console.error(`🛑 [FAIL CLOSED] Financial mutation blocked: ${err.message}. Swap will NOT be broadcast.`);
+      return { success: false, error: 'FINANCIAL_PERSISTENCE_UNAVAILABLE' };
+    }
+    throw err;
   }
 
   // Pre-Send Version Gate & Dispatch Reservation (flags = 111)
@@ -858,6 +888,7 @@ async function executeExitOrderUnlocked(
     if (exitSwap.status === 'SUBMITTED_UNCONFIRMED') {
       uncertainExitMints.add(pos.mint);
       financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
+      await updateLiveAttemptOnReceipt(pos.mint, 'SUBMITTED_UNCONFIRMED', exitSwap.txSignature, exitSwap.error);
       executionUncertainReason =
         `Saída V2 inconclusiva em ${pos.symbol} (${pos.mint}); novas entradas suspensas.`;
       console.error(
@@ -1083,6 +1114,8 @@ async function executeExitOrderUnlocked(
       actualAmountAtomic: actualDebitAtomic
     });
   }
+  await updateLiveAttemptOnConfirmation(pos.mint, exitSwap.txSignature);
+  clearLiveAttempt(pos.mint);
 
   const tokenAmountBefore = pos.tokenAmount;
   const soldRatio = Math.min(1, Math.max(0, actualDebitAtomic / tokenAmountBefore));
