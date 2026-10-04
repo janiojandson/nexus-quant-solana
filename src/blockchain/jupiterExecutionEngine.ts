@@ -142,7 +142,13 @@ export class JupiterExecutionEngine {
   }
 
   private orderSlippage(req: SwapExecutionRequest): number | undefined {
-    if (req.autoSlippage) return undefined;
+    if (req.autoSlippage) {
+      const cap = req.maxAutoSlippageBps ?? MAX_SLIPPAGE_BPS;
+      if (!Number.isInteger(cap) || cap <= 0 || cap > MAX_SLIPPAGE_BPS) {
+        throw new Error(`Jupiter V2: slippage cap invalid; hard-cap=${MAX_SLIPPAGE_BPS}bps.`);
+      }
+      return undefined;
+    }
 
     const requested = Math.floor(req.slippageBps ?? 400);
     if (!Number.isFinite(requested) || requested <= 0 || requested > MAX_SLIPPAGE_BPS) {
@@ -199,9 +205,15 @@ export class JupiterExecutionEngine {
     }
 
     const rtseSlippage = Number(order.slippageBps || 0);
-    if (rtseSlippage > MAX_SLIPPAGE_BPS) {
+    const allowedSlippage = req.autoSlippage ? (req.maxAutoSlippageBps ?? MAX_SLIPPAGE_BPS) : slippageBps!;
+    if (!Number.isFinite(rtseSlippage) || rtseSlippage < 0) throw new Error('Jupiter V2: invalid order slippage');
+    if (rtseSlippage > allowedSlippage && req.autoSlippage) {
+      console.warn(`[JUPITER_SLIPPAGE_REQUOTE] RTSE=${rtseSlippage}bps cap=${allowedSlippage}bps; requesting a new fixed-cap order`);
+      return this.getOrder({ ...req, autoSlippage: false, slippageBps: allowedSlippage });
+    }
+    if (rtseSlippage > allowedSlippage) {
       throw new Error(
-        `Jupiter V2 RTSE excedeu hard-cap: ${rtseSlippage}bps > ${MAX_SLIPPAGE_BPS}bps.`
+        `Jupiter V2 RTSE excedeu hard-cap: ${rtseSlippage}bps > ${allowedSlippage}bps.`
       );
     }
 

@@ -21,9 +21,9 @@ export const MAX_PRICE_IMPACT_PCT = 3.0;
 /** Tolerância do lote final aceito. */
 export const TARGET_PRICE_IMPACT_PCT = 2.5;
 
-export type SizingAbortReason = 'INSUFFICIENT_POOL_DEPTH' | 'QUOTE_UNAVAILABLE' | 'SIMULATION_REJECTED';
+export type SizingAbortReason = 'INSUFFICIENT_POOL_DEPTH' | 'QUOTE_UNAVAILABLE' | 'SIMULATION_REJECTED' | 'ORDER_POLICY_REJECTED';
 
-export type AttemptRejection = 'PRICE_IMPACT' | 'SIMULATION';
+export type AttemptRejection = 'PRICE_IMPACT' | 'SIMULATION' | 'ORDER_POLICY';
 
 export interface SizingAttempt {
   sizeSol: number;
@@ -121,6 +121,10 @@ export class AdaptivePositionSizer {
       if (options?.validate) {
         const validationError = await options.validate(quote, sizeSol);
         if (validationError) {
+          if (/(?:RTSE|slippage).*hard-cap/i.test(validationError)) {
+            attempts.push({ sizeSol, priceImpactPct, accepted: false, rejectedBy: 'ORDER_POLICY', detail: validationError });
+            return { success: false, sizeSol: 0, quote: null, attempts, abortReason: 'ORDER_POLICY_REJECTED', error: validationError };
+          }
           attempts.push({
             sizeSol,
             priceImpactPct,
@@ -177,10 +181,9 @@ export class AdaptivePositionSizer {
       const best = impacts.length ? Math.min(...impacts) : 0;
       const worst = impacts.length ? Math.max(...impacts) : 0;
       return (
-        `SIMULATION_REJECTED: a cotação passou em todos os degraus (Price Impact ${best.toFixed(3)}%–${worst.toFixed(3)}%, ` +
-        `muito abaixo da tolerância de ${targetImpact}%), mas a simulação pré-voo on-chain reprovou cada lote. ` +
-        `Causa: profundidade insuficiente para o tamanho pedido (erro 6014 = SlippageExceeded), não filtro de impacto. ` +
-        `Escada percorrida: ${trace}. Detalhe: ${simulationRejections[0]}`
+        `SIMULATION_REJECTED: preflight validation failed on ${simulationRejections.length} attempt(s). ` +
+        `Observed price impact ${best.toFixed(3)}%-${worst.toFixed(3)}%; target ${targetImpact}%. ` +
+        `No liquidity cause inferred from a generic failure. Attempts: ${trace}. Detail: ${simulationRejections[0]}`
       );
     }
 

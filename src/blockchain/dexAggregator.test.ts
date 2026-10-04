@@ -243,3 +243,23 @@ it('DexAggregatorService: faz um único retry após 429 e reaproveita sucesso', 
     axios.get = originalGet;
   }
 });
+
+describe('bounded RTSE quote replacement',()=>{
+ const original=axios.get;
+ afterEach(()=>{axios.get=original;});
+ it('requests a fresh quote within custom cap when automatic slippage is excessive',async()=>{
+  const seen:any[]=[];
+  axios.get=(async(_url:string,c:any)=>{seen.push({...c.params});return {data:{inAmount:'1000000',outAmount:seen.length===1?'200':'180',slippageBps:seen.length===1?1000:500}};}) as any;
+  const dex=new DexAggregatorService('https://fake.invalid',{rateLimitMs:0,cacheTtlMs:0});
+  const result=await dex.getQuote({inputMint:'SOL',outputMint:'TOKEN',amountLamports:1000000,autoSlippage:true,maxAutoSlippageBps:500});
+  assert.strictEqual(seen.length,2);assert.strictEqual(seen[1].slippageBps,500);
+  assert.strictEqual(result.slippageBps,500);assert.strictEqual(result.outAmount,180);
+ });
+ it('does not loop or accept an over-cap replacement',async()=>{
+  let calls=0;
+  axios.get=(async()=>{calls++;return {data:{inAmount:'1000000',outAmount:'200',slippageBps:1000}};}) as any;
+  const dex=new DexAggregatorService('https://fake.invalid',{rateLimitMs:0,cacheTtlMs:0});
+  await assert.rejects(()=>dex.getQuote({inputMint:'SOL',outputMint:'TOKEN',amountLamports:1000000,autoSlippage:true,maxAutoSlippageBps:750}),/hard-cap/);
+  assert.strictEqual(calls,2);
+ });
+});

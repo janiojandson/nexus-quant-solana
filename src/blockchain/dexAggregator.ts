@@ -220,13 +220,16 @@ export class DexAggregatorService {
     }
 
     const returnedSlippageBps = Number(data.slippageBps || 0);
-    if (
-      Number.isFinite(returnedSlippageBps) &&
-      returnedSlippageBps > DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS
-    ) {
+    if (!Number.isFinite(returnedSlippageBps) || returnedSlippageBps < 0) {
+      throw new JupiterQuoteException('Jupiter V2: invalid quote slippage');
+    }
+    if (returnedSlippageBps > requestedSlippageBps && params.autoSlippage) {
+      return this.getQuote({ ...params, autoSlippage: false, slippageBps: requestedSlippageBps });
+    }
+    if (returnedSlippageBps > requestedSlippageBps) {
       throw new JupiterQuoteException(
         `RTSE Jupiter V2 excedeu hard-cap: ${returnedSlippageBps}bps > ` +
-        `${DexAggregatorService.MAX_ALLOWED_SLIPPAGE_BPS}bps.`
+        `${requestedSlippageBps}bps.`
       );
     }
 

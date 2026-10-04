@@ -149,3 +149,14 @@ it('AdaptivePositionSizer: modo econômico respeita escada de no máximo duas te
   assert.deepStrictEqual(agg.calls, [0.02, 0.015]);
   assert.strictEqual(res.attempts.length, 2);
 });
+
+it('order policy rejection is not mislabeled as liquidity or RPC simulation',async()=>{
+ const agg=new FakeAggregator({0.05:1,0.035:1});
+ const result=await new AdaptivePositionSizer(agg).findExecutableSize({inputMint:SOL_MINT,outputMint:TOKEN_MINT,autoSlippage:true,maxAutoSlippageBps:750},{
+ validate:async()=> 'Jupiter V2 RTSE excedeu hard-cap: 1000bps > 750bps.'
+ });
+ assert.strictEqual(result.abortReason,'ORDER_POLICY_REJECTED');
+ assert.strictEqual(result.attempts.length,1);
+ assert.strictEqual(result.attempts[0].rejectedBy,'ORDER_POLICY');
+ assert.ok(!result.error?.includes('6014'));
+});
