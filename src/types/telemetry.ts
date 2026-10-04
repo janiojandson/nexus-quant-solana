@@ -133,6 +133,16 @@ export type ExitIntentReason =
   | 'PANIC'
   | 'LIQUIDITY_DRAIN';
 
+export interface IntentSeverityEvent {
+  readonly intentId: ExitIntentId;
+  readonly fromSeverity: ExitIntentSeverity;
+  readonly toSeverity: ExitIntentSeverity;
+  readonly reason: ExitIntentReason;
+  readonly observationId?: ObservationId;
+  readonly changedAtWallMs: WallMs;
+  readonly changedAtMonoNs: MonotonicNs;
+}
+
 export interface ExitIntent {
   readonly id: ExitIntentId;
   readonly tradeId: TradeId;
@@ -148,10 +158,12 @@ export interface ExitIntent {
   // Formula: sha256(walletId:mint:positionVersion:requestedAmountAtomic:amountPolicy)
   readonly economicDedupeKey: string;
 
-  // Mutable operational triggers on the same active economic intent
+  // Severity audit trail: initialSeverity is immutable; transitions append to severityAuditTrail
+  readonly initialSeverity: ExitIntentSeverity;
+  currentSeverity: ExitIntentSeverity;
+  readonly severityAuditTrail: IntentSeverityEvent[];
+
   reason: ExitIntentReason;
-  severity: ExitIntentSeverity;
-  severityElevatedAt?: WallMs;
   policyVersion: string;
 
   status: ExitIntentStatus;
@@ -159,6 +171,30 @@ export interface ExitIntent {
 
   readonly createdAtWallMs: WallMs;
   readonly expiresAtWallMs: WallMs;
+}
+
+/**
+ * Safely escalates an intent severity while recording an immutable audit event.
+ */
+export function escalateIntentSeverity(
+  intent: ExitIntent,
+  newSeverity: ExitIntentSeverity,
+  reason: ExitIntentReason,
+  observationId?: ObservationId
+): IntentSeverityEvent {
+  const event: IntentSeverityEvent = {
+    intentId: intent.id,
+    fromSeverity: intent.currentSeverity,
+    toSeverity: newSeverity,
+    reason,
+    observationId,
+    changedAtWallMs: nowWallMs(),
+    changedAtMonoNs: nowMonotonicNs()
+  };
+  intent.currentSeverity = newSeverity;
+  intent.reason = reason;
+  intent.severityAuditTrail.push(event);
+  return event;
 }
 
 // ==========================================

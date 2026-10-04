@@ -2,7 +2,18 @@
  * Nexus Quant Solana — V2.0 Telemetry Redaction
  * Ensures zero secrets (private keys, seeds, API keys, bearer tokens, signed payloads)
  * leak into persistent telemetry, logs or metrics.
+ *
+ * HARDENED IDENTITY POLICY:
+ * Public identifiers (mint, wallet, signature) are ONLY preserved if:
+ * 1. The field name matches an authorized public field name.
+ * 2. The string value decodes to exactly 32 bytes (PublicKey) or 64 bytes (Ed25519 Signature).
+ *
+ * CONSERVATIVE POLICY FOR UNKNOWN FIELDS:
+ * Strings in unrecognized fields that decode as 32-byte or 64-byte base58 keys are
+ * automatically redacted as [REDACTED_UNVERIFIED_KEY] to prevent accidental leakage.
  */
+
+import bs58 from 'bs58';
 
 const SECRET_KEY_NAMES = new Set([
   'privatekey',
@@ -23,6 +34,75 @@ const SECRET_KEY_NAMES = new Set([
 
 // URL sensitive query parameters to sanitize
 const SENSITIVE_QUERY_PARAMS = ['api-key', 'apikey', 'api_key', 'token', 'secret', 'key'];
+
+const PUBLIC_KEY_FIELD_NAMES = new Set([
+  'mint', 'wallet', 'walletid', 'owner', 'account'
+]);
+
+const SIGNATURE_FIELD_NAMES = new Set([
+  'signature', 'txsignature', 'tx_signature'
+]);
+
+/**
+ * Validates whether a value is structurally a valid Solana PublicKey:
+ * 1. Base58 valid decoding
+ * 2. Exactly 32 bytes decoded
+ */
+export function isValidSolanaPublicKey(val: string): boolean {
+  if (typeof val !== 'string' || val.length < 32 || val.length > 44) return false;
+  try {
+    const decoded = bs58.decode(val);
+    return decoded.length === 32;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates whether a value is structurally a valid Solana Transaction Signature:
+ * 1. Base58 valid decoding
+ * 2. Exactly 64 bytes decoded (Ed25519 signature)
+ */
+export function isValidSolanaSignature(val: string): boolean {
+  if (typeof val !== 'string' || val.length < 85 || val.length > 90) return false;
+  try {
+    const decoded = bs58.decode(val);
+    return decoded.length === 64;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if a key-value pair is an authorized, structurally validated public identifier.
+ * BOTH conditions must hold:
+ * 1. Field name matches an authorized public field name.
+ * 2. Value decodes via base58 to the exact expected byte length (32 for PublicKey, 64 for Signature).
+ */
+export function isAuthorizedPublicIdentifier(keyName: string, val: string): boolean {
+  const lower = keyName.toLowerCase();
+  if (PUBLIC_KEY_FIELD_NAMES.has(lower)) {
+    return isValidSolanaPublicKey(val);
+  }
+  if (SIGNATURE_FIELD_NAMES.has(lower)) {
+    return isValidSolanaSignature(val);
+  }
+  return false;
+}
+
+/**
+ * Checks if an arbitrary string looks like a 32-byte or 64-byte Base58 key.
+ * Used for conservative redaction on unknown fields.
+ */
+export function isDecodableBase58Key(val: string): boolean {
+  if (typeof val !== 'string' || val.length < 32 || val.length > 90) return false;
+  try {
+    const decoded = bs58.decode(val);
+    return decoded.length === 32 || decoded.length === 64;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Sanitizes URLs to mask secret query parameter values.
@@ -58,22 +138,6 @@ export function isMnemonic(val: string): boolean {
   if (typeof val !== 'string') return false;
   const words = val.trim().split(/\s+/);
   return (words.length === 12 || words.length === 24) && words.every(w => /^[a-z]+$/i.test(w));
-}
-
-/**
- * Checks if a string is a standard Solana public key or transaction signature.
- * - Public key: 32-44 base58 characters.
- * - Transaction signature: ~87-88 base58 characters.
- */
-export function isLikelyPublicIdentifier(keyName: string, val: string): boolean {
-  const lowerKey = keyName.toLowerCase();
-  if (lowerKey === 'mint' || lowerKey === 'wallet' || lowerKey === 'walletid' || lowerKey === 'owner' || lowerKey === 'account') {
-    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(val);
-  }
-  if (lowerKey === 'signature' || lowerKey === 'txsignature' || lowerKey === 'tx_signature') {
-    return /^[1-9A-HJ-NP-Za-km-z]{85,90}$/.test(val);
-  }
-  return false;
 }
 
 /**
@@ -127,15 +191,19 @@ export function sanitizeTelemetry<T>(obj: T): T {
       continue;
     }
 
-    // 2. Preserve known public identifiers
-    if (typeof value === 'string' && isLikelyPublicIdentifier(key, value)) {
-      result[key] = value;
+    // 2. Check secret key names
+    if (SECRET_KEY_NAMES.has(lowerKey)) {
+      result[key] = '[REDACTED_SECRET]';
       continue;
     }
 
-    // 3. Match secret key names
-    if (SECRET_KEY_NAMES.has(lowerKey)) {
-      result[key] = '[REDACTED_SECRET]';
+    // 3. Structural validation for expected public identifier fields
+    if (PUBLIC_KEY_FIELD_NAMES.has(lowerKey) || SIGNATURE_FIELD_NAMES.has(lowerKey)) {
+      if (typeof value === 'string' && isAuthorizedPublicIdentifier(key, value)) {
+        result[key] = value;
+      } else {
+        result[key] = '[REDACTED_INVALID_IDENTIFIER]';
+      }
       continue;
     }
 
@@ -145,7 +213,15 @@ export function sanitizeTelemetry<T>(obj: T): T {
       continue;
     }
 
-    // 5. Recursive deep sanitization
+    // 5. Conservative policy for unknown fields:
+    // If an unknown field contains a string that decodes to a 32-byte or 64-byte Base58 key,
+    // redact it to prevent accidental secret leakage.
+    if (typeof value === 'string' && isDecodableBase58Key(value)) {
+      result[key] = '[REDACTED_UNVERIFIED_KEY]';
+      continue;
+    }
+
+    // 6. Recursive deep sanitization
     result[key] = sanitizeTelemetry(value);
   }
 
