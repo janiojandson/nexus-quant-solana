@@ -12,7 +12,7 @@
 import { PositionVersion } from '../types/telemetry.js';
 import { PositionSnapshot } from './types.js';
 import { BoundExecutionQuote } from './quoteBinding.js';
-import { ExitIntent, ExitIntentStatus } from '../journal/types.js';
+import { ExitIntent, ExitIntentStatus, ExecutionAttempt, hasPotentiallyLiveChainAttempt } from '../journal/types.js';
 
 export function isPositionVersionGateEnabled(): boolean {
   return process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED === 'true';
@@ -125,8 +125,18 @@ export interface IntentSupersedeDecision {
  * SIGNED, SUBMITTED, UNKNOWN -> CANNOT be superseded; requires MUST_RECONCILE.
  */
 export function evaluateIntentSupersedeEligibility(
-  intent: ExitIntent
+  intent: ExitIntent,
+  attempts: ExecutionAttempt[] = []
 ): IntentSupersedeDecision {
+  if (hasPotentiallyLiveChainAttempt(attempts)) {
+    return {
+      canSupersedeSafely: false,
+      action: 'MUST_RECONCILE',
+      status: intent.status,
+      reason: `Intent ${intent.id} has potentially live on-chain attempt(s) (signed, submitted, or with signature); cannot supersede without on-chain reconciliation.`
+    };
+  }
+
   switch (intent.status) {
     case 'CREATED':
     case 'CLAIMED':
@@ -135,7 +145,7 @@ export function evaluateIntentSupersedeEligibility(
         canSupersedeSafely: true,
         action: 'SUPERSEDE',
         status: intent.status,
-        reason: `Intent ${intent.id} is in pre-broadcast state ${intent.status}; safe to supersede.`
+        reason: `Intent ${intent.id} is in pre-broadcast state ${intent.status} with unsigned/unsent attempts; safe to supersede.`
       };
 
     case 'SUBMITTED':

@@ -156,7 +156,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
       intentId: intentRes.intent.id,
       provider: 'JUPITER_V2',
       requestedAmountAtomic: '1000'
-    });
+    }, intentRes.intent.claimEpoch);
 
     const fillId = 'fill_trg_immutable_1';
     await repo.recordFill({
@@ -181,7 +181,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
       confirmedAtWallMs: nowWallMs(),
       evidenceType: 'RPC_CONFIRMED',
       createdAtWallMs: nowWallMs()
-    });
+    }, intentRes.intent.claimEpoch);
 
     // Tentativa real de UPDATE direto no PostgreSQL
     await assert.rejects(
@@ -478,7 +478,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
       intentId: intent.id,
       provider: 'JUPITER_V2',
       requestedAmountAtomic: '1000'
-    });
+    }, intent.claimEpoch);
 
     const fillPayload: FillRecord = {
       id: 'fill_real_conc_1' as any,
@@ -506,8 +506,8 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
 
     // Dispara 2 gravações simultâneas através de 2 conexões distintas do pool
     const [res1, res2] = await Promise.all([
-      repo.recordFill(fillPayload),
-      repo.recordFill({ ...fillPayload, id: 'fill_real_conc_duplicate' as any })
+      repo.recordFill(fillPayload, intent.claimEpoch),
+      repo.recordFill({ ...fillPayload, id: 'fill_real_conc_duplicate' as any }, intent.claimEpoch)
     ]);
 
     // Uma delas deve reportar created: true, a outra created: false
@@ -542,7 +542,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
       intentId: intent.id,
       provider: 'JUPITER_V2',
       requestedAmountAtomic: '1000'
-    });
+    }, intent.claimEpoch);
 
     // Cenário 1: Crash simulado com ROLLBACK
     const client1 = await pool.connect();

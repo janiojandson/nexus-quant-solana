@@ -54,6 +54,7 @@ export class InMemoryPositionRepository implements IPositionRepository {
   private positions = new Map<string, DurablePosition>();
   private mutations: PositionMutationRecord[] = [];
   private fillMutationKeys = new Set<string>(); // "positionId:fillId"
+  private signatureMutationKeys = new Set<string>(); // "positionId:signature"
 
   public async createPosition(input: CreatePositionInput): Promise<DurablePosition> {
     const tokenProgram = input.tokenProgram || DEFAULT_TOKEN_PROGRAM_ID;
@@ -204,6 +205,7 @@ export class InMemoryPositionRepository implements IPositionRepository {
     }
     if (params.signature) {
       pos.lastChainSignature = params.signature;
+      this.signatureMutationKeys.add(`${pos.positionId}:${params.signature}`);
     }
     if (params.reconciliationRequired !== undefined) {
       pos.reconciliationRequired = params.reconciliationRequired;
@@ -241,11 +243,14 @@ export class InMemoryPositionRepository implements IPositionRepository {
       throw new PositionNotFoundError(`Position ${params.positionId} not found`, params.positionId);
     }
 
-    // Idempotency: verify if this fill was already applied to this position
+    // Idempotency: verify if this fill was already applied to this position by fillId OR by signature
     const fillKey = `${params.positionId}:${params.fillId}`;
-    if (this.fillMutationKeys.has(fillKey)) {
+    const sigKey = params.signature ? `${params.positionId}:${params.signature}` : null;
+    if (this.fillMutationKeys.has(fillKey) || (sigKey && this.signatureMutationKeys.has(sigKey))) {
       const existing = this.mutations.find(
-        m => m.positionId === params.positionId && m.fillId === params.fillId
+        m => m.positionId === params.positionId && (
+          m.fillId === params.fillId || (params.signature && m.signature === params.signature)
+        )
       );
       if (existing) {
         return {

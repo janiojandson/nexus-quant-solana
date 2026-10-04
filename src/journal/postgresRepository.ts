@@ -42,7 +42,12 @@ import {
   isIntentEconomicallyActive,
   isIntentTerminal,
   StaleEpochError,
-  ActiveIntentExclusionError
+  ActiveIntentExclusionError,
+  EpochRequiredError,
+  IllegalStateTransitionError,
+  assertValidIntentTransition,
+  assertValidAttemptTransition,
+  hasPotentiallyLiveChainAttempt
 } from './types';
 
 export interface PostgresJournalRepositoryConfig {
@@ -202,7 +207,11 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
+      if (expectedEpoch === undefined || expectedEpoch === null) {
+        throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
+      }
+
+      if (BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
           intentId,
@@ -265,8 +274,8 @@ export class PostgresJournalRepository implements IExitJournalRepository {
 
       // Real SELECT ... FOR UPDATE SKIP LOCKED
       const whereClause = input.intentId
-        ? `(id = $2) AND (status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE')))`
-        : `status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'))`;
+        ? `(id = $2) AND (status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE')))`
+        : `status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'))`;
 
       const selectSql = `
         SELECT * FROM exit_intents
@@ -351,7 +360,11 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
+      if (expectedEpoch === undefined || expectedEpoch === null) {
+        throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
+      }
+
+      if (BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${input.intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
           input.intentId,
@@ -390,6 +403,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       ]);
 
       if (intentRow.status === 'CLAIMED' || intentRow.status === 'CREATED') {
+        assertValidIntentTransition(intentRow.status, 'PREPARED');
         await client.query("UPDATE exit_intents SET status = 'PREPARED' WHERE id = $1", [input.intentId]);
       }
 
@@ -420,6 +434,26 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     updates?: Partial<ExecutionAttempt>,
     expectedEpoch?: bigint | number
   ): Promise<ExecutionAttempt> {
+    if (expectedEpoch === undefined || expectedEpoch === null) {
+      throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
+    }
+    return this.internalUpdateAttemptState(attemptId, state, updates, expectedEpoch);
+  }
+
+  public async systemUpdateAttemptState(
+    attemptId: string,
+    state: ExecutionAttemptState,
+    updates?: Partial<ExecutionAttempt>
+  ): Promise<ExecutionAttempt> {
+    return this.internalUpdateAttemptState(attemptId, state, updates);
+  }
+
+  private async internalUpdateAttemptState(
+    attemptId: string,
+    state: ExecutionAttemptState,
+    updates?: Partial<ExecutionAttempt>,
+    expectedEpoch?: bigint | number
+  ): Promise<ExecutionAttempt> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -430,10 +464,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const attRow = attRes.rows[0];
 
+      assertValidAttemptTransition(attRow.state, state);
+
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [attRow.intent_id]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
+        if (expectedEpoch !== undefined && expectedEpoch !== null && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
           throw new StaleEpochError(
             `Stale claim epoch for intent ${intentRow.id}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
             intentRow.id,
@@ -477,6 +513,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
 
       // Update parent intent status and reconciliation debt
       if (intentRes.rows.length > 0) {
+        const intentRow = intentRes.rows[0];
         let newIntentStatus: string | null = null;
         let setReconcilDebt: boolean | null = null;
 
@@ -504,6 +541,10 @@ export class PostgresJournalRepository implements IExitJournalRepository {
           }
         }
 
+        if (newIntentStatus && newIntentStatus !== intentRow.status) {
+          assertValidIntentTransition(intentRow.status, newIntentStatus as ExitIntentStatus);
+        }
+
         if (newIntentStatus || setReconcilDebt !== null) {
           await client.query(
             `UPDATE exit_intents
@@ -529,6 +570,10 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     fill: FillRecord,
     expectedEpoch?: bigint | number
   ): Promise<{ fill: FillRecord; created: boolean }> {
+    if (expectedEpoch === undefined || expectedEpoch === null) {
+      throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
+    }
+
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -536,7 +581,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [fill.intentId]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
+        if (BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
           throw new StaleEpochError(
             `Stale claim epoch for fill on intent ${fill.intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
             fill.intentId,
@@ -598,11 +643,29 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         return { fill: this.mapRowToFill(dupRes.rows[0]), created: false };
       }
 
-      // Update parent intent status to APPLIED and clear reconciliation_debt
-      await client.query(
-        "UPDATE exit_intents SET status = 'APPLIED', reconciliation_debt = false WHERE id = $1",
-        [fill.intentId]
-      );
+      // Update parent intent status: fully filled -> APPLIED, partially filled -> CONFIRMED
+      if (intentRes.rows.length > 0) {
+        const intentRow = intentRes.rows[0];
+        const sumRes = await client.query(
+          `SELECT COALESCE(SUM(actual_amount_atomic), 0) as total_filled FROM fill_ledger WHERE intent_id = $1`,
+          [fill.intentId]
+        );
+        const totalFilled = BigInt(sumRes.rows[0]?.total_filled || 0);
+        const isFullyFilled = totalFilled >= BigInt(intentRow.requested_amount_atomic);
+        if (isFullyFilled) {
+          assertValidIntentTransition(intentRow.status, 'APPLIED');
+          await client.query(
+            "UPDATE exit_intents SET status = 'APPLIED', reconciliation_debt = false WHERE id = $1",
+            [fill.intentId]
+          );
+        } else {
+          assertValidIntentTransition(intentRow.status, 'CONFIRMED');
+          await client.query(
+            "UPDATE exit_intents SET status = 'CONFIRMED' WHERE id = $1",
+            [fill.intentId]
+          );
+        }
+      }
 
       await client.query('COMMIT');
       return { fill: this.mapRowToFill(fillRes.rows[0]), created: true };
@@ -786,6 +849,17 @@ export class PostgresJournalRepository implements IExitJournalRepository {
           BigInt(row.claim_epoch)
         );
       }
+      if (terminalStatus === 'SUPERSEDED' || terminalStatus === 'CANCELLED') {
+        const live = await this.hasPotentiallyLiveChainAttempt(intentId);
+        if (live) {
+          throw new IllegalStateTransitionError(
+            'ExitIntent',
+            'ACTIVE_CHAIN_ATTEMPT',
+            terminalStatus
+          );
+        }
+      }
+      assertValidIntentTransition(row.status, terminalStatus);
       const up = await client.query(
         `UPDATE exit_intents
          SET status = $1, reconciliation_debt = false, claimed_by = NULL, lease_expires_at = NULL
@@ -800,6 +874,20 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     } finally {
       client.release();
     }
+  }
+
+  public async hasPotentiallyLiveChainAttempt(intentId: string): Promise<boolean> {
+    const res = await this.pool.query(
+      `SELECT 1 FROM execution_attempts
+       WHERE intent_id = $1
+         AND (
+           (signature IS NOT NULL AND trim(signature) != '')
+           OR state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN', 'SENT')
+         )
+       LIMIT 1;`,
+      [intentId]
+    );
+    return res.rows.length > 0;
   }
 
   public async getUnreconciledIntents(): Promise<ExitIntent[]> {

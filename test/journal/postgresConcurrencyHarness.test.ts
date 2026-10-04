@@ -298,6 +298,18 @@ class SqlBehaviorHarness {
               return { rows: [] };
             }
 
+            // SELECT COALESCE(SUM(actual_amount_atomic), 0) as total_filled FROM fill_ledger WHERE intent_id = $1
+            if (trimmed.includes('SUM(actual_amount_atomic)')) {
+              const intentId = params[0];
+              let sum = 0n;
+              for (const fill of harness.fills.values()) {
+                if (fill.intent_id === intentId) {
+                  sum += BigInt(fill.actual_amount_atomic);
+                }
+              }
+              return { rows: [{ total_filled: sum.toString() }] };
+            }
+
             // SELECT ... FROM exit_intents WHERE reconciliation_debt = true OR status = 'UNKNOWN'
             if (trimmed.includes('FROM exit_intents WHERE reconciliation_debt = true')) {
               const rows: any[] = [];
@@ -770,20 +782,20 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       requestedAmountAtomic: '777',
       initialState: 'ORDER_READY',
       lastValidBlockHeight: 310554200
-    });
+    }, claimed.claimEpoch);
 
     assert.strictEqual(BigInt(attempt.lastValidBlockHeight!), 310554200n);
 
     // Transição para SIGNED ativa reconciliationDebt
     await repo.updateAttemptState(attempt.attemptId, 'SIGNED', {
       signature: '5wK4p...sig'
-    });
+    }, claimed.claimEpoch);
 
     const intentAfterSigned = await repo.getIntentById(intent.id);
     assert.strictEqual(intentAfterSigned?.reconciliationDebt, true, 'SIGNED deve marcar reconciliation_debt = true conservadoramente');
 
     // Transição para SUBMITTED
-    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED');
+    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', {}, claimed.claimEpoch);
 
     // Simula expiração de lease
     const futureTime = nowWallMs() + 200;
@@ -834,7 +846,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
     };
 
     // Primeira inserção
-    const res1 = await repo.recordFill(fillPayload);
+    const res1 = await repo.recordFill(fillPayload, 0n);
     assert.strictEqual(res1.created, true);
     assert.strictEqual(res1.fill.id, 'fill_conc_1');
 
@@ -842,7 +854,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
     const res2 = await repo.recordFill({
       ...fillPayload,
       id: 'fill_duplicate_attempt' as any
-    });
+    }, 0n);
 
     assert.strictEqual(res2.created, false, 'Segunda inserção deve ser idempotentemente ignorada');
     assert.strictEqual(res2.fill.id, 'fill_conc_1', 'Retorna o fill original já registrado');
@@ -867,7 +879,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       policyVersion: 'v2.1'
     });
 
-    await repo.claimIntent({ workerId: 'w1', leaseDurationMs: 50_000 });
+    const claimed = await repo.claimIntent({ workerId: 'w1', leaseDurationMs: 50_000 });
 
     const attempt = await repo.prepareAttempt({
       attemptId: 'att_crash' as any,
@@ -875,9 +887,9 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       provider: 'JUPITER_V2',
       requestedAmountAtomic: '1000',
       initialState: 'ORDER_READY'
-    });
+    }, claimed!.claimEpoch);
 
-    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: 'sig_crash_123' });
+    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: 'sig_crash_123' }, claimed!.claimEpoch);
 
     // 2. Simula crash: Fill é gravado no banco, mas processo morre antes de atualizar Intent para APPLIED
     await repo.recordFill({
@@ -902,7 +914,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       confirmedAtWallMs: nowWallMs(),
       evidenceType: 'RPC_CONFIRMED',
       createdAtWallMs: nowWallMs()
-    });
+    }, claimed!.claimEpoch);
 
     // Estado antes da recuperação: Intent ainda está em SUBMITTED / CONFIRMED com reconciliation_debt = true
     const intentBefore = await repo.getIntentById(intent.id);
@@ -966,7 +978,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
             intentId: intent.id,
             provider: 'JUPITER_V2',
             requestedAmountAtomic: '1000'
-          });
+          }, intent.claimEpoch);
         }
       }
       return claimed;
@@ -1013,7 +1025,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       signature: '5wK4ptpZ...valid_sig',
       requestId: 'req_123',
       messageHash: 'hash_abc'
-    });
+    }, intent.claimEpoch);
 
     const serializedState = JSON.stringify({
       intents: Array.from(harness.intents.values()),

@@ -144,7 +144,7 @@ test('Nexus V2.1A — Schema, Migrations & Repository Interfaces (C1)', async (t
     assert.strictEqual(intent.severityAuditTrail.length, 0);
 
     // Escalate to HIGH
-    const ev1 = await repo.updateIntentSeverity(intent.id, 'HIGH', 'LIQUIDITY_DRAIN', 'obs_123');
+    const ev1 = await repo.updateIntentSeverity(intent.id, 'HIGH', 'LIQUIDITY_DRAIN', 'obs_123', intent.claimEpoch);
     assert.strictEqual(intent.initialSeverity, 'NORMAL', 'initialSeverity must be immutable');
     assert.strictEqual(intent.currentSeverity, 'HIGH');
     assert.strictEqual(intent.reason, 'LIQUIDITY_DRAIN');
@@ -153,7 +153,7 @@ test('Nexus V2.1A — Schema, Migrations & Repository Interfaces (C1)', async (t
     assert.strictEqual(ev1.toSeverity, 'HIGH');
 
     // Escalate to EMERGENCY (PANIC)
-    const ev2 = await repo.updateIntentSeverity(intent.id, 'EMERGENCY', 'PANIC');
+    const ev2 = await repo.updateIntentSeverity(intent.id, 'EMERGENCY', 'PANIC', undefined, intent.claimEpoch);
     assert.strictEqual(intent.initialSeverity, 'NORMAL');
     assert.strictEqual(intent.currentSeverity, 'EMERGENCY');
     assert.strictEqual(intent.reason, 'PANIC');
@@ -188,7 +188,7 @@ test('Nexus V2.1A — Schema, Migrations & Repository Interfaces (C1)', async (t
       expectedOutAtomic: '15000000',
       minimumOutAtomic: '14800000',
       initialState: 'ORDER_READY'
-    });
+    }, intent.claimEpoch);
 
     assert.strictEqual(attempt.attemptId, 'att_1');
     assert.strictEqual(attempt.state, 'ORDER_READY');

@@ -346,13 +346,17 @@ export class PostgresPositionRepository implements IPositionRepository {
     try {
       await client.query('BEGIN');
 
-      // 1. Check if fill was already recorded for this position
+      // 1. Check if fill was already recorded for this position by fill_id OR signature
       const checkFillSql = `
         SELECT * FROM nexus_position_mutations_v2
-        WHERE position_id = $1 AND fill_id = $2
+        WHERE position_id = $1 AND (fill_id = $2 OR (signature IS NOT NULL AND signature = $3))
         LIMIT 1;
       `;
-      const existingRes = await client.query(checkFillSql, [params.positionId, params.fillId]);
+      const existingRes = await client.query(checkFillSql, [
+        params.positionId,
+        params.fillId,
+        params.signature || ''
+      ]);
       if (existingRes.rows.length > 0) {
         // Fill already applied
         const posRes = await client.query(

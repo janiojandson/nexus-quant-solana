@@ -171,6 +171,72 @@ export class ActiveIntentExclusionError extends Error {
   }
 }
 
+export class EpochRequiredError extends Error {
+  constructor(message: string = 'expectedEpoch is mandatory for worker-owned mutations to enforce fencing') {
+    super(message);
+    this.name = 'EpochRequiredError';
+  }
+}
+
+export class IllegalStateTransitionError extends Error {
+  constructor(entityType: string, fromState: string, toState: string) {
+    super(`Illegal state transition for ${entityType}: cannot transition from '${fromState}' to '${toState}'.`);
+    this.name = 'IllegalStateTransitionError';
+  }
+}
+
+export const VALID_INTENT_TRANSITIONS: ReadonlyMap<ExitIntentStatus, ReadonlySet<ExitIntentStatus>> = new Map([
+  ['CREATED', new Set<ExitIntentStatus>(['CLAIMED', 'PREPARED', 'APPLIED', 'SUPERSEDED', 'CANCELLED'])],
+  ['CLAIMED', new Set<ExitIntentStatus>(['PREPARED', 'SUBMITTED', 'CONFIRMED', 'APPLIED', 'SUPERSEDED', 'CANCELLED', 'FAILED_DEFINITIVE', 'UNKNOWN'])],
+  ['PREPARED', new Set<ExitIntentStatus>(['SUBMITTED', 'CONFIRMED', 'APPLIED', 'SUPERSEDED', 'CANCELLED', 'FAILED_DEFINITIVE', 'UNKNOWN'])],
+  ['SUBMITTED', new Set<ExitIntentStatus>(['CONFIRMED', 'APPLIED', 'UNKNOWN', 'FAILED_DEFINITIVE'])],
+  ['UNKNOWN', new Set<ExitIntentStatus>(['SUBMITTED', 'CONFIRMED', 'APPLIED', 'FAILED_DEFINITIVE'])],
+  ['CONFIRMED', new Set<ExitIntentStatus>(['SUBMITTED', 'APPLIED'])],
+  ['APPLIED', new Set<ExitIntentStatus>()],
+  ['SUPERSEDED', new Set<ExitIntentStatus>()],
+  ['CANCELLED', new Set<ExitIntentStatus>()],
+  ['FAILED_DEFINITIVE', new Set<ExitIntentStatus>()]
+]);
+
+export function assertValidIntentTransition(from: ExitIntentStatus, to: ExitIntentStatus): void {
+  if (from === to) return;
+  const allowed = VALID_INTENT_TRANSITIONS.get(from);
+  if (!allowed || !allowed.has(to)) {
+    throw new IllegalStateTransitionError('ExitIntent', from, to);
+  }
+}
+
+export const VALID_ATTEMPT_TRANSITIONS: ReadonlyMap<ExecutionAttemptState, ReadonlySet<ExecutionAttemptState>> = new Map([
+  ['INITIALIZED', new Set<ExecutionAttemptState>(['ORDER_READY', 'SIGNED', 'SIMULATED', 'SUBMITTED', 'SENT', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['ORDER_READY', new Set<ExecutionAttemptState>(['SIGNED', 'SIMULATED', 'SUBMITTED', 'SENT', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['SIGNED', new Set<ExecutionAttemptState>(['SIMULATED', 'SUBMITTED', 'SENT', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['SIMULATED', new Set<ExecutionAttemptState>(['SUBMITTED', 'SENT', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['SUBMITTED', new Set<ExecutionAttemptState>(['PROVIDER_SUCCESS', 'CONFIRMED', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['SENT', new Set<ExecutionAttemptState>(['PROVIDER_SUCCESS', 'CONFIRMED', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['PROVIDER_SUCCESS', new Set<ExecutionAttemptState>(['CONFIRMED', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['UNKNOWN', new Set<ExecutionAttemptState>(['CONFIRMED', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['CONFIRMED', new Set<ExecutionAttemptState>()],
+  ['FAILED_DEFINITIVE', new Set<ExecutionAttemptState>()],
+  ['FAILED', new Set<ExecutionAttemptState>()]
+]);
+
+export function assertValidAttemptTransition(from: ExecutionAttemptState, to: ExecutionAttemptState): void {
+  if (from === to) return;
+  const allowed = VALID_ATTEMPT_TRANSITIONS.get(from);
+  if (!allowed || !allowed.has(to)) {
+    throw new IllegalStateTransitionError('ExecutionAttempt', from, to);
+  }
+}
+
+export function hasPotentiallyLiveChainAttempt(attempts: ExecutionAttempt[]): boolean {
+  return attempts.some(a => {
+    if (a.signature && a.signature.trim().length > 0) return true;
+    if (a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT') return true;
+    return false;
+  });
+}
+
+
 // ==========================================
 // 2. EXECUTION ATTEMPT STATES & CONTRACT
 // ==========================================

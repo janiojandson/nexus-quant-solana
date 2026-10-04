@@ -70,6 +70,7 @@ export interface ShadowExecutionContext {
   mint: string;
   walletId: string;
   requestedAmountAtomic: string;
+  claimEpoch: bigint;
   currentAttemptId?: ExecutionAttemptId;
   signature?: string;
   requestId?: string;
@@ -227,7 +228,8 @@ export async function shadowOnExitDecision(input: OnExitDecisionInput): Promise<
     });
 
     // Claim in shadow mode
-    await repo.claimIntent({
+    const claimed = await repo.claimIntent({
+      intentId: intent.id,
       workerId: 'shadow_worker_live',
       leaseDurationMs: 60_000
     });
@@ -238,7 +240,8 @@ export async function shadowOnExitDecision(input: OnExitDecisionInput): Promise<
       positionId,
       mint: input.mint,
       walletId: input.walletId,
-      requestedAmountAtomic: String(input.requestedAmountAtomic)
+      requestedAmountAtomic: String(input.requestedAmountAtomic),
+      claimEpoch: claimed?.claimEpoch ?? 1n
     };
 
     activeShadowContexts.set(input.mint, ctx);
@@ -271,7 +274,7 @@ export async function shadowOnJupiterOrder(input: OnJupiterOrderInput): Promise<
       minimumOutAtomic: input.minimumOutAtomic,
       initialState: 'ORDER_READY',
       lastValidBlockHeight: input.lastValidBlockHeight
-    });
+    }, ctx.claimEpoch);
   });
 }
 
@@ -289,7 +292,7 @@ export async function shadowOnLocalSign(input: OnLocalSignInput): Promise<void> 
       signature: input.signature,
       messageHash: input.messageHash,
       preparedAtWallMs: nowWallMs()
-    });
+    }, ctx.claimEpoch);
   });
 }
 
@@ -304,9 +307,9 @@ export async function shadowOnSimulationResult(input: OnSimulationResultInput): 
     if (!input.success) {
       await repo.updateAttemptState(ctx.currentAttemptId, 'SIMULATED', {
         failureReason: input.error || 'Simulation failed'
-      });
+      }, ctx.claimEpoch);
     } else {
-      await repo.updateAttemptState(ctx.currentAttemptId, 'SIMULATED');
+      await repo.updateAttemptState(ctx.currentAttemptId, 'SIMULATED', {}, ctx.claimEpoch);
     }
   });
 }
@@ -323,7 +326,7 @@ export async function shadowOnSubmit(input: OnSubmitInput): Promise<void> {
       signature: input.signature || ctx.signature,
       lastValidBlockHeight: input.lastValidBlockHeight != null ? BigInt(input.lastValidBlockHeight) : undefined,
       submittedAtWallMs: nowWallMs()
-    });
+    }, ctx.claimEpoch);
   });
 }
 
@@ -348,7 +351,7 @@ export async function shadowOnProviderReceipt(input: OnProviderReceiptInput): Pr
       signature: input.signature || ctx.signature,
       failureReason: input.error,
       providerReceiptAtWallMs: nowWallMs()
-    });
+    }, ctx.claimEpoch);
   });
 }
 
@@ -387,7 +390,7 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
       createdAtWallMs: nowWallMs()
     };
 
-    await repo.recordFill(fillRecord);
+    await repo.recordFill(fillRecord, ctx.claimEpoch);
   });
 }
 

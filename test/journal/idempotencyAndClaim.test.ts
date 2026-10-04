@@ -149,7 +149,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     });
 
     // Worker A claims and submits transaction
-    await repo.claimIntent({ workerId: 'worker_alpha', leaseDurationMs: leaseDuration, nowMs: baseTime });
+    const claimA = await repo.claimIntent({ workerId: 'worker_alpha', leaseDurationMs: leaseDuration, nowMs: baseTime });
     const attempt = await repo.prepareAttempt({
       attemptId: 'att_submitted_1' as any,
       intentId: intent.id,
@@ -157,13 +157,13 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       requestedAmountAtomic: '4375826130',
       initialState: 'ORDER_READY',
       nowMs: baseTime + 100
-    });
+    }, claimA!.claimEpoch);
 
     // Attempt advances to SUBMITTED
     await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', {
       signature: '5nwz7eVDSU4MnT3zzmXyP9kg6w1Uo99GDz8qiZtMkcqUebeLgLbXFMtPpgpZtZ36estEnFhS43JyoYGoKp5xHyTN' as any,
       submittedAtWallMs: (baseTime + 200) as any
-    });
+    }, claimA!.claimEpoch);
 
     // Worker A crashes! Lease expires at baseTime + 6000.
     // Worker B attempts to re-claim.
@@ -194,20 +194,20 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       nowMs: baseTime
     });
 
-    await repo.claimIntent({ workerId: 'worker_alpha', leaseDurationMs: 10_000, nowMs: baseTime });
+    const claim5 = await repo.claimIntent({ workerId: 'worker_alpha', leaseDurationMs: 10_000, nowMs: baseTime });
     const attempt = await repo.prepareAttempt({
       attemptId: 'att_unknown_1' as any,
       intentId: intent.id,
       provider: 'JUPITER_V2',
       requestedAmountAtomic: '4375826130',
       initialState: 'ORDER_READY'
-    });
+    }, claim5!.claimEpoch);
 
     const txSig = '5nwz7eVDSU4MnT3zzmXyP9kg6w1Uo99GDz8qiZtMkcqUebeLgLbXFMtPpgpZtZ36estEnFhS43JyoYGoKp5xHyTN';
-    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: txSig as any });
+    await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', { signature: txSig as any }, claim5!.claimEpoch);
 
     // Process loses HTTP socket -> marks UNKNOWN (UNKNOWN NÃO É FAILED!)
-    await repo.updateAttemptState(attempt.attemptId, 'UNKNOWN', { failureReason: 'HTTP_SOCKET_TIMEOUT' });
+    await repo.updateAttemptState(attempt.attemptId, 'UNKNOWN', { failureReason: 'HTTP_SOCKET_TIMEOUT' }, claim5!.claimEpoch);
     const unknownIntent = await repo.getIntentById(intent.id);
     assert.strictEqual(unknownIntent?.status, 'UNKNOWN');
     assert.notStrictEqual(unknownIntent?.status, 'FAILED_DEFINITIVE');
@@ -255,7 +255,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       confirmedAtWallMs: (baseTime + 5000) as any,
       evidenceType: 'CHAIN_PARSED_TRANSACTION',
       createdAtWallMs: (baseTime + 5000) as any
-    });
+    }, claim5!.claimEpoch);
 
     assert.strictEqual(fillResult.created, true);
     const finalizedIntent = await restartedRepo.getIntentById(intent.id);
@@ -290,7 +290,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     assert.strictEqual((await repo.getIntentById(intent.id))?.status, 'CREATED');
 
     // Estágio 3: Claim -> Crash
-    await repo.claimIntent({ workerId: 'worker_crash_tester', leaseDurationMs: 10_000, nowMs: baseTime + 10 });
+    const claim6 = await repo.claimIntent({ workerId: 'worker_crash_tester', leaseDurationMs: 10_000, nowMs: baseTime + 10 });
     repo = InMemoryExitJournalRepository.restoreFromSnapshot(repo.snapshotState());
     assert.strictEqual((await repo.getIntentById(intent.id))?.status, 'CLAIMED');
 
@@ -302,7 +302,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       requestedAmountAtomic: '4375826130',
       initialState: 'ORDER_READY',
       nowMs: baseTime + 20
-    });
+    }, claim6!.claimEpoch);
     repo = InMemoryExitJournalRepository.restoreFromSnapshot(repo.snapshotState());
     assert.strictEqual((await repo.getAttemptById(attempt.attemptId))?.state, 'ORDER_READY');
     assert.strictEqual((await repo.getIntentById(intent.id))?.status, 'PREPARED');
@@ -310,14 +310,14 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     // Estágio 5: SIGNED -> Crash
     await repo.updateAttemptState(attempt.attemptId, 'SIGNED', {
       signature: 'sig_crash_stage_123' as any
-    });
+    }, claim6!.claimEpoch);
     repo = InMemoryExitJournalRepository.restoreFromSnapshot(repo.snapshotState());
     assert.strictEqual((await repo.getAttemptById(attempt.attemptId))?.state, 'SIGNED');
 
     // Estágio 6: SUBMITTED -> Crash
     await repo.updateAttemptState(attempt.attemptId, 'SUBMITTED', {
       submittedAtWallMs: (baseTime + 30) as any
-    });
+    }, claim6!.claimEpoch);
     repo = InMemoryExitJournalRepository.restoreFromSnapshot(repo.snapshotState());
     assert.strictEqual((await repo.getAttemptById(attempt.attemptId))?.state, 'SUBMITTED');
     assert.strictEqual((await repo.getIntentById(intent.id))?.status, 'SUBMITTED');
@@ -325,7 +325,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     // Estágio 7: PROVIDER_SUCCESS / CONFIRMED -> Crash
     await repo.updateAttemptState(attempt.attemptId, 'CONFIRMED', {
       confirmedAtWallMs: (baseTime + 40) as any
-    });
+    }, claim6!.claimEpoch);
     repo = InMemoryExitJournalRepository.restoreFromSnapshot(repo.snapshotState());
     assert.strictEqual((await repo.getAttemptById(attempt.attemptId))?.state, 'CONFIRMED');
 
@@ -355,13 +355,13 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       createdAtWallMs: (baseTime + 50) as any
     };
 
-    const record1 = await repo.recordFill(fillPayload);
+    const record1 = await repo.recordFill(fillPayload, claim6!.claimEpoch);
     assert.strictEqual(record1.created, true);
     assert.strictEqual((await repo.getIntentById(intent.id))?.status, 'APPLIED');
 
     // Replay / Retry do mesmo fill após restart
     repo = InMemoryExitJournalRepository.restoreFromSnapshot(repo.snapshotState());
-    const record2 = await repo.recordFill(fillPayload);
+    const record2 = await repo.recordFill(fillPayload, claim6!.claimEpoch);
     assert.strictEqual(record2.created, false, 'Replaying confirmed fill MUST NOT create second fill');
 
     // Total fills for trade must be strictly 1
@@ -561,14 +561,14 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     );
 
     // Finaliza intent 1 (APPLIED via fill)
-    await repo.claimIntent({ workerId: 'worker_excl', leaseDurationMs: 10_000 });
+    const claim9 = await repo.claimIntent({ workerId: 'worker_excl', leaseDurationMs: 10_000 });
     const attempt = await repo.prepareAttempt({
       attemptId: 'att_excl_1' as any,
       intentId: intent1.id,
       provider: 'JUPITER_V2',
       requestedAmountAtomic: '1000',
       initialState: 'ORDER_READY'
-    });
+    }, claim9!.claimEpoch);
     await repo.recordFill({
       id: 'fill_excl_1' as any,
       tradeId: intent1.tradeId,
@@ -590,7 +590,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       evidenceType: 'CHAIN_PARSED_TRANSACTION',
       confirmedAtWallMs: 1000 as any,
       createdAtWallMs: 1000 as any
-    });
+    }, claim9!.claimEpoch);
 
     const finalIntent1 = await repo.getIntentById(intent1.id);
     assert.strictEqual(finalIntent1?.status, 'APPLIED');
@@ -711,7 +711,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       confirmedAtWallMs: (baseTime + 1300) as any,
       evidenceType: 'CHAIN_PARSED_TRANSACTION',
       createdAtWallMs: (baseTime + 1300) as any
-    });
+    }, 5);
 
     assert.strictEqual(fillResult.created, true);
 
