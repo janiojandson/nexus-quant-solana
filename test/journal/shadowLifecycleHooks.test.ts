@@ -152,7 +152,7 @@ describe('Nexus V2.1B — Shadow Lifecycle Hooks in Execution Flow (C3)', () => 
     });
 
     const attemptAfterReceipt = await repo.getAttemptById(ctx!.currentAttemptId!);
-    assert.strictEqual(attemptAfterReceipt?.state, 'CONFIRMED');
+    assert.strictEqual(attemptAfterReceipt?.state, 'PROVIDER_SUCCESS');
 
     // 7. CONFIRMED EVIDENCE -> FILL LEDGER
     await shadowOnFillConfirmed({
@@ -161,6 +161,9 @@ describe('Nexus V2.1B — Shadow Lifecycle Hooks in Execution Flow (C3)', () => 
       grossProceedsLamports: '250000000',
       actualAmountAtomic: '5000000'
     });
+
+    const attemptAfterFill = await repo.getAttemptById(ctx!.currentAttemptId!);
+    assert.strictEqual(attemptAfterFill?.state, 'CONFIRMED');
 
     const fills = await repo.getFillsForTrade(tradeId);
     assert.strictEqual(fills.length, 1);

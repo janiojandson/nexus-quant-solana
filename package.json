@@ -8,7 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "test": "tsx --test --test-concurrency=1 src/**/*.test.ts test/**/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 test/journal/postgresRealIntegration.test.ts test/position/transactionalFinancialApplication.test.ts test/runtime/shadowWiringAndDebtRecovery.test.ts",
+    "test:postgres": "tsx --test --test-concurrency=1 test/journal/postgresRealIntegration.test.ts test/position/transactionalFinancialApplication.test.ts test/runtime/shadowWiringAndDebtRecovery.test.ts test/position/economicIdentityAndFinalBalance.test.ts",
     "db:reset-ledger": "tsx scripts/resetLedger.ts",
     "trade:canary": "tsx scripts/testCanaryTrade.ts",
     "trade:preflight-exit": "tsx scripts/validateExitNoBroadcast.ts",

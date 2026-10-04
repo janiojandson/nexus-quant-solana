@@ -14,18 +14,18 @@ import { InMemoryJournalRepository } from '../../src/journal/repository.js';
 
 describe('State Machine & System Mutations Fencing (Fase 9, P1-03, P1-04)', () => {
   describe('9.1 — Prepare Attempt Eligibility Matrix', () => {
-    it('accepts only CREATED, CLAIMED, and PREPARED for prepareAttempt', () => {
+    it('accepts CREATED, CLAIMED, PREPARED, CONFIRMED, UNKNOWN and rejects terminal or submitted statuses for prepareAttempt', () => {
       // Allowed
       assert.doesNotThrow(() => assertCanPrepareAttemptForIntent('CREATED'));
       assert.doesNotThrow(() => assertCanPrepareAttemptForIntent('CLAIMED'));
       assert.doesNotThrow(() => assertCanPrepareAttemptForIntent('PREPARED'));
+      assert.doesNotThrow(() => assertCanPrepareAttemptForIntent('CONFIRMED'));
+      assert.doesNotThrow(() => assertCanPrepareAttemptForIntent('UNKNOWN'));
 
       // Incompatible / Forbidden
       const forbidden: ExitIntentStatus[] = [
         'SUBMITTED',
-        'CONFIRMED',
         'APPLIED',
-        'UNKNOWN',
         'FAILED_DEFINITIVE',
         'SUPERSEDED',
         'CANCELLED'
@@ -74,10 +74,10 @@ describe('State Machine & System Mutations Fencing (Fase 9, P1-03, P1-04)', () =
       }, claimed!.claimEpoch);
       assert.ok(attempt1);
 
-      // Now simulate intent transitioning to CONFIRMED
-      intent.status = 'CONFIRMED';
+      // Now simulate intent transitioning to APPLIED (terminal)
+      intent.status = 'APPLIED';
 
-      // Attempting to prepare another attempt while CONFIRMED MUST fail
+      // Attempting to prepare another attempt while APPLIED MUST fail
       await assert.rejects(
         async () => {
           await repo.prepareAttempt({
@@ -89,7 +89,7 @@ describe('State Machine & System Mutations Fencing (Fase 9, P1-03, P1-04)', () =
           }, claimed!.claimEpoch);
         },
         (err: any) => err instanceof IllegalStateTransitionError,
-        'prepareAttempt must reject CONFIRMED intent'
+        'prepareAttempt must reject APPLIED intent'
       );
     });
   });

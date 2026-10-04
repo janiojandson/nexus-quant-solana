@@ -25,12 +25,15 @@ import {
   ApplyConfirmedFillInput,
   ApplyReconciliationAdjustmentInput,
   ArbitraryBalanceMutationRejectedError,
+  InvalidFinalFillResidualError,
+  AdministrativeCorrectionInput,
   ExternalBalanceDivergenceAdjustment,
   StalePositionVersionError,
   ActivePositionConflictError,
   PositionNotFoundError,
   DEFAULT_TOKEN_PROGRAM_ID
 } from './types.js';
+
 
 export interface PostgresPositionRepositoryConfig {
   pool: Pool;
@@ -267,6 +270,14 @@ export class PostgresPositionRepository implements IPositionRepository {
       const amountAfter = params.newAmountAtomic;
       const delta = amountAfter - amountBefore;
 
+      if (params.mutationType === 'FINAL_FILL' && amountAfter > 0n) {
+        throw new InvalidFinalFillResidualError(
+          `Cannot perform FINAL_FILL with positive residual balance (${amountAfter} > 0n).`,
+          params.positionId,
+          amountAfter
+        );
+      }
+
       let targetStatus = params.newStatus;
       if (!targetStatus && amountAfter === 0n) {
         targetStatus = 'CLOSED';
@@ -428,6 +439,14 @@ export class PostgresPositionRepository implements IPositionRepository {
         throw new ArbitraryBalanceMutationRejectedError(
           `Calculated position balance cannot be negative: ${newAmount}`,
           input.positionId
+        );
+      }
+
+      if (input.isFinal && newAmount > 0n) {
+        throw new InvalidFinalFillResidualError(
+          `Cannot mark position ${input.positionId} as final with positive residual balance (${newAmount} > 0n).`,
+          input.positionId,
+          newAmount
         );
       }
 
@@ -619,4 +638,42 @@ export class PostgresPositionRepository implements IPositionRepository {
     }
     return this.mapRowToPosition(res.rows[0]);
   }
+
+  public async applyExplicitAdministrativeCorrection(
+    input: AdministrativeCorrectionInput,
+    externalClient?: PoolClient
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    if (!input.actor || input.actor.trim().length === 0) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Actor is strictly required for explicit administrative correction',
+        input.positionId
+      );
+    }
+    if (!input.reason || input.reason.trim().length === 0) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Reason is strictly required for explicit administrative correction',
+        input.positionId
+      );
+    }
+    if (input.newAmountAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Position amount cannot be negative: ${input.newAmountAtomic}`,
+        input.positionId
+      );
+    }
+    const newStatus: PositionStatus = input.newAmountAtomic === 0n ? 'CLOSED' : 'OPEN';
+    return this.updatePositionCAS({
+      positionId: input.positionId,
+      expectedVersion: input.expectedVersion,
+      newAmountAtomic: input.newAmountAtomic,
+      newStatus,
+      mutationType: 'MANUAL_CORRECTION',
+      signature: input.signature || null,
+      reconciliationRequired: false
+    }, externalClient);
+  }
 }
+

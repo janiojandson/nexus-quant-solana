@@ -2,16 +2,19 @@
  * Nexus Quant Solana — Missão V2.3-R
  * Shared Transaction Boundary for Journal + Position (Commit R4)
  *
- * Implements P1-06:
+ * Implements P1-06 & R-P1-01:
  * Executes the complete financial application inside a SINGLE database transaction
  * using a single shared PoolClient:
  *
  * BEGIN
  *   Lock position FOR UPDATE
- *   Lock intent FOR UPDATE & verify claim epoch
+ *   Lock intent FOR UPDATE
+ *   Lock attempt FOR UPDATE and validate FK
+ *   Validate Economic Identity (intent <-> position <-> fill)
+ *   Verify claim epoch
  *   recordFill in journal (append-only fill ledger)
  *   applyConfirmedFill on position (OCC CAS version bump & mutation)
- *   update intent status & clear reconciliation debt
+ *   update intent status & clear reconciliation debt atomically
  * COMMIT
  * (ROLLBACK on any failure)
  */
@@ -24,7 +27,8 @@ import {
   DurablePosition,
   PositionMutationRecord,
   PositionVersion,
-  PositionNotFoundError
+  PositionNotFoundError,
+  EconomicIdentityMismatchError
 } from './types.js';
 
 export interface AtomicFillApplicationParams {
@@ -48,6 +52,14 @@ export interface AtomicFillApplicationResult {
 /**
  * Executes confirmed fill recording and position debit within a single atomic PostgreSQL transaction.
  * If either journal insertion or position mutation fails, both are rolled back.
+ *
+ * Implements FASE 10 and Finding R-P1-01:
+ * - Validates intent-position-fill economic identity
+ * - Locks position, intent, and attempt rows FOR UPDATE
+ * - Validates attempt FK
+ * - Inserts fill in append-only ledger
+ * - Mutates position with OCC version check
+ * - Marks Intent APPLIED and clears debt atomically
  */
 export async function applyConfirmedFillAtomically(
   params: AtomicFillApplicationParams
@@ -64,8 +76,9 @@ export async function applyConfirmedFillAtomically(
     if (posLockRes.rows.length === 0) {
       throw new PositionNotFoundError(`Position ${params.fill.positionId} not found`, params.fill.positionId);
     }
+    const posRow = posLockRes.rows[0];
 
-    // 2. Lock intent row FOR UPDATE and verify claim epoch
+    // 2. Lock intent row FOR UPDATE
     const intentLockRes = await client.query(
       'SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE',
       [params.fill.intentId]
@@ -74,6 +87,71 @@ export async function applyConfirmedFillAtomically(
       throw new Error(`ExitIntent ${params.fill.intentId} not found`);
     }
     const intentRow = intentLockRes.rows[0];
+
+    // 3. Lock attempt row FOR UPDATE and validate attempt FK
+    const attemptLockRes = await client.query(
+      'SELECT * FROM execution_attempts WHERE attempt_id = $1 FOR UPDATE',
+      [params.fill.attemptId]
+    );
+    if (attemptLockRes.rows.length === 0) {
+      throw new EconomicIdentityMismatchError(
+        `ExecutionAttempt ${params.fill.attemptId} not found for fill`,
+        { attemptId: params.fill.attemptId }
+      );
+    }
+    const attemptRow = attemptLockRes.rows[0];
+    if (attemptRow.intent_id !== intentRow.id) {
+      throw new EconomicIdentityMismatchError(
+        `Attempt intent_id (${attemptRow.intent_id}) does not match Intent id (${intentRow.id})`,
+        { attemptIntentId: attemptRow.intent_id, intentId: intentRow.id }
+      );
+    }
+
+    // 4. Validate Economic Identity (Finding R-P1-01)
+    if (intentRow.position_id !== posRow.position_id) {
+      throw new EconomicIdentityMismatchError(
+        `Intent position_id (${intentRow.position_id}) does not match Position id (${posRow.position_id})`,
+        { intentPositionId: intentRow.position_id, positionId: posRow.position_id }
+      );
+    }
+    if (intentRow.wallet_id !== posRow.wallet_id) {
+      throw new EconomicIdentityMismatchError(
+        `Intent wallet_id (${intentRow.wallet_id}) does not match Position wallet_id (${posRow.wallet_id})`,
+        { intentWalletId: intentRow.wallet_id, positionWalletId: posRow.wallet_id }
+      );
+    }
+    if (intentRow.mint !== posRow.mint) {
+      throw new EconomicIdentityMismatchError(
+        `Intent mint (${intentRow.mint}) does not match Position mint (${posRow.mint})`,
+        { intentMint: intentRow.mint, positionMint: posRow.mint }
+      );
+    }
+    if (intentRow.token_program !== posRow.token_program) {
+      throw new EconomicIdentityMismatchError(
+        `Intent token_program (${intentRow.token_program}) does not match Position token_program (${posRow.token_program})`,
+        { intentTokenProgram: intentRow.token_program, positionTokenProgram: posRow.token_program }
+      );
+    }
+    if (params.fill.positionId !== posRow.position_id) {
+      throw new EconomicIdentityMismatchError(
+        `Fill positionId (${params.fill.positionId}) does not match Position id (${posRow.position_id})`,
+        { fillPositionId: params.fill.positionId, positionId: posRow.position_id }
+      );
+    }
+    if (params.fill.intentId !== intentRow.id) {
+      throw new EconomicIdentityMismatchError(
+        `Fill intentId (${params.fill.intentId}) does not match Intent id (${intentRow.id})`,
+        { fillIntentId: params.fill.intentId, intentId: intentRow.id }
+      );
+    }
+    if (params.fill.assetMint && params.fill.assetMint !== posRow.mint) {
+      throw new EconomicIdentityMismatchError(
+        `Fill assetMint (${params.fill.assetMint}) does not match Position mint (${posRow.mint})`,
+        { fillAssetMint: params.fill.assetMint, positionMint: posRow.mint }
+      );
+    }
+
+    // 5. Verify claim epoch
     if (BigInt(intentRow.claim_epoch) !== BigInt(params.expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for fill on intent ${params.fill.intentId}: expected ${params.expectedEpoch}, actual ${intentRow.claim_epoch}`,
@@ -83,14 +161,14 @@ export async function applyConfirmedFillAtomically(
       );
     }
 
-    // 3. Record fill in journal ledger using shared client
+    // 6. Record fill in journal ledger using shared client
     const fillRes = await params.journalRepo.recordFill(
       params.fill,
       params.expectedEpoch,
       client
     );
 
-    // 4. Apply confirmed fill to position using same shared client
+    // 7. Apply confirmed fill to position using same shared client
     const posRes = await params.positionRepo.applyConfirmedFill(
       {
         positionId: params.fill.positionId,
@@ -103,6 +181,32 @@ export async function applyConfirmedFillAtomically(
         isFinal: params.isFinal
       },
       client
+    );
+
+    // 8. Atomically update Intent and clear debt
+    const isClosed = posRes.position.tokenAmountAtomic === 0n || params.isFinal;
+    if (isClosed) {
+      await client.query(
+        `UPDATE exit_intents
+         SET status = 'APPLIED', reconciliation_debt = false
+         WHERE id = $1`,
+        [intentRow.id]
+      );
+    } else {
+      await client.query(
+        `UPDATE exit_intents
+         SET reconciliation_debt = false
+         WHERE id = $1`,
+        [intentRow.id]
+      );
+    }
+
+    await client.query(
+      `UPDATE execution_attempts
+       SET state = CASE WHEN state IN ('PREPARED', 'SIGNED', 'SUBMITTED', 'UNKNOWN', 'PROVIDER_RECEIPT') THEN 'CONFIRMED' ELSE state END,
+           confirmed_at = COALESCE(confirmed_at, NOW())
+       WHERE attempt_id = $1`,
+      [params.fill.attemptId]
     );
 
     await client.query('COMMIT');

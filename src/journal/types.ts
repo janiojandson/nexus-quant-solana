@@ -214,7 +214,9 @@ export function assertValidIntentTransition(from: ExitIntentStatus, to: ExitInte
 export const ALLOWED_INTENT_STATUSES_FOR_PREPARE_ATTEMPT: ReadonlySet<ExitIntentStatus> = new Set([
   'CREATED',
   'CLAIMED',
-  'PREPARED'
+  'PREPARED',
+  'CONFIRMED',
+  'UNKNOWN'
 ]);
 
 export function assertCanPrepareAttemptForIntent(intentStatus: ExitIntentStatus): void {
@@ -222,7 +224,7 @@ export function assertCanPrepareAttemptForIntent(intentStatus: ExitIntentStatus)
     throw new IllegalStateTransitionError(
       'ExitIntent',
       intentStatus,
-      'PREPARE_ATTEMPT_REJECTED: Intent must be in CREATED, CLAIMED, or PREPARED to prepare a new attempt'
+      `PREPARE_ATTEMPT_REJECTED: Intent in status '${intentStatus}' cannot prepare a new attempt`
     );
   }
 }

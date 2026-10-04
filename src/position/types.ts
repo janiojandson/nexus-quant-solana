@@ -202,6 +202,40 @@ export class AmbiguousTokenAccountCustodyError extends Error {
   }
 }
 
+/**
+ * Finding R-P1-03: isFinal=true is strictly forbidden when residual token balance > 0n.
+ */
+export class InvalidFinalFillResidualError extends Error {
+  constructor(
+    message: string,
+    public readonly positionId: string,
+    public readonly residualBalance: bigint
+  ) {
+    super(message);
+    this.name = 'InvalidFinalFillResidualError';
+  }
+}
+
+/**
+ * Finding R-P1-01: Economic identity mismatch between intent, fill, and position.
+ */
+export class EconomicIdentityMismatchError extends Error {
+  constructor(message: string, public readonly details: Record<string, unknown>) {
+    super(`ECONOMIC_IDENTITY_MISMATCH: ${message}`);
+    this.name = 'EconomicIdentityMismatchError';
+  }
+}
+
+export interface AdministrativeCorrectionInput {
+  positionId: string;
+  expectedVersion: PositionVersion;
+  newAmountAtomic: bigint;
+  actor: string;
+  reason: string;
+  signature?: string;
+}
+
+
 export interface ApplyConfirmedFillInput {
   positionId: string;
   expectedVersion: PositionVersion;

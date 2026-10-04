@@ -21,6 +21,8 @@ import {
   DuplicateFillApplicationError,
   ActivePositionConflictError,
   PositionNotFoundError,
+  InvalidFinalFillResidualError,
+  AdministrativeCorrectionInput,
   DEFAULT_TOKEN_PROGRAM_ID
 } from './types.js';
 
@@ -49,6 +51,13 @@ export interface IPositionRepository {
     alreadyApplied: boolean;
   }>;
   applyReconciliationAdjustment(input: ApplyReconciliationAdjustmentInput, client?: any): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }>;
+  applyExplicitAdministrativeCorrection(
+    input: AdministrativeCorrectionInput,
+    client?: any
+  ): Promise<{
     position: DurablePosition;
     mutation: PositionMutationRecord;
   }>;
@@ -200,6 +209,15 @@ export class InMemoryPositionRepository implements IPositionRepository {
     const amountBefore = pos.tokenAmountAtomic;
     const amountAfter = params.newAmountAtomic;
     const delta = amountAfter - amountBefore;
+
+    if (params.mutationType === 'FINAL_FILL' && amountAfter > 0n) {
+      throw new InvalidFinalFillResidualError(
+        `Cannot perform FINAL_FILL with positive residual balance (${amountAfter} > 0n).`,
+        params.positionId,
+        amountAfter
+      );
+    }
+
     const now = new Date();
 
     pos.positionVersion = nextVersion;
@@ -311,6 +329,14 @@ export class InMemoryPositionRepository implements IPositionRepository {
       throw new ArbitraryBalanceMutationRejectedError(
         `Calculated position balance cannot be negative: ${newAmount}`,
         input.positionId
+      );
+    }
+
+    if (input.isFinal && newAmount > 0n) {
+      throw new InvalidFinalFillResidualError(
+        `Cannot mark position ${input.positionId} as final with positive residual balance (${newAmount} > 0n).`,
+        input.positionId,
+        newAmount
       );
     }
 
@@ -456,6 +482,42 @@ export class InMemoryPositionRepository implements IPositionRepository {
     pos.reconciliationRequired = required;
     pos.updatedAt = new Date();
     return { ...pos };
+  }
+
+  public async applyExplicitAdministrativeCorrection(
+    input: AdministrativeCorrectionInput
+  ): Promise<{
+    position: DurablePosition;
+    mutation: PositionMutationRecord;
+  }> {
+    if (!input.actor || input.actor.trim().length === 0) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Actor is strictly required for explicit administrative correction',
+        input.positionId
+      );
+    }
+    if (!input.reason || input.reason.trim().length === 0) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        'Reason is strictly required for explicit administrative correction',
+        input.positionId
+      );
+    }
+    if (input.newAmountAtomic < 0n) {
+      throw new ArbitraryBalanceMutationRejectedError(
+        `Position amount cannot be negative: ${input.newAmountAtomic}`,
+        input.positionId
+      );
+    }
+    const newStatus: PositionStatus = input.newAmountAtomic === 0n ? 'CLOSED' : 'OPEN';
+    return this.updatePositionCAS({
+      positionId: input.positionId,
+      expectedVersion: input.expectedVersion,
+      newAmountAtomic: input.newAmountAtomic,
+      newStatus,
+      mutationType: 'MANUAL_CORRECTION',
+      signature: input.signature || null,
+      reconciliationRequired: false
+    });
   }
 
   public getMutations(positionId?: string): PositionMutationRecord[] {

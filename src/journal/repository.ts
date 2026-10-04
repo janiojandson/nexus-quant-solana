@@ -510,7 +510,9 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     if (intent) {
       let targetIntentStatus: ExitIntentStatus | null = null;
       if (state === 'SUBMITTED' || state === 'SENT') {
-        targetIntentStatus = 'SUBMITTED';
+        if (intent.status !== 'CONFIRMED' && intent.status !== 'APPLIED' && intent.status !== 'UNKNOWN') {
+          targetIntentStatus = 'SUBMITTED';
+        }
         intent.reconciliationDebt = true;
       } else if (state === 'SIGNED') {
         intent.reconciliationDebt = true;

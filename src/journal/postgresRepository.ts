@@ -594,7 +594,9 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         let setReconcilDebt: boolean | null = null;
 
         if (state === 'SUBMITTED' || state === 'SENT') {
-          newIntentStatus = 'SUBMITTED';
+          if (intentRow.status !== 'CONFIRMED' && intentRow.status !== 'APPLIED' && intentRow.status !== 'UNKNOWN') {
+            newIntentStatus = 'SUBMITTED';
+          }
           setReconcilDebt = true;
         } else if (state === 'SIGNED') {
           setReconcilDebt = true;
@@ -705,9 +707,9 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         fill.rentMovementLamports,
         fill.slot || null,
         fill.commitment || 'confirmed',
-        Number(fill.confirmedAtWallMs),
+        fill.confirmedAtWallMs ? Number(fill.confirmedAtWallMs) : ((fill as any).confirmedAt ? new Date((fill as any).confirmedAt).getTime() : Date.now()),
         fill.evidenceType,
-        Number(fill.createdAtWallMs)
+        fill.createdAtWallMs ? Number(fill.createdAtWallMs) : ((fill as any).createdAt ? new Date((fill as any).createdAt).getTime() : Date.now())
       ]);
 
       if (fillRes.rows.length === 0) {
