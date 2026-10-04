@@ -26,7 +26,8 @@ import { AdaptivePositionSizer, MIN_TRADE_AMOUNT_SOL } from '../src/blockchain/a
 import {
   assertAtomicAmount,
   atomicToUiAmount,
-  evaluateCapitalReturn
+  evaluateCapitalReturn,
+  parseSolToLamports
 } from '../src/execution/atomicAmount.js';
 import { assertCanonicalAtaCustody } from '../src/position/custody.js';
 import { financialExitSafetyGuard, safeBigIntToNumber } from '../src/execution/financialExitSafetyGuard.js';
@@ -207,7 +208,7 @@ async function main() {
     entryRes = await engine.executeSwap({
       inputMint: SOL_MINT,
       outputMint: target.mint,
-      amountLamports: Math.floor(sizeSol * 1e9),
+      amountLamports: safeBigIntToNumber(parseSolToLamports(sizeSol), 'testCanaryTrade_buySize'),
       autoSlippage: true,
       autoSlippageCollisionUsdValue: 1000,
       maxAutoSlippageBps: 750,
@@ -335,8 +336,35 @@ async function main() {
           priorityLevel: 'veryHigh'
         });
 
+        if (res.status === 'SUBMITTED_UNCONFIRMED') {
+          console.error(`   🛑 [SUBMITTED_UNCONFIRMED] Transação pode estar viva on-chain! Registrando dívida e bloqueando nova tentativa.`);
+          financialExitSafetyGuard.registerUnresolvedDebt(target.mint);
+          report.errors.push(`Saída inconclusiva (SUBMITTED_UNCONFIRMED) com tx=${res.txSignature}: retry bloqueado; MUST_RECONCILE.`);
+
+          // Tenta reconciliar pela assinatura exata antes de desistir
+          if (res.txSignature) {
+            console.log(`   🔍 Tentando reconciliar assinatura ${res.txSignature}...`);
+            const reconciled = await wallet.reconcileExactTransaction({
+              signature: res.txSignature,
+              mintAddress: target.mint,
+              expectedOwner: owner.toBase58(),
+              direction: 'OUT'
+            });
+            if (reconciled && reconciled.success && BigInt(reconciled.deltaAtomic) < 0n) {
+              console.log(`   ✅ Reconciliada com sucesso após timeout!`);
+              financialExitSafetyGuard.clearUnresolvedDebt(target.mint);
+              sold = true;
+              report.exit.signature = res.txSignature;
+              break;
+            }
+          }
+
+          // Se não reconciliou, ABORTA! NUNCA dispara segundo swap!
+          break;
+        }
+
         if (res.status !== 'SUCCESS') {
-          console.error(`   ❌ Falhou: ${res.error}`);
+          console.error(`   ❌ Falhou definitivamente: ${res.error}`);
           report.errors.push(`Saída (${slippageBps} bps): ${res.error}`);
           continue;
         }

@@ -149,3 +149,17 @@ export function evaluateCapitalReturn(params: {
     reason: failures.length ? failures.join(' | ') : 'retorno de capital dentro da tolerancia'
   };
 }
+
+/**
+ * Converte valor em SOL (decimal) para lamports em BigInt de forma segura sem aritmética float.
+ * (Finding 20: Elimina Math.floor(sizeSol * 1e9) e perda de precisão float).
+ */
+export function parseSolToLamports(sol: number | string): bigint {
+  const str = typeof sol === 'number' ? sol.toFixed(9) : String(sol).trim();
+  if (!/^\d+(\.\d{1,9})?$/.test(str)) {
+    throw new Error(`[AtomicAmount] Valor SOL inválido: ${sol}`);
+  }
+  const [whole, frac = ''] = str.split('.');
+  const paddedFrac = frac.padEnd(9, '0').slice(0, 9);
+  return BigInt(whole) * 1_000_000_000n + BigInt(paddedFrac);
+}

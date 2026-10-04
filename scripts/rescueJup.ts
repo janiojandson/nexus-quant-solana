@@ -158,6 +158,29 @@ async function main() {
         priorityLevel: 'veryHigh'
       });
 
+      if (res.status === 'SUBMITTED_UNCONFIRMED') {
+        console.error(`   🛑 [SUBMITTED_UNCONFIRMED] Transação pode estar viva on-chain! Registrando dívida e bloqueando nova tentativa.`);
+        financialExitSafetyGuard.registerUnresolvedDebt(JUP_MINT);
+        if (res.txSignature) {
+          console.log(`   🔍 Tentando reconciliar assinatura ${res.txSignature}...`);
+          const reconciled = await wallet.reconcileExactTransaction({
+            signature: res.txSignature,
+            mintAddress: JUP_MINT,
+            expectedOwner: owner.toBase58(),
+            direction: 'OUT'
+          });
+          if (reconciled && reconciled.success && BigInt(reconciled.deltaAtomic) < 0n) {
+            console.log(`   ✅ Reconciliada com sucesso após timeout! Solscan: ${SOLSCAN}${res.txSignature}`);
+            financialExitSafetyGuard.clearUnresolvedDebt(JUP_MINT);
+            exitSig = res.txSignature;
+            sold = true;
+            break;
+          }
+        }
+        // Inconclusiva: bloqueia segundo envio e aborta
+        break;
+      }
+
       if (res.status !== 'SUCCESS') {
         console.error(`   ❌ Falhou: ${res.error}`);
         continue;

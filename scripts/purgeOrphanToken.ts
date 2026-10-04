@@ -101,6 +101,11 @@ async function main() {
     console.log('Saldo já é zero — apenas fechando a ATA.');
   }
 
+  if (financialExitSafetyGuard.hasUnresolvedDebt(TARGET_MINT)) {
+    console.error(`❌ Purga bloqueada pelo safety guard: Mint ${TARGET_MINT} possui dívida durável não reconciliada.`);
+    process.exit(1);
+  }
+
   let lockAcquired = false;
   if (rawAmount > 0n) {
     const lock = financialExitSafetyGuard.acquireExitLock(TARGET_MINT, rawAmount);
