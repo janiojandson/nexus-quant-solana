@@ -130,7 +130,7 @@ export interface IExitJournalRepository {
 }
 
 // ==========================================
-// 4. IN-MEMORY ACID-COMPLIANT IMPLEMENTATION
+// 4. IN-MEMORY CONTRACT-TESTING IMPLEMENTATION
 // ==========================================
 
 import {
@@ -140,7 +140,7 @@ import {
   ActiveIntentExclusionError
 } from './types';
 
-export class InMemoryExitJournalRepository implements IExitJournalRepository {
+export class InMemoryJournalRepository implements IExitJournalRepository {
   private intents = new Map<string, ExitIntent>(); // id -> intent
   private intentsByDedupeKey = new Map<string, string>(); // dedupeKey -> id
   private attempts = new Map<string, ExecutionAttempt>(); // attemptId -> attempt
@@ -531,9 +531,9 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
     });
   }
 
-  public static restoreFromSnapshot(json: string): InMemoryExitJournalRepository {
+  public static restoreFromSnapshot(json: string): InMemoryJournalRepository {
     const parsed = JSON.parse(json);
-    const repo = new InMemoryExitJournalRepository();
+    const repo = new InMemoryJournalRepository();
     for (const [k, v] of parsed.intents) {
       repo.intents.set(k, v);
       repo.intentsByDedupeKey.set(v.economicDedupeKey, k);
@@ -553,3 +553,7 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
     return repo;
   }
 }
+
+// Backwards compatibility alias
+export const InMemoryExitJournalRepository = InMemoryJournalRepository;
+
