@@ -10,6 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { Pool } from 'pg';
+import { createRequiredTestPool } from '../helpers/testDatabase.js';
 import {
   setShadowRepository,
   getShadowRepository,
@@ -76,15 +77,7 @@ test('Nexus V2.3-R — Shadow Wiring & Durable Restart Debt Recovery (R5)', asyn
 
   // 2. P0-02: Durable Restart Debt Recovery against Real PostgreSQL
   await t.test('P0-02: rehydrateDurableExitDebtsOnBoot recovers SUBMITTED/UNKNOWN/debt intents and locks mints', async () => {
-    const pgUrl = process.env.TEST_POSTGRES_URL || 'postgresql://postgres:postgres@localhost:55432/nexus_test';
-    const pool = new Pool({ connectionString: pgUrl });
-
-    try {
-      await pool.query('SELECT 1');
-    } catch {
-      // Postgres unavailable; skip gracefully
-      return;
-    }
+    const pool = await createRequiredTestPool();
 
     try {
       const journalRepo = new PostgresJournalRepository({ pool });
@@ -158,6 +151,10 @@ test('Nexus V2.3-R — Shadow Wiring & Durable Restart Debt Recovery (R5)', asyn
         intentId: intentUnknown.id,
         provider: 'JUPITER_V2',
         requestedAmountAtomic: '3000'
+      }, claimed2!.claimEpoch);
+
+      await journalRepo.updateAttemptState(attempt2.attemptId, 'SUBMITTED', {
+        signature: `sig_unk_${Date.now()}` as any
       }, claimed2!.claimEpoch);
 
       await journalRepo.updateAttemptState(attempt2.attemptId, 'UNKNOWN', {

@@ -27,10 +27,7 @@ import {
   nowWallMs
 } from '../../src/journal/types';
 import { LeaseRecoveryBlockedError } from '../../src/journal/repository';
-
-const TEST_DB_URL =
-  process.env.TEST_DATABASE_URL ||
-  'postgresql://test_nexus_user:descartavel_secret_pass_123@localhost:55432/test_nexus_journal';
+import { createRequiredTestPool } from '../helpers/testDatabase';
 
 describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
   let pool: Pool;
@@ -38,19 +35,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
   let pgVersionString: string = '';
 
   before(async () => {
-    // Proibir terminantemente credenciais Railway
-    assert.strictEqual(
-      Boolean(TEST_DB_URL.includes('railway.internal') || TEST_DB_URL.includes('rlwy.net')),
-      false,
-      'PROIBIDO usar banco Railway para testes'
-    );
-
-    pool = new Pool({
-      connectionString: TEST_DB_URL,
-      max: 10,
-      connectionTimeoutMillis: 5000
-    });
-
+    pool = await createRequiredTestPool();
     repo = new PostgresJournalRepository(pool);
   });
 

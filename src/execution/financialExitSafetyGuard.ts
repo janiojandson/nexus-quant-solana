@@ -45,6 +45,13 @@ export class FinancialExitSafetyGuard {
   }
 
   /**
+   * Alias for clearUnresolvedDebt.
+   */
+  public clearDebt(mint: string): void {
+    this.clearUnresolvedDebt(mint);
+  }
+
+  /**
    * Returns whether a mint currently has unresolved execution debt.
    */
   public hasUnresolvedDebt(mint: string): boolean {
@@ -127,6 +134,18 @@ export class FinancialExitSafetyGuard {
     }
 
     return { allowed: true };
+  }
+
+  /**
+   * Boolean check for safe exit status (used in tests and runtime inspection).
+   */
+  public checkSafeToExit(mint: string, amountAtomic: bigint = 1n): { canExit: boolean; reason?: string; code?: string } {
+    const res = this.validateExit(mint, amountAtomic);
+    return {
+      canExit: res.allowed,
+      reason: res.code === 'UNRESOLVED_RECONCILIATION_DEBT' ? 'UNRESOLVED_EXIT_DEBT' : res.code,
+      code: res.code
+    };
   }
 }
 

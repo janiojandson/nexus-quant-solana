@@ -12,6 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { Pool } from 'pg';
+import { createRequiredTestPool } from '../helpers/testDatabase.js';
 import { InMemoryPositionRepository } from '../../src/position/repository.js';
 import { PostgresPositionRepository } from '../../src/position/postgresPositionRepository.js';
 import { PostgresJournalRepository } from '../../src/journal/postgresRepository.js';
@@ -215,16 +216,7 @@ test('Nexus V2.3-R — Transactional Financial Application & Custody Policy (R4)
 
   // 4. P1-06: Shared Transaction Boundary against real PostgreSQL
   await t.test('P1-06: applyConfirmedFillAtomically rolls back journal insert if position mutation fails', async () => {
-    const pgUrl = process.env.TEST_POSTGRES_URL || 'postgresql://postgres:postgres@localhost:55432/nexus_test';
-    const pool = new Pool({ connectionString: pgUrl });
-
-    try {
-      // Check if DB is reachable
-      await pool.query('SELECT 1');
-    } catch {
-      // If DB is unreachable, skip real PG test gracefully
-      return;
-    }
+    const pool = await createRequiredTestPool();
 
     try {
       const journalRepo = new PostgresJournalRepository({ pool });
@@ -268,12 +260,21 @@ test('Nexus V2.3-R — Transactional Financial Application & Custody Policy (R4)
       });
       assert.ok(claimed);
 
+      const attempt = await journalRepo.prepareAttempt({
+        attemptId: `att_atomic_${Date.now()}` as any,
+        intentId: intent.id,
+        provider: 'JUPITER_V2',
+        requestedAmountAtomic: '2000',
+        initialState: 'ORDER_READY',
+        nowMs: baseTime
+      }, claimed!.claimEpoch);
+
       const fillPayload: FillRecord = {
         id: `fill_atomic_${Date.now()}` as any,
         tradeId: testTradeId as any,
         positionId: testPosId as any,
         intentId: intent.id,
-        attemptId: 'att_atomic_1' as any,
+        attemptId: attempt.attemptId,
         signature: `sig_atomic_${Date.now()}` as any,
         realizationSequence: 1,
         chainLegIndex: 0,
