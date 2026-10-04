@@ -69,6 +69,23 @@ export function resolveRpcProviderAlias(rpcUrl?: string): SolanaRpcProviderAlias
   }
 }
 
+export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+
+export const JUPITER_PROGRAM_IDS = new Set([
+  JUPITER_V6_PROGRAM_ID,
+  'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB',
+  'JUP3c2Uh3WA4Ng34tw6kPd2G4C5BB21Xo36Je1s32Ph'
+]);
+
+export const JUPITER_KNOWN_ERRORS: Record<number, string> = {
+  6001: 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED',
+  6008: 'JUPITER_NOT_ENOUGH_ACCOUNT_KEYS',
+  6014: 'JUPITER_INCORRECT_TOKEN_PROGRAM_ID',
+  6017: 'JUPITER_EXACT_OUT_AMOUNT_NOT_MATCHED',
+  6024: 'JUPITER_INSUFFICIENT_FUNDS',
+  6025: 'JUPITER_INVALID_TOKEN_ACCOUNT'
+};
+
 export function parseRpcError(err: any): {
   timedOut: boolean;
   errorClass: string;
@@ -78,6 +95,8 @@ export function parseRpcError(err: any): {
     instructionIndex?: number;
     logsDigest?: string;
     classification?: string;
+    classificationSource?: string;
+    classificationVersion?: string;
   };
 } {
   const message = String(err?.message || err || '');
@@ -96,6 +115,7 @@ export function parseRpcError(err: any): {
   let customCode: number | string | undefined = err?.customProgramError?.customCode;
   let instructionIndex: number | undefined = err?.customProgramError?.instructionIndex;
   let programId: string | undefined = err?.customProgramError?.programId || err?.programId;
+  const programIdProven = Boolean(programId);
 
   // 1. InstructionError array: [index, { Custom: code }]
   if (Array.isArray(err?.instructionError)) {
@@ -139,7 +159,9 @@ export function parseRpcError(err: any): {
     const sanitized = sanitizeLogMessage(joined);
     logsDigest = sanitized.length > 200 ? sanitized.slice(0, 197) + '...' : sanitized;
 
-    if (!programId) {
+    // Rule 10: contradictory logs must NOT silently replace proven programId
+    if (!programIdProven) {
+      // Prioritize explicit failure line: "Program <id> failed:"
       for (const log of rawLogs) {
         if (typeof log !== 'string') continue;
         const failedMatch = log.match(/Program\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s+failed/i);
@@ -147,9 +169,17 @@ export function parseRpcError(err: any): {
           programId = failedMatch[1];
           break;
         }
-        const invokeMatch = log.match(/Program\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s+invoke/i);
-        if (invokeMatch && !programId) {
-          programId = invokeMatch[1];
+      }
+      // If no explicit failure line, look for the LAST invoked program
+      if (!programId) {
+        for (let i = rawLogs.length - 1; i >= 0; i--) {
+          const log = rawLogs[i];
+          if (typeof log !== 'string') continue;
+          const invokeMatch = log.match(/Program\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s+invoke/i);
+          if (invokeMatch) {
+            programId = invokeMatch[1];
+            break;
+          }
         }
       }
     }
@@ -168,17 +198,20 @@ export function parseRpcError(err: any): {
     instructionIndex?: number;
     logsDigest?: string;
     classification?: string;
+    classificationSource?: string;
+    classificationVersion?: string;
   } | undefined = undefined;
 
   if (customCode !== undefined || programId !== undefined) {
     let classification = 'UNKNOWN';
-    if (!programId) {
-      classification = 'UNKNOWN';
-    } else {
-      if (Number(customCode) === 6014 || customCode === '0x177e' || customCode === '0x177E') {
-        classification = 'SLIPPAGE_EXCEEDED';
-      } else {
-        classification = 'CUSTOM_PROGRAM_ERROR';
+    let classificationSource = 'UNKNOWN';
+    const classificationVersion = '2026-10-04';
+
+    if (programId && JUPITER_PROGRAM_IDS.has(programId)) {
+      const numericCode = Number(customCode);
+      if (JUPITER_KNOWN_ERRORS[numericCode]) {
+        classification = JUPITER_KNOWN_ERRORS[numericCode];
+        classificationSource = 'JUPITER_SWAP_PROGRAM_KNOWN_ERRORS';
       }
     }
 
@@ -187,7 +220,9 @@ export function parseRpcError(err: any): {
       customCode,
       instructionIndex,
       logsDigest,
-      classification
+      classification,
+      classificationSource,
+      classificationVersion
     };
   }
 

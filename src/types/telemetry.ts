@@ -310,6 +310,12 @@ export interface ErrorClassification {
   instructionIndex?: number;
   logsDigest?: string;
   classifiedAs:
+    | 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED'
+    | 'JUPITER_NOT_ENOUGH_ACCOUNT_KEYS'
+    | 'JUPITER_INCORRECT_TOKEN_PROGRAM_ID'
+    | 'JUPITER_EXACT_OUT_AMOUNT_NOT_MATCHED'
+    | 'JUPITER_INSUFFICIENT_FUNDS'
+    | 'JUPITER_INVALID_TOKEN_ACCOUNT'
     | 'SLIPPAGE_EXCEEDED'
     | 'INSUFFICIENT_POOL_DEPTH'
     | 'CUSTOM_PROGRAM_ERROR'
@@ -318,6 +324,8 @@ export interface ErrorClassification {
     | 'UNKNOWN';
   confidence: 'DEFINITIVE' | 'INFERRED' | 'UNVERIFIED';
   evidence: string;
+  classificationSource?: string;
+  classificationVersion?: string;
 }
 
 // ==========================================
@@ -345,6 +353,8 @@ export interface SolanaRpcSpanMetadata {
     readonly instructionIndex?: number;
     readonly logsDigest?: string;
     readonly classification?: string;
+    readonly classificationSource?: string;
+    readonly classificationVersion?: string;
   };
   readonly attemptNumber?: number;
   readonly timeoutConfiguredMs?: number;

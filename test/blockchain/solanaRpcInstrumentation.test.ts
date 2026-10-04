@@ -267,29 +267,75 @@ test('SolanaRpcInstrumentation: 15. Commitment original preservado', async () =>
   assert.equal(spans[0].metadata?.commitment, 'confirmed');
 });
 
-test('SolanaRpcInstrumentation: 16. Erro Custom sem programId não é classificado arbitrariamente (classification = UNKNOWN)', () => {
-  // Caso A: Com código 6014 mas SEM programId -> UNKNOWN
-  const errorNoProgram = new Error('Instruction 0: custom program error: 0x177e');
-  const parsedA = parseRpcError(errorNoProgram);
-  assert.ok(parsedA.customProgramError);
-  assert.equal(parsedA.customProgramError.customCode, 6014);
-  assert.equal(parsedA.customProgramError.programId, undefined);
-  assert.equal(parsedA.customProgramError.classification, 'UNKNOWN');
+test('SolanaRpcInstrumentation: 16. Hardening - Error classification namespaced by Program ID (10 testes)', () => {
+  const JUPITER = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+  const OTHER_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 
-  // Caso B: Com código 6014 E com programId -> SLIPPAGE_EXCEEDED
-  const errorWithProgram: any = new Error('Instruction 0: custom program error: 0x177e');
-  errorWithProgram.logs = [
-    'Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 invoke [1]',
-    'Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 failed: custom program error: 0x177e'
+  // 1. Jupiter Program + 6001 → JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED
+  const err1 = { programId: JUPITER, customProgramError: { customCode: 6001 } };
+  const p1 = parseRpcError(err1);
+  assert.equal(p1.customProgramError?.classification, 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED');
+  assert.equal(p1.customProgramError?.classificationSource, 'JUPITER_SWAP_PROGRAM_KNOWN_ERRORS');
+  assert.equal(p1.customProgramError?.classificationVersion, '2026-10-04');
+
+  // 2. Jupiter Program + 6014 → JUPITER_INCORRECT_TOKEN_PROGRAM_ID
+  const err2: any = new Error('Instruction 0: custom program error: 0x177e');
+  err2.logs = [
+    `Program ${JUPITER} invoke [1]`,
+    `Program ${JUPITER} failed: custom program error: 0x177e`
   ];
-  const parsedB = parseRpcError(errorWithProgram);
-  assert.ok(parsedB.customProgramError);
-  assert.equal(parsedB.customProgramError.customCode, 6014);
-  assert.equal(parsedB.customProgramError.programId, 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
-  assert.equal(parsedB.customProgramError.classification, 'SLIPPAGE_EXCEEDED');
+  const p2 = parseRpcError(err2);
+  assert.equal(p2.customProgramError?.classification, 'JUPITER_INCORRECT_TOKEN_PROGRAM_ID');
+  assert.equal(p2.customProgramError?.customCode, 6014);
+  assert.ok((p2.customProgramError?.logsDigest?.length ?? 0) <= 200);
 
-  // Caso C: Logs digest truncado a no máximo 200 caracteres
-  assert.ok((parsedB.customProgramError.logsDigest?.length ?? 0) <= 200);
+  // 3. Jupiter Program + 6017 → JUPITER_EXACT_OUT_AMOUNT_NOT_MATCHED
+  const err3 = { programId: JUPITER, customProgramError: { customCode: 6017 } };
+  const p3 = parseRpcError(err3);
+  assert.equal(p3.customProgramError?.classification, 'JUPITER_EXACT_OUT_AMOUNT_NOT_MATCHED');
+
+  // 4. Jupiter Program + 6024 → JUPITER_INSUFFICIENT_FUNDS
+  const err4 = { programId: JUPITER, customProgramError: { customCode: 6024 } };
+  const p4 = parseRpcError(err4);
+  assert.equal(p4.customProgramError?.classification, 'JUPITER_INSUFFICIENT_FUNDS');
+
+  // 5. Jupiter Program + 6025 → JUPITER_INVALID_TOKEN_ACCOUNT
+  const err5 = { programId: JUPITER, customProgramError: { customCode: 6025 } };
+  const p5 = parseRpcError(err5);
+  assert.equal(p5.customProgramError?.classification, 'JUPITER_INVALID_TOKEN_ACCOUNT');
+
+  // 6. outro Program ID + 6001 → UNKNOWN
+  const err6 = { programId: OTHER_PROGRAM, customProgramError: { customCode: 6001 } };
+  const p6 = parseRpcError(err6);
+  assert.equal(p6.customProgramError?.classification, 'UNKNOWN');
+  assert.equal(p6.customProgramError?.classificationSource, 'UNKNOWN');
+
+  // 7. outro Program ID + 6014 → UNKNOWN
+  const err7 = { programId: OTHER_PROGRAM, customProgramError: { customCode: 6014 } };
+  const p7 = parseRpcError(err7);
+  assert.equal(p7.customProgramError?.classification, 'UNKNOWN');
+
+  // 8. sem Program ID + 6014 → UNKNOWN
+  const err8 = new Error('Instruction 0: custom program error: 6014');
+  const p8 = parseRpcError(err8);
+  assert.equal(p8.customProgramError?.classification, 'UNKNOWN');
+  assert.equal(p8.customProgramError?.programId, undefined);
+
+  // 9. Jupiter Program + código não homologado → UNKNOWN
+  const err9 = { programId: JUPITER, customProgramError: { customCode: 9999 } };
+  const p9 = parseRpcError(err9);
+  assert.equal(p9.customProgramError?.classification, 'UNKNOWN');
+
+  // 10. logs contraditórios não devem substituir silenciosamente programId comprovado
+  const err10: any = new Error('custom program error: 6001');
+  err10.programId = JUPITER; // comprovado via objeto/evidência
+  err10.logs = [
+    `Program ${OTHER_PROGRAM} invoke [1]`,
+    `Program ${OTHER_PROGRAM} failed: custom program error: 6001`
+  ];
+  const p10 = parseRpcError(err10);
+  assert.equal(p10.customProgramError?.programId, JUPITER, 'Program ID comprovado não deve ser sobrescrito por log secundário');
+  assert.equal(p10.customProgramError?.classification, 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED');
 });
 
 test('SolanaRpcInstrumentation: 17-18. Telemetry failure não quebra RPC e telemetryInternalErrorCount incrementa', async () => {
