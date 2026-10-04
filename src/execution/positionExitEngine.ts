@@ -256,7 +256,7 @@ export class PositionExitEngine {
     // Sem isto, 50% dos tokens eram comparados contra 100% do SOL investido.
     position.entrySol = (position.entrySol || 0.015) * remainingRatio;
     position.stopLossPct = 0.01;
-    const reducedPeak = currentSolValue * remainingRatio;
+    const reducedPeak = Math.max(currentSolValue, this.peakSolValues.get(mint) || 0, position.executablePeakSolValue || 0) * remainingRatio;
     this.peakSolValues.set(mint, reducedPeak);
     position.peakSolValue = reducedPeak;
     position.executablePeakSolValue = reducedPeak;
@@ -368,22 +368,8 @@ export class PositionExitEngine {
     const trailingStopSolValue = newPeak * (1 - PositionExitEngine.TRAILING_DISTANCE);
 
     // ==========================================
-    // FASE 1: Colheita Parcial em +35% (ou takeProfitPct configurado)
+    // Protecoes de saida total precedem colheitas parciais
     // ==========================================
-    if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
-      const tokensToSell = Math.floor(position.tokenAmount / 2);
-
-      return {
-        shouldExit: true,
-        type: 'PARTIAL_TAKE_PROFIT_50',
-        pnlPct,
-        currentPriceUsd: currentSolValue,
-        exitTokenAmount: tokensToSell,
-        shouldCloseAta: false, // NÃO fecha ATA: 50% continuam em custódia
-        peakSolValue: currentSolValue,
-        trailingStopSolValue: currentSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE)
-      };
-    }
 
     // Proteção de momentum pré-parcial: depois de atingir +8%, acompanha o topo
     // com folga de 6%. Se a alta perder força antes da parcial de +35%, encerra
@@ -461,6 +447,21 @@ export class PositionExitEngine {
     }
 
     // Alerta de Drenagem via cotação súbita em SOL (> 30% de perda imediata)
+    if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
+      const tokensToSell = Math.floor(position.tokenAmount / 2);
+
+      return {
+        shouldExit: true,
+        type: 'PARTIAL_TAKE_PROFIT_50',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: tokensToSell,
+        shouldCloseAta: false, // NÃO fecha ATA: 50% continuam em custódia
+        peakSolValue: currentSolValue,
+        trailingStopSolValue: currentSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE)
+      };
+    }
+
     if (pnlPct < -0.30) {
       return {
         shouldExit: true,

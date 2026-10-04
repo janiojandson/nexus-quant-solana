@@ -218,6 +218,7 @@ export class DexScreenerScanner {
       const now = Date.now();
       const candidates: TokenCandidate[] = [];
       const seenMints = new Set<string>();
+      const rejectedMints = new Set<string>();
       let technicalDiscards = 0;
 
       for (const item of rawPairs) {
@@ -231,10 +232,16 @@ export class DexScreenerScanner {
           continue;
         }
 
-        const liquidityUsd = Number(item.liquidity?.usd || 0);
+        const rawLiquidity = item.liquidity?.usd;
+        if (rawLiquidity == null || !Number.isFinite(Number(rawLiquidity)) || Number(rawLiquidity) < 0) {
+          technicalDiscards++;
+          console.log('[MARKET_DATA_WAIT] ' + mint + ' liquidity unavailable; not a confirmed zero');
+          continue;
+        }
+        const liquidityUsd = Number(rawLiquidity);
         if (liquidityUsd < minLiquidityUsd) {
           technicalDiscards++;
-          this.cooldownCache.recordRejection(mint);
+          rejectedMints.add(mint);
           console.log(`🗑️ [Descarte Técnico] ${item.baseToken?.symbol || 'UNKNOWN'} (${mint}) | Motivo: Liq insuficiente | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
@@ -243,19 +250,19 @@ export class DexScreenerScanner {
         // Sanitização Estrita de Tokens (Fim do 'undefined'):
         if (!symbol || symbol === 'undefined' || symbol.trim() === '') {
           technicalDiscards++;
-          this.cooldownCache.recordRejection(mint);
+          rejectedMints.add(mint);
           console.log(`🗑️ [Descarte Técnico] ${symbol || 'UNKNOWN'} (${mint}) | Motivo: Symbol invalido | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
 
         if (seenMints.has(mint)) continue;
-        seenMints.add(mint);
+
 
         const pairCreatedAt = Number(item.pairCreatedAt || 0);
         // Filtro de maturidade estrita da piscina: janela aceita entre 5 e 60 minutos
         if (pairCreatedAt > 0 && !this.isMaturityValid(pairCreatedAt, now)) {
           technicalDiscards++;
-          this.cooldownCache.recordRejection(mint);
+          rejectedMints.add(mint);
           console.log(`🗑️ [Descarte Técnico] ${symbol} (${mint}) | Motivo: Maturidade fora 5-60m | Liq: $${Math.round(liquidityUsd)} | m5: ${item.priceChange?.m5}% | B/S: ${item.txns?.m5?.buys}/${item.txns?.m5?.sells}`);
           continue;
         }
@@ -323,6 +330,7 @@ export class DexScreenerScanner {
           continue;
         }
 
+        seenMints.add(mint);
         candidates.push({
           mint,
           symbol,
@@ -343,6 +351,9 @@ export class DexScreenerScanner {
         });
       }
 
+      for (const mint of rejectedMints) {
+        if (!seenMints.has(mint)) this.cooldownCache.recordRejection(mint);
+      }
       this.lastIncubatorStats.technicalDiscards = technicalDiscards;
       return candidates;
     } catch {

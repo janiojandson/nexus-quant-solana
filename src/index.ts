@@ -1,3 +1,5 @@
+import { NonBlockingTelemetry } from './protection/nonBlockingTelemetry.js';
+import { reportProfitProtectionShadow } from './protection/profitProtectionShadow.js';
 import http from 'http';
 import dotenv from 'dotenv';
 import axios from 'axios';
@@ -149,6 +151,7 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
 });
 
 const scanner = new DexScreenerScanner();
+const exitTelemetry = new NonBlockingTelemetry<Awaited<ReturnType<typeof scanner.fetchCurrentTokenMarketSnapshot>>>();
 const gatekeeper = new MemeRiskGatekeeper({
   macroSentinelUrl: MACRO_SENTINEL_URL
 });
@@ -1271,8 +1274,9 @@ async function runUltraFastExitMonitor() {
         // telemetria de liquidez/fluxo; Jupiter continua sendo a verdade econômica
         // para PnL e execução. Isso reduz latência e ativa de fato o gate de
         // drenagem de liquidez sem adicionar uma segunda chamada HTTP.
-        const marketSnapshotPromise = scanner.fetchCurrentTokenMarketSnapshot(pos.mint, pos.entryPairAddress);
+        exitTelemetry.sample(`${pos.mint}:${pos.entryPairAddress || ''}`, () => scanner.fetchCurrentTokenMarketSnapshot(pos.mint, pos.entryPairAddress));
         const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
+        const exitQuoteRequestedAt = Date.now();
         const executableQuote = await jupiterEngine.getQuote(
           pos.mint,
           'So11111111111111111111111111111111111111112',
@@ -1280,7 +1284,7 @@ async function runUltraFastExitMonitor() {
           500,
           priorityForJupiterWork('EXIT_CONFIRMATION')
         );
-        const marketSnapshot = await marketSnapshotPromise;
+        const marketSnapshot = exitTelemetry.read(`${pos.mint}:${pos.entryPairAddress || ''}`);
         const dexPriceUsd = marketSnapshot?.priceUsd ?? null;
         const currentSolValue = (executableQuote.outAmount || 0) / 1e9;
         if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
@@ -1295,6 +1299,13 @@ async function runUltraFastExitMonitor() {
         exitPathHealth.recordSuccess(pos.mint);
         latestState.exitPathHealth = exitPathHealth.snapshot();
         const pnlPct = (currentSolValue - entrySol) / entrySol;
+        reportProfitProtectionShadow(`${pos.mint}:${pos.entryTimestamp}`, {
+          remainingCost: entrySol, initialCost: pos.entrySolValue || entrySol,
+          confirmedProceeds: pos.partialTaken ? undefined : 0,
+          executableValue: currentSolValue, peakValue: Math.max(pos.peakSolValue || entrySol, currentSolValue),
+          remainingFraction: pos.tokenAmount / (pos.initialTokenAmount || pos.tokenAmount),
+          quoteAgeMs: Date.now() - exitQuoteRequestedAt, estimatedExitFee: 0, maxSlippageBps: 750
+        });
         const sensorSource = 'JUPITER_EXECUTABLE';
         const sensorPriceUsd = dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0
           ? dexPriceUsd
@@ -2740,7 +2751,7 @@ async function main() {
       : '🚀 [MODO REAL ON-CHAIN] Jupiter Swap armado para execução real em SOL.'
   );
   console.log(`⏱️ Intervalo de Varredura: ${SCAN_INTERVAL_MS / 1000}s`);
-  console.log(`⚡ Ultra-Fast Exit Monitor: ${FAST_EXIT_INTERVAL_MS}ms (DexScreener sensor + Jupiter confirmação)`);
+  console.log(`⚡ Ultra-Fast Exit Monitor: ${FAST_EXIT_INTERVAL_MS}ms (Jupiter executable + nonblocking Dex telemetry; profit protection SHADOW; confirmação)`);
   console.log(`🎯 Modo Sniper: MAX_CONCURRENT_POSITIONS = ${MAX_CONCURRENT_POSITIONS}`);
   console.log(`⚡ RPC Solana Ativa: ${ACTIVE_SOLANA_RPC_URL.split('?')[0]}`);
   console.log('====================================================');
