@@ -337,3 +337,25 @@ test('DexScreenerScanner: snapshot pode fixar a mesma pool observada na entrada'
   assert.strictEqual(snapshot?.pairAddress, 'PoolEntrada');
   assert.strictEqual(snapshot?.liquidityUsd, 12000);
 });
+
+test('a rejected pool cannot quarantine another eligible pool of the same mint', async () => {
+  const base = { chainId: 'solana', baseToken: { address: 'SameMint', symbol: 'SAME' },
+    priceUsd: '1', liquidity: { usd: 20000 }, pairCreatedAt: Date.now() - 600000 };
+  for (const bad of [
+    { ...base, liquidity: { usd: 1 } },
+    { ...base, pairCreatedAt: Date.now() - 7200000 },
+    { ...base, priceChange: { m5: -10 } }
+  ]) {
+    const scanner = new DexScreenerScanner({ fetchClient: async () => ({ data: [bad, base] }) });
+    assert.strictEqual((await scanner.scanSolanaTrends()).length, 1);
+    assert.strictEqual(scanner.cooldownCache.shouldProcess('SameMint'), true);
+  }
+});
+test('missing liquidity waits for data without poisoning the mint cooldown', async () => {
+  const scanner = new DexScreenerScanner({ fetchClient: async () => ({ data: [{
+    chainId: 'solana', baseToken: { address: 'MissingLiquidity', symbol: 'WAIT' },
+    priceUsd: '1', pairCreatedAt: Date.now() - 600000
+  }] }) });
+  assert.strictEqual((await scanner.scanSolanaTrends()).length, 0);
+  assert.strictEqual(scanner.cooldownCache.shouldProcess('MissingLiquidity'), true);
+});
