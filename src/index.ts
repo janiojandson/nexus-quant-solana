@@ -85,6 +85,7 @@ import {
 } from './position/versionGate.js';
 import { bindExecutionQuote, type BoundExecutionQuote } from './position/quoteBinding.js';
 import { takePositionSnapshot } from './position/types.js';
+import { type EconomicExecutionEvidence } from './reconciliation/executionReconciler.js';
 import {
   setFinancialReadiness,
   getFinancialReadiness,
@@ -290,9 +291,23 @@ async function verifySwapLandingConfirmation(
   mint: string,
   txSignature: string | undefined,
   isDryRun: boolean = IS_DRY_RUN
-): Promise<{ confirmed: boolean; error?: string }> {
+): Promise<{ confirmed: boolean; error?: string; evidence?: EconomicExecutionEvidence }> {
   if (isDryRun || Boolean(txSignature?.startsWith('dry_run_'))) {
-    return { confirmed: true };
+    return {
+      confirmed: true,
+      evidence: {
+        signature: txSignature || 'dry_run_sig',
+        slot: 0,
+        wallet: OFFICIAL_PHANTOM_WALLET,
+        inputMint: mint,
+        outputAsset: 'SOL',
+        actualDebitAtomic: 0n,
+        actualCreditAtomic: 0n,
+        remainingCustodyAtomic: 0n,
+        evidenceSource: 'DRY_RUN',
+        commitment: 'confirmed'
+      }
+    };
   }
   if (!txSignature || txSignature.trim() === '') {
     return { confirmed: false, error: 'NO_SIGNATURE_FOR_CONFIRMATION' };
@@ -303,19 +318,39 @@ async function verifySwapLandingConfirmation(
     if (sigStatus?.err) {
       return { confirmed: false, error: `Transação on-chain falhou: ${JSON.stringify(sigStatus.err)}` };
     }
-    if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
-      return { confirmed: true };
-    }
 
-    // Tenta reconciliar estritamente pela assinatura exata da tentativa (Finding R-P0-03)
+    // Finding P0-03, P0-04, P0-06, R-P1-02: TRANSACTION_LANDED != EXPECTED_ECONOMIC_EFFECT_CONFIRMED.
+    // Mere signature landing is NOT sufficient. We MUST verify on-chain economic token debit.
     const exact = await wallet.reconcileExactTransaction({
       signature: txSignature,
       mintAddress: mint,
       expectedOwner: OFFICIAL_PHANTOM_WALLET,
       direction: 'OUT'
     });
-    if (exact && exact.success && BigInt(exact.deltaAtomic) < 0n) {
-      return { confirmed: true };
+    if (exact && exact.success) {
+      const delta = BigInt(exact.deltaAtomic);
+      const actualDebit = delta < 0n ? -delta : 0n;
+      if (actualDebit > 0n) {
+        return {
+          confirmed: true,
+          evidence: {
+            signature: txSignature,
+            slot: exact.slot || 0,
+            wallet: OFFICIAL_PHANTOM_WALLET,
+            inputMint: mint,
+            inputTokenAccount: exact.inputTokenAccount,
+            outputAsset: 'SOL',
+            actualDebitAtomic: actualDebit,
+            actualCreditAtomic: BigInt(Math.max(0, exact.walletLamportDelta + (exact.feeLamports || 0))),
+            remainingCustodyAtomic: exact.remainingCustodyAtomic ? BigInt(exact.remainingCustodyAtomic) : 0n,
+            evidenceSource: 'ON_CHAIN_TRANSACTION',
+            commitment: 'confirmed'
+          }
+        };
+      }
+      return { confirmed: false, error: 'NO_EXPECTED_TOKEN_DEBIT: Transação pousou on-chain mas não debitou o token esperado.' };
+    } else if (exact && !exact.success) {
+      return { confirmed: false, error: exact.error || 'ON_CHAIN_TRANSACTION_FAILED' };
     }
   } catch (err: any) {
     console.warn(`⚠️ [ConfirmationCheck] Erro ao validar assinatura ${txSignature}: ${err?.message || err}`);
@@ -870,9 +905,7 @@ async function executeExitOrderUnlocked(
             status: 'SUCCESS',
             txSignature: reconciled.signature,
             inAmount: soldAtomic,
-            outAmount: grossSolLamports > 0
-              ? grossSolLamports
-              : Math.max(1, Math.round(exitSolValue * 1e9)),
+            outAmount: Math.max(0, grossSolLamports),
             error: undefined
           };
           uncertainExitMints.delete(pos.mint);
@@ -1006,10 +1039,9 @@ async function executeExitOrderUnlocked(
         console.error(`🛑 [Transaction On-Chain Failed] ${pos.symbol} tx=${exitSwap.txSignature}:`, sigStatus.err);
         exitSwap.status = 'FAILED';
         exitSwap.error = `Transação on-chain falhou: ${JSON.stringify(sigStatus.err)}`;
-      } else if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
-        exitSwap.confirmationStage = 'CHAIN_CONFIRMED';
       } else {
-        // Tenta reconciliar estritamente pela assinatura exata da tentativa (Finding R-P0-03)
+        // Finding P0-03, P0-04, P0-06, R-P1-02: Mere signature landing is NOT sufficient.
+        // We MUST verify on-chain economic token debit via exact transaction reconciliation.
         const reconciled = await wallet.reconcileExactTransaction({
           signature: exitSwap.txSignature,
           mintAddress: pos.mint,
@@ -1017,15 +1049,22 @@ async function executeExitOrderUnlocked(
           direction: 'OUT'
         });
         if (reconciled && reconciled.success) {
-          exitSwap.confirmationStage = 'ECONOMICALLY_RECONCILED';
           const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
           if (soldAtomic > 0) {
+            exitSwap.confirmationStage = 'ECONOMICALLY_RECONCILED';
             exitSwap.inAmount = soldAtomic;
+            exitSwap.outAmount = Math.max(0, reconciled.walletLamportDelta + reconciled.feeLamports);
+          } else {
+            console.warn(`⚠️ [Confirmation No Debit] ${pos.symbol}: tx landed on-chain but debited 0 tokens of target mint.`);
+            exitSwap.status = 'SUBMITTED_UNCONFIRMED';
+            exitSwap.error = 'Transação pousou on-chain mas não debitou o token esperado (NO_EXPECTED_TOKEN_DEBIT).';
+            uncertainExitMints.add(pos.mint);
+            financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
           }
         } else {
           console.warn(`⚠️ [Confirmation Inconclusive] ${pos.symbol}: receipt do provedor sem confirmação de landing; registrando UNKNOWN/dívida.`);
           exitSwap.status = 'SUBMITTED_UNCONFIRMED';
-          exitSwap.error = 'Receipt do provedor recebido, mas confirmação de landing na blockchain inconclusiva.';
+          exitSwap.error = 'Receipt do provedor recebido, mas confirmação econômica de landing na blockchain inconclusiva.';
           uncertainExitMints.add(pos.mint);
           financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
         }
@@ -1040,7 +1079,7 @@ async function executeExitOrderUnlocked(
   // Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
   // foi comprovadamente confirmado na blockchain ou reconciliado economicamente.
   const exitConfirmed = (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') &&
-    (exitSwap.confirmationStage === 'CHAIN_CONFIRMED' || exitSwap.confirmationStage === 'ECONOMICALLY_RECONCILED' || IS_DRY_RUN);
+    (exitSwap.confirmationStage === 'ECONOMICALLY_RECONCILED' || IS_DRY_RUN);
 
   if (!exitConfirmed) {
     const failReason = exitSwap.error || `Swap de saída não confirmado (status: ${exitSwap.status})`;

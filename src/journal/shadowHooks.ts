@@ -368,6 +368,11 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
       confirmedAtWallMs: nowWallMs()
     }, ctx.claimEpoch);
 
+    if (!input.actualAmountAtomic || BigInt(input.actualAmountAtomic) <= 0n) {
+      console.warn(`[SHADOW_JOURNAL_WARN] Cannot record confirmed fill without verified actualAmountAtomic for mint ${input.mint}`);
+      return;
+    }
+
     const fillId = `SHADOW_GENERATED:fill_${input.signature.slice(0, 16)}_${Date.now()}`;
 
     // Finding #12: Confirmed fill requires CHAIN_ECONOMIC_EVIDENCE (never JUPITER_V2_RECEIPT)
@@ -384,7 +389,7 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
       innerInstructionIndex: 0,
       assetMint: input.mint,
       requestedAmountAtomic: ctx.requestedAmountAtomic,
-      actualAmountAtomic: String(input.actualAmountAtomic ?? ctx.requestedAmountAtomic),
+      actualAmountAtomic: String(input.actualAmountAtomic),
       grossProceedsLamports: String(input.grossProceedsLamports),
       networkFeeLamports: String(input.networkFeeLamports ?? 5000),
       priorityFeeLamports: String(input.priorityFeeLamports ?? 0),

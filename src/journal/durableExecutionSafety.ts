@@ -168,7 +168,9 @@ export async function recordLiveExitIntent(input: LiveExitAttemptInput): Promise
 
     // Immediately record durable reconciliation debt before network broadcast
     try {
-      await repo.setReconciliationDebt(intent.id, true, claimEpoch);
+      if (repo.markReconciliationDebt) {
+        await repo.markReconciliationDebt(intent.id, true, claimEpoch);
+      }
     } catch {
       // In-memory repo or custom repo fallback
     }

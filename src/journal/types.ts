@@ -335,6 +335,7 @@ export interface ExecutionAttempt {
 
 export type FillEvidenceType =
   | 'CHAIN_PARSED_TRANSACTION'
+  | 'CHAIN_ECONOMIC_EVIDENCE'
   | 'JUPITER_V2_RECEIPT'
   | 'HISTORICAL_RECONSTRUCTION';
 

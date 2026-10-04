@@ -17,6 +17,20 @@
 
 import { ExecutionAttempt, ExitIntent } from '../journal/types.js';
 
+export interface EconomicExecutionEvidence {
+  signature: string;
+  slot: number;
+  wallet: string;
+  inputMint: string;
+  inputTokenAccount?: string;
+  outputAsset: string;
+  actualDebitAtomic: bigint;
+  actualCreditAtomic: bigint;
+  remainingCustodyAtomic: bigint;
+  evidenceSource: 'ON_CHAIN_TRANSACTION' | 'ON_CHAIN_SIMULATION' | 'DRY_RUN';
+  commitment: 'confirmed' | 'finalized';
+}
+
 export interface WalletTransactionReconciler {
   reconcileExactTransaction(params: {
     signature: string;
@@ -25,7 +39,10 @@ export interface WalletTransactionReconciler {
     direction?: 'IN' | 'OUT' | 'ANY';
   }): Promise<{
     signature: string;
+    slot?: number;
     deltaAtomic: string;
+    remainingCustodyAtomic?: string;
+    inputTokenAccount?: string;
     walletLamportDelta: number;
     feeLamports: number;
     blockTimeMs: number;
@@ -48,6 +65,7 @@ export interface ReconciledAttemptResult {
   grossProceedsLamports?: bigint;
   networkFeeLamports?: bigint;
   blockTimeMs?: number;
+  evidence?: EconomicExecutionEvidence;
   reason?: string;
 }
 
@@ -129,6 +147,19 @@ export async function reconcileExecutionAttempt(params: {
     actualDebitAtomic,
     grossProceedsLamports,
     networkFeeLamports: BigInt(parsedTx.feeLamports),
-    blockTimeMs: parsedTx.blockTimeMs
+    blockTimeMs: parsedTx.blockTimeMs,
+    evidence: {
+      signature,
+      slot: parsedTx.slot || 0,
+      wallet: intent.walletId,
+      inputMint: intent.mint,
+      inputTokenAccount: parsedTx.inputTokenAccount,
+      outputAsset: 'SOL',
+      actualDebitAtomic,
+      actualCreditAtomic: grossProceedsLamports,
+      remainingCustodyAtomic: parsedTx.remainingCustodyAtomic ? BigInt(parsedTx.remainingCustodyAtomic) : 0n,
+      evidenceSource: 'ON_CHAIN_TRANSACTION',
+      commitment: 'confirmed'
+    }
   };
 }

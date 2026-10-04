@@ -523,7 +523,10 @@ export class SolanaWalletService {
     context?: { traceId?: string; tradeId?: TradeId };
   }): Promise<{
     signature: string;
+    slot?: number;
     deltaAtomic: string;
+    remainingCustodyAtomic?: string;
+    inputTokenAccount?: string;
     walletLamportDelta: number;
     feeLamports: number;
     blockTimeMs: number;
@@ -584,9 +587,22 @@ export class SolanaWalletService {
         ? Number(tx.meta.postBalances[ownerIndex] - tx.meta.preBalances[ownerIndex])
         : 0;
 
+      let inputTokenAccount: string | undefined;
+      for (const balance of tx.meta?.preTokenBalances || []) {
+        if (balance?.mint === params.mintAddress && balance?.owner === owner) {
+          if (balance.accountIndex !== undefined && accountKeys[balance.accountIndex]) {
+            inputTokenAccount = accountKeys[balance.accountIndex];
+            break;
+          }
+        }
+      }
+
       return {
         signature: params.signature,
+        slot: tx.slot,
         deltaAtomic: delta.toString(),
+        remainingCustodyAtomic: sumForOwner(tx.meta?.postTokenBalances).toString(),
+        inputTokenAccount,
         walletLamportDelta,
         feeLamports: Number(tx.meta?.fee || 0),
         blockTimeMs: Number(tx.blockTime || 0) * 1000,
