@@ -8,8 +8,17 @@ import {
   ReplayTimelineEvent,
   IncidentReplayMetrics,
   ObservationGapMetrics,
-  ReplayStepResult
+  ReplayStepResult,
+  FactClassification,
+  ProvenanceValue,
+  ReplayProvenanceReport
 } from './types';
+
+export {
+  FactClassification,
+  ProvenanceValue,
+  ReplayProvenanceReport
+};
 
 export class LookaheadViolationError extends Error {
   constructor(requestedTimestamp: number, currentReplayTimestamp: number) {
@@ -225,21 +234,8 @@ export class HistoricalReplayEngine {
     const observations = this._fixture.observations;
     const transactions = this._fixture.transactions;
 
-    // Verified on-chain gross fill proceeds by exact transaction signature (Finding P2-02)
-    // FACTS derived strictly from transactions.json / on-chain evidence, decoupled from expected.json
-    const ON_CHAIN_TRANSACTION_FILL_PROCEEDS: Record<string, number> = {
-      // Tesla
-      '412iyd7rXdw22UFjZRKwpWgD5m8d13e9wpqvAZrWduwxpXJuHtxw8taWMHeesnZCrtQQMn5CRwCnFRnLLGqcDacZ': 0.013533348,
-      '5nwz7eVDSU4MnT3zzmXyP9kg6w1Uo99GDz8qiZtMkcqUebeLgLbXFMtPpgpZtZ36estEnFhS43JyoYGoKp5xHyTN': 0.000041149,
-      // SSI
-      '4nFkR4PfUgMvtxJ6cou6TsySmNVHDJ5Z3ZAx7KGnisz2cmyJ1TpVnyi6gLEZZSMBPhemEEBkuFr42veDHxVGuGRr': 0.014854168,
-      '4mMBHLwEBk7fwV3zp7w8CyfCWzff1H9BaDJVWEmAL2TPVsHffAJHMKrNkupErsQL4QZ4keZQULBuMZxY4EBeQNAT': 0.002137281,
-      // Mr Beast
-      '42gAi5jChf7wSZzCc6MnRcai6qKjQmj1keETL3Ecf5bzpb56ubCT5pyHUgmpsEEjWPRnUV9sXB3AtQCed5QFKhFn': 0.015402873,
-      'syypYLfEjBmNcQjcBQjfE6Gt3oDw9NBtPQJYgPBrz3TSGcCXGiLknyBJnQD9Qtoit2C8uQohVeiStDgnWuP9yQJ': 0.001655182,
-      // Superpig
-      '3bhQ9DBSfPYGf3phH4JPzVFe2xBGMQXfpYgaYP8hML5KNme6i2WKaCKbemcjC8ZZhuXqw8u7BLTiG4mjRwVkNVTu': 0.003183856
-    };
+    // Requirement 39 & 40 (Finding P2-02):
+    // Eliminate static proceeds map. FACTS are derived strictly from transactions.json.
 
     // 1. Observation gap metrics
     const gaps: number[] = [];
@@ -312,11 +308,13 @@ export class HistoricalReplayEngine {
       drawdownFromMfe = Number((((peakExecutableValue - signalExecutableValue) / peakExecutableValue) * 100).toFixed(4));
     }
 
-    // 6. Fill Value (on-chain proceeds from final exit derived from transactions.json)
+    // 6. Fill Value (on-chain proceeds from final exit derived strictly from transactions.json)
     const finalSellTx = transactions.find(t => t.transactionType === 'FINAL_SELL');
     let fillValue: number | null | 'UNKNOWN' = 'UNKNOWN';
     if (finalSellTx) {
-      fillValue = ON_CHAIN_TRANSACTION_FILL_PROCEEDS[finalSellTx.signature] ?? finalSellTx.walletDelta ?? 'UNKNOWN';
+      fillValue = finalSellTx.walletDelta !== null && finalSellTx.walletDelta !== undefined
+        ? Math.abs(finalSellTx.walletDelta)
+        : 'UNKNOWN';
     }
 
     // 7. fillVsSignalQuotePct
@@ -360,14 +358,27 @@ export class HistoricalReplayEngine {
     let confirmedProceeds: number | null | 'UNKNOWN' = 'UNKNOWN';
     if (finalSellTx) {
       const partialSellTx = transactions.find(t => t.transactionType === 'PARTIAL_SELL');
-      const finalProceeds = (ON_CHAIN_TRANSACTION_FILL_PROCEEDS[finalSellTx.signature] ?? finalSellTx.walletDelta ?? 0);
-      const partialProceeds = partialSellTx ? (ON_CHAIN_TRANSACTION_FILL_PROCEEDS[partialSellTx.signature] ?? partialSellTx.walletDelta ?? 0) : 0;
+      const finalProceeds = finalSellTx.walletDelta !== null && finalSellTx.walletDelta !== undefined
+        ? Math.abs(finalSellTx.walletDelta)
+        : 0;
+      const partialProceeds = partialSellTx && partialSellTx.walletDelta !== null && partialSellTx.walletDelta !== undefined
+        ? Math.abs(partialSellTx.walletDelta)
+        : 0;
       confirmedProceeds = Number((partialProceeds + finalProceeds).toFixed(9));
     }
 
     // 11. Remaining Exposure
     // After final fill and ATA close, remaining exposure is 0
     let remainingExposure: number | null | 'UNKNOWN' = 0;
+
+    let provenanceReport: ReplayProvenanceReport | undefined;
+    if (finalSellTx) {
+      try {
+        provenanceReport = this.getProvenanceReport('FINAL_SELL');
+      } catch {
+        // ignore if not available
+      }
+    }
 
     return {
       observationGapMs: gapMetrics,
@@ -387,7 +398,8 @@ export class HistoricalReplayEngine {
       latencyPrecision,
       decisionToExecutionMs,
       confirmedProceeds,
-      remainingExposure
+      remainingExposure,
+      provenanceReport
     };
   }
 
@@ -410,6 +422,51 @@ export class HistoricalReplayEngine {
       max: Math.round(max),
       count: sorted.length,
       gaps: sorted
+    };
+  }
+
+  /**
+   * Requirement 39 & 40 (Finding P2-02):
+   * Classifies factual provenance for a given transaction type (e.g. 'FINAL_SELL'),
+   * separating RAW_TRANSACTION_FACT, WALLET_NET_DELTA, DERIVED_SWAP_PROCEEDS, and EXPECTED_ASSERTION.
+   */
+  public getProvenanceReport(transactionType: 'FINAL_SELL' | 'PARTIAL_SELL' = 'FINAL_SELL'): ReplayProvenanceReport {
+    if (!this._fixture) throw new Error('No fixture loaded');
+    const tx = this._fixture.transactions.find(t => t.transactionType === transactionType);
+    if (!tx) throw new Error(`Transaction of type ${transactionType} not found in fixture`);
+
+    const expected = this._fixture.expected;
+    const netWalletDelta = tx.walletDelta !== null && tx.walletDelta !== undefined ? Math.abs(tx.walletDelta) : null;
+    const expectedVal = expected ? (transactionType === 'FINAL_SELL' ? expected.finalProceedsSol : expected.partialProceedsSol) : null;
+
+    let divergenceDetails = 'Factual wallet delta matches expected assertion within rounding tolerance.';
+    if (netWalletDelta !== null && expectedVal !== null && Math.abs(netWalletDelta - expectedVal) > 1e-6) {
+      const diffSol = Math.abs(expectedVal - netWalletDelta);
+      const diffLamports = Math.round(diffSol * 1e9);
+      divergenceDetails = `Divergence of ${diffSol.toFixed(9)} SOL (~${diffLamports} lamports) between expectedAssertion (${expectedVal} SOL gross) and walletNetDelta (${netWalletDelta} SOL net) represents on-chain network and priority fees paid by the wallet.`;
+    }
+
+    return {
+      signature: tx.signature,
+      walletNetDelta: {
+        value: netWalletDelta,
+        provenance: 'WALLET_NET_DELTA',
+        source: 'transactions.json',
+        details: 'Net wallet balance change on-chain after deduction of transaction fee and priority fee'
+      },
+      derivedSwapProceeds: {
+        value: 'UNKNOWN',
+        provenance: 'DERIVED_SWAP_PROCEEDS',
+        source: tx.evidenceSource || 'chain-summary.json',
+        details: 'Instruction-level gross swap proceeds not provided in fixture; marked UNKNOWN rather than guessing'
+      },
+      expectedAssertion: {
+        value: expectedVal ?? null,
+        provenance: 'EXPECTED_ASSERTION',
+        source: 'expected.json',
+        details: 'Expected swap proceeds without network fee deduction'
+      },
+      divergenceDetails
     };
   }
 }

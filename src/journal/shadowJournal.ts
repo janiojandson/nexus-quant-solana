@@ -367,6 +367,12 @@ export async function reconstructIncidentJournal(
 
   const finalAcc = applyFillToAccounting(initialAcc, fillFinal.fill);
 
+  if (repo.releaseTerminalIntent) {
+    await repo.releaseTerminalIntent(intentRes.intent.id, 'APPLIED', 1);
+  } else {
+    (intentRes.intent as any).status = 'APPLIED';
+  }
+
   return {
     incidentId,
     intent: (await repo.getIntentById(intentRes.intent.id))!,

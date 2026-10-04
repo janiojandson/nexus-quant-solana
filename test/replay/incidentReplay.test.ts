@@ -265,10 +265,13 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     assert.strictEqual(exp.netReturnPct, -32.2786);
     assert.strictEqual(exp.firstDeterioratedPnlPct, -99.59);
     assert.strictEqual(exp.poolDropPct, -99.773);
-    assert.strictEqual(metrics.fillVsSignalQuotePct, 0.0);
     assert.strictEqual(exp.fillVsSignalQuotePct, 0.0);
-    assert.strictEqual(metrics.fillValue, 0.000041149);
-    assert.strictEqual(metrics.confirmedProceeds, 0.013574497);
+    // Raw on-chain facts derived strictly from transactions.json (net of Solana fees):
+    assert.strictEqual(metrics.fillValue, 0.000031115);
+    assert.strictEqual(metrics.confirmedProceeds, 0.013555846);
+    assert.strictEqual(metrics.fillVsSignalQuotePct, -24.3846);
+    assert.strictEqual(metrics.provenanceReport?.walletNetDelta.value, 0.000031115);
+    assert.strictEqual(metrics.provenanceReport?.expectedAssertion.value, 0.000041149);
   });
 
   // 13. SSI facts reproduzíveis
@@ -289,10 +292,14 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     assert.strictEqual(exp.peakObservedPnlPct, 986.98);
     assert.strictEqual(exp.firstDeterioratedPnlPct, -80.46);
     assert.strictEqual(exp.poolDropPct, -88.2412);
-    // Fill was 0.2171% better than signal quote
-    assert.strictEqual(metrics.fillVsSignalQuotePct, 0.2171);
-    assert.strictEqual(metrics.fillValue, 0.002137281);
+    // Expected assertion had 0.2171% based on gross proceeds (0.002137281)
+    assert.strictEqual(exp.fillVsSignalQuotePct, 0.2171);
+    // Raw on-chain fact from transactions.json is net wallet delta:
+    assert.strictEqual(metrics.fillValue, 0.002130797);
     assert.strictEqual(metrics.signalExecutableValue, 0.002132652);
+    assert.strictEqual(metrics.fillVsSignalQuotePct, -0.087);
+    assert.strictEqual(metrics.provenanceReport?.walletNetDelta.value, 0.002130797);
+    assert.strictEqual(metrics.provenanceReport?.expectedAssertion.value, 0.002137281);
   });
 
   // 14. Mr Beast facts reproduzíveis
@@ -308,12 +315,16 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     assert.strictEqual(exp.peakObservedPnlPct, 39.54);
     assert.strictEqual(exp.firstDeterioratedPnlPct, -85.48);
     assert.strictEqual(exp.poolDropPct, -71.5725);
-    // Fill was 0.3062% better than signal quote (pre-quote collapse, NOT execution slippage)
-    assert.strictEqual(metrics.fillVsSignalQuotePct, 0.3062);
-    assert.strictEqual(metrics.fillValue, 0.001655182);
-    assert.strictEqual(metrics.signalExecutableValue, 0.001650130);
+    // Expected assertion had 0.3062% based on gross proceeds (pre-quote collapse, NOT execution slippage)
+    assert.strictEqual(exp.fillVsSignalQuotePct, 0.3062);
     assert.strictEqual(exp.isPreQuoteCollapse, true);
     assert.strictEqual(exp.isExecutionSlippage, false);
+    // Raw on-chain fact from transactions.json is net wallet delta:
+    assert.strictEqual(metrics.fillValue, 0.001648827);
+    assert.strictEqual(metrics.signalExecutableValue, 0.001650130);
+    assert.strictEqual(metrics.fillVsSignalQuotePct, -0.079);
+    assert.strictEqual(metrics.provenanceReport?.walletNetDelta.value, 0.001648827);
+    assert.strictEqual(metrics.provenanceReport?.expectedAssertion.value, 0.001655182);
   });
 
   // 15. SUPERPIG facts reproduzíveis
@@ -335,7 +346,13 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     assert.strictEqual(exp.confirmationTimeoutOccurred, true);
     assert.strictEqual(exp.actualOnChainProceedsSol, 0.003183856);
     assert.strictEqual(exp.actualOnChainNetPnlPct, -84.7720);
-    assert.strictEqual(metrics.fillValue, 0.003183856);
+    // Requirement 39 & 40 (Finding P2-02):
+    // metrics.fillValue is derived strictly from transactions.json (0.003061748 SOL net wallet delta),
+    // separated from expected.json assertion (0.003183856 SOL gross proceeds)
+    assert.strictEqual(metrics.fillValue, 0.003061748);
+    assert.strictEqual(metrics.provenanceReport?.walletNetDelta.value, 0.003061748);
+    assert.strictEqual(metrics.provenanceReport?.expectedAssertion.value, 0.003183856);
+    assert.strictEqual(metrics.provenanceReport?.derivedSwapProceeds.value, 'UNKNOWN');
   });
 
   // 16. fillVsSignalQuote não usa MFE como denominador
@@ -345,16 +362,16 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     const metrics = engine.runReplay();
 
     const signalValue = 0.001650130;
-    const fillValue = 0.001655182;
+    const fillValue = 0.001648827; // raw fact from transactions.json
     const peakValue = 0.015860223; // MFE peak executable value
 
-    const correctFormula = ((fillValue - signalValue) / signalValue) * 100;
-    const wrongFormulaWithMfe = ((fillValue - signalValue) / peakValue) * 100;
+    const correctFormula = Number((((fillValue - signalValue) / signalValue) * 100).toFixed(4));
+    const wrongFormulaWithMfe = Number((((fillValue - signalValue) / peakValue) * 100).toFixed(4));
 
-    assert.ok(Math.abs(Number(metrics.fillVsSignalQuotePct) - correctFormula) < 0.001);
+    assert.strictEqual(metrics.fillVsSignalQuotePct, correctFormula);
     assert.notStrictEqual(metrics.fillVsSignalQuotePct, wrongFormulaWithMfe);
     assert.ok(
-      Math.abs(Number(metrics.fillVsSignalQuotePct) - wrongFormulaWithMfe) > 0.2,
+      Math.abs(Number(metrics.fillVsSignalQuotePct) - wrongFormulaWithMfe) > 0.05,
       'fillVsSignalQuotePct erroneously used MFE as denominator'
     );
   });
@@ -575,36 +592,46 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     assert.strictEqual(provenJupRes.classification, 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED');
   });
 
-  // 28. P2-02 - Proveniência do Replay Histórico: fatos derivados estritamente de transactions.json
+  // 28. P2-02 - Proveniência do Replay Histórico: fatos derivados estritamente de transactions.json (Commit R3-8)
   await t.test('28. P2-02: HistoricalReplayEngine.calculateMetrics deriva fatos de transactions; modificar expected em memória não altera fatos e falha assertion', () => {
     const engine = new HistoricalReplayEngine();
     engine.loadFixture(path.join(FIXTURES_DIR, 'superpig'));
 
-    // 1. Initial calculation derived from transactions.json
+    // 1. Initial calculation derived strictly from transactions.json (walletDelta = 0.003061748 SOL net)
     const initialMetrics = engine.calculateMetrics();
-    const genuineExpectedProceeds = 0.003183856;
-    assert.strictEqual(initialMetrics.fillValue, genuineExpectedProceeds);
-    assert.strictEqual(initialMetrics.confirmedProceeds, genuineExpectedProceeds);
+    const rawWalletDelta = 0.003061748;
+    assert.strictEqual(initialMetrics.fillValue, rawWalletDelta);
+    assert.strictEqual(initialMetrics.confirmedProceeds, rawWalletDelta);
 
-    // 2. Tampering expected in memory
+    // 2. Provenance report separates WALLET_NET_DELTA, DERIVED_SWAP_PROCEEDS, and EXPECTED_ASSERTION
+    const provenance = engine.getProvenanceReport('FINAL_SELL');
+    assert.strictEqual(provenance.walletNetDelta.provenance, 'WALLET_NET_DELTA');
+    assert.strictEqual(provenance.walletNetDelta.value, 0.003061748);
+    assert.strictEqual(provenance.derivedSwapProceeds.provenance, 'DERIVED_SWAP_PROCEEDS');
+    assert.strictEqual(provenance.derivedSwapProceeds.value, 'UNKNOWN');
+    assert.strictEqual(provenance.expectedAssertion.provenance, 'EXPECTED_ASSERTION');
+    assert.strictEqual(provenance.expectedAssertion.value, 0.003183856);
+    assert.ok(provenance.divergenceDetails?.includes('122108 lamports'));
+
+    // 3. Tampering expected in memory
     const tamperedValue = 999.123456789;
     (engine.fixture.expected as any).finalProceedsSol = tamperedValue;
     (engine.fixture.expected as any).actualOnChainProceedsSol = tamperedValue;
 
-    // 3. Re-running calculateMetrics MUST compute facts strictly from transactions.json
+    // 4. Re-running calculateMetrics MUST compute facts strictly from transactions.json
     const tamperedRunMetrics = engine.calculateMetrics();
     assert.strictEqual(
       tamperedRunMetrics.fillValue,
-      genuineExpectedProceeds,
+      rawWalletDelta,
       'Replay metrics.fillValue must NOT be derived from tampered expected.json'
     );
     assert.strictEqual(
       tamperedRunMetrics.confirmedProceeds,
-      genuineExpectedProceeds,
+      rawWalletDelta,
       'Replay metrics.confirmedProceeds must NOT be derived from tampered expected.json'
     );
 
-    // 4. Assertion comparing facts with tampered expected MUST FAIL cleanly
+    // 5. Assertion comparing facts with tampered expected MUST FAIL cleanly
     assert.notStrictEqual(
       tamperedRunMetrics.fillValue,
       engine.fixture.expected.finalProceedsSol,

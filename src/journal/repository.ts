@@ -384,7 +384,8 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     // General worker scan
     for (const intent of this.intents.values()) {
       if (this.lockedIntents.has(intent.id)) continue;
-      if (['CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'].includes(intent.status)) {
+      // UNKNOWN and terminal intents are skipped by general worker scan
+      if (['CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE', 'UNKNOWN'].includes(intent.status)) {
         continue;
       }
 
@@ -397,17 +398,6 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       if (!isCreated && !isLeaseExpired) continue;
 
       if (isLeaseExpired) {
-        if (['UNKNOWN', 'SUBMITTED', 'SIGNED'].includes(intent.status) || intent.reconciliationDebt) {
-          const blockingState = ['UNKNOWN', 'SUBMITTED', 'SIGNED'].includes(intent.status)
-            ? intent.status
-            : 'RECONCILIATION_DEBT';
-          throw new LeaseRecoveryBlockedError(
-            `Lease recovery blocked for intent ${intent.id}: intent is in non-reclaimable state '${intent.status}' or has active reconciliation debt. Must reconcile before re-claim.`,
-            intent.id,
-            blockingState
-          );
-        }
-
         const attempts = await this.getAttemptsForIntent(intent.id);
         const blockingAttempt = attempts.find(a =>
           a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
@@ -417,6 +407,14 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
             `Lease recovery blocked for intent ${intent.id}: attempt ${blockingAttempt.attemptId} is in active on-chain state '${blockingAttempt.state}'. Must reconcile before re-claim.`,
             intent.id,
             blockingAttempt.state
+          );
+        }
+
+        if (intent.reconciliationDebt) {
+          throw new LeaseRecoveryBlockedError(
+            `Lease recovery blocked for intent ${intent.id}: intent has active reconciliation debt. Must reconcile before re-claim.`,
+            intent.id,
+            'RECONCILIATION_DEBT'
           );
         }
       }

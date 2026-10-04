@@ -485,7 +485,11 @@ describe('Nexus V2.3-R2 — Second-Round Adversarial Regressions (FASES 16, 17, 
 
       assert.equal(applyRes.position.positionVersion, 2n);
       assert.equal(applyRes.position.tokenAmountAtomic, 0n);
-      // Verify Intent automatically advanced to terminal APPLIED state upon recording fill
+      // Finding 30: recordFill leaves intent in CONFIRMED until terminal transactional apply
+      const recordedIntent = await journalRepo.getIntentById(intent.id);
+      assert.equal(recordedIntent?.status, 'CONFIRMED');
+
+      await journalRepo.releaseTerminalIntent(intent.id, 'APPLIED', claim.claimEpoch);
       const finalizedIntent = await journalRepo.getIntentById(intent.id);
       assert.equal(finalizedIntent?.status, 'APPLIED');
 

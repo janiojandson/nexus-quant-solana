@@ -127,6 +127,27 @@ export interface ObservationGapMetrics {
   gaps: number[];
 }
 
+export type FactClassification =
+  | 'RAW_TRANSACTION_FACT'
+  | 'DERIVED_SWAP_PROCEEDS'
+  | 'WALLET_NET_DELTA'
+  | 'EXPECTED_ASSERTION';
+
+export interface ProvenanceValue<T> {
+  value: T;
+  provenance: FactClassification;
+  source: string;
+  details?: string;
+}
+
+export interface ReplayProvenanceReport {
+  signature: string;
+  walletNetDelta: ProvenanceValue<number | null>;
+  derivedSwapProceeds: ProvenanceValue<number | 'UNKNOWN'>;
+  expectedAssertion: ProvenanceValue<number | null>;
+  divergenceDetails?: string;
+}
+
 export interface IncidentReplayMetrics {
   observationGapMs: ObservationGapMetrics;
   peakExecutableValue: number | null | 'UNKNOWN';
@@ -146,6 +167,7 @@ export interface IncidentReplayMetrics {
   decisionToExecutionMs: number | null | 'UNKNOWN';
   confirmedProceeds: number | null | 'UNKNOWN';
   remainingExposure: number | null | 'UNKNOWN';
+  provenanceReport?: ReplayProvenanceReport;
 }
 
 export interface IncidentFixtureLock {
