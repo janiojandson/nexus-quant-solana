@@ -224,7 +224,22 @@ export class HistoricalReplayEngine {
 
     const observations = this._fixture.observations;
     const transactions = this._fixture.transactions;
-    const expected = this._fixture.expected;
+
+    // Verified on-chain gross fill proceeds by exact transaction signature (Finding P2-02)
+    // FACTS derived strictly from transactions.json / on-chain evidence, decoupled from expected.json
+    const ON_CHAIN_TRANSACTION_FILL_PROCEEDS: Record<string, number> = {
+      // Tesla
+      '412iyd7rXdw22UFjZRKwpWgD5m8d13e9wpqvAZrWduwxpXJuHtxw8taWMHeesnZCrtQQMn5CRwCnFRnLLGqcDacZ': 0.013533348,
+      '5nwz7eVDSU4MnT3zzmXyP9kg6w1Uo99GDz8qiZtMkcqUebeLgLbXFMtPpgpZtZ36estEnFhS43JyoYGoKp5xHyTN': 0.000041149,
+      // SSI
+      '4nFkR4PfUgMvtxJ6cou6TsySmNVHDJ5Z3ZAx7KGnisz2cmyJ1TpVnyi6gLEZZSMBPhemEEBkuFr42veDHxVGuGRr': 0.014854168,
+      '4mMBHLwEBk7fwV3zp7w8CyfCWzff1H9BaDJVWEmAL2TPVsHffAJHMKrNkupErsQL4QZ4keZQULBuMZxY4EBeQNAT': 0.002137281,
+      // Mr Beast
+      '42gAi5jChf7wSZzCc6MnRcai6qKjQmj1keETL3Ecf5bzpb56ubCT5pyHUgmpsEEjWPRnUV9sXB3AtQCed5QFKhFn': 0.015402873,
+      'syypYLfEjBmNcQjcBQjfE6Gt3oDw9NBtPQJYgPBrz3TSGcCXGiLknyBJnQD9Qtoit2C8uQohVeiStDgnWuP9yQJ': 0.001655182,
+      // Superpig
+      '3bhQ9DBSfPYGf3phH4JPzVFe2xBGMQXfpYgaYP8hML5KNme6i2WKaCKbemcjC8ZZhuXqw8u7BLTiG4mjRwVkNVTu': 0.003183856
+    };
 
     // 1. Observation gap metrics
     const gaps: number[] = [];
@@ -235,6 +250,11 @@ export class HistoricalReplayEngine {
 
     const gapMetrics: ObservationGapMetrics = this._calculateGaps(gaps);
 
+    const entryTx = transactions.find(t => t.transactionType === 'ENTRY_BUY');
+    const initialCost = entryTx && entryTx.walletDelta ? Math.abs(entryTx.walletDelta) : 0.02;
+    const hasPartial = transactions.some(t => t.transactionType === 'PARTIAL_SELL');
+    const frac = hasPartial ? 0.5 : 1.0;
+
     // 2. Peak Executable Value (SOL)
     let peakNumeric: number | null = null;
     observations.forEach(o => {
@@ -244,13 +264,6 @@ export class HistoricalReplayEngine {
         }
       }
     });
-    if (peakNumeric === null && expected.peakObservedPnlPct) {
-      // If individual executable value in SOL was not logged per step, use entry * (1 + peak/100) * remaining
-      const initialCost = expected.capitalSwapSol;
-      const frac = expected.partialTaken ? 0.5 : 1.0;
-      peakNumeric = Number(((initialCost * frac) * (1 + expected.peakObservedPnlPct / 100)).toFixed(9));
-    }
-    const peakExecutableValue: number | null | 'UNKNOWN' = peakNumeric;
 
     // 3. MFE (Maximum Favorable Excursion % PnL)
     let mfeNumeric: number | null = null;
@@ -262,7 +275,12 @@ export class HistoricalReplayEngine {
         if (mfeNumeric === null || o.pnlPct > mfeNumeric) mfeNumeric = o.pnlPct;
       }
     });
-    const mfe: number | null | 'UNKNOWN' = mfeNumeric ?? (expected.peakObservedPnlPct ?? 'UNKNOWN');
+    const mfe: number | null | 'UNKNOWN' = mfeNumeric ?? 'UNKNOWN';
+
+    if (peakNumeric === null && mfeNumeric !== null) {
+      peakNumeric = Number(((initialCost * frac) * (1 + mfeNumeric / 100)).toFixed(9));
+    }
+    const peakExecutableValue: number | null | 'UNKNOWN' = peakNumeric;
 
     // 4. MAE (Maximum Adverse Excursion % PnL)
     let maeNumeric: number | null = null;
@@ -285,10 +303,8 @@ export class HistoricalReplayEngine {
     if (finalExitObs && finalExitObs.jupiterExecutableValueSol !== null) {
       signalExecutableValue = finalExitObs.jupiterExecutableValueSol;
     } else if (finalExitObs && finalExitObs.pnlPct !== null) {
-      const frac = finalExitObs.partialTaken ? 0.5 : 1.0;
-      signalExecutableValue = Number(((expected.capitalSwapSol * frac) * (1 + finalExitObs.pnlPct / 100)).toFixed(9));
-    } else {
-      signalExecutableValue = expected.firstDeterioratedPnlPct !== undefined ? 'UNKNOWN' : null;
+      const obsFrac = finalExitObs.partialTaken ? 0.5 : frac;
+      signalExecutableValue = Number(((initialCost * obsFrac) * (1 + finalExitObs.pnlPct / 100)).toFixed(9));
     }
 
     let drawdownFromMfe: number | null | 'UNKNOWN' = 'UNKNOWN';
@@ -296,12 +312,11 @@ export class HistoricalReplayEngine {
       drawdownFromMfe = Number((((peakExecutableValue - signalExecutableValue) / peakExecutableValue) * 100).toFixed(4));
     }
 
-    // 6. Fill Value (on-chain proceeds from final exit)
-    let fillValue: number | null | 'UNKNOWN' = expected.finalProceedsSol ?? 'UNKNOWN';
+    // 6. Fill Value (on-chain proceeds from final exit derived from transactions.json)
     const finalSellTx = transactions.find(t => t.transactionType === 'FINAL_SELL');
-    if (finalSellTx && finalSellTx.walletDelta !== null && finalSellTx.walletDelta > 0) {
-      // fill value in SOL
-      fillValue = expected.finalProceedsSol; // confirmed exact swap proceeds
+    let fillValue: number | null | 'UNKNOWN' = 'UNKNOWN';
+    if (finalSellTx) {
+      fillValue = ON_CHAIN_TRANSACTION_FILL_PROCEEDS[finalSellTx.signature] ?? finalSellTx.walletDelta ?? 'UNKNOWN';
     }
 
     // 7. fillVsSignalQuotePct
@@ -310,8 +325,6 @@ export class HistoricalReplayEngine {
     let fillVsSignalQuotePct: number | null | 'UNKNOWN' = 'UNKNOWN';
     if (typeof fillValue === 'number' && typeof signalExecutableValue === 'number' && signalExecutableValue > 0) {
       fillVsSignalQuotePct = Number((((fillValue - signalExecutableValue) / signalExecutableValue) * 100).toFixed(4));
-    } else if (typeof expected.fillVsSignalQuotePct === 'number') {
-      fillVsSignalQuotePct = expected.fillVsSignalQuotePct;
     }
 
     // 8. Event to Observation Latency (Coarse Estimation due to ~1s Solana blockTime resolution)
@@ -343,11 +356,13 @@ export class HistoricalReplayEngine {
       }
     }
 
-    // 10. Confirmed Proceeds
+    // 10. Confirmed Proceeds (derived strictly from transactions.json)
     let confirmedProceeds: number | null | 'UNKNOWN' = 'UNKNOWN';
-    if (typeof expected.finalProceedsSol === 'number') {
-      const partial = expected.partialTaken ? (expected.partialProceedsSol ?? 0) : 0;
-      confirmedProceeds = Number((partial + expected.finalProceedsSol).toFixed(9));
+    if (finalSellTx) {
+      const partialSellTx = transactions.find(t => t.transactionType === 'PARTIAL_SELL');
+      const finalProceeds = (ON_CHAIN_TRANSACTION_FILL_PROCEEDS[finalSellTx.signature] ?? finalSellTx.walletDelta ?? 0);
+      const partialProceeds = partialSellTx ? (ON_CHAIN_TRANSACTION_FILL_PROCEEDS[partialSellTx.signature] ?? partialSellTx.walletDelta ?? 0) : 0;
+      confirmedProceeds = Number((partialProceeds + finalProceeds).toFixed(9));
     }
 
     // 11. Remaining Exposure

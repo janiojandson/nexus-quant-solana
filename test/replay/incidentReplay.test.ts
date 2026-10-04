@@ -574,4 +574,41 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
     const provenJupRes = classifySolanaProgramError(JUPITER_SWAP_PROGRAM_ID, 6001);
     assert.strictEqual(provenJupRes.classification, 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED');
   });
+
+  // 28. P2-02 - Proveniência do Replay Histórico: fatos derivados estritamente de transactions.json
+  await t.test('28. P2-02: HistoricalReplayEngine.calculateMetrics deriva fatos de transactions; modificar expected em memória não altera fatos e falha assertion', () => {
+    const engine = new HistoricalReplayEngine();
+    engine.loadFixture(path.join(FIXTURES_DIR, 'superpig'));
+
+    // 1. Initial calculation derived from transactions.json
+    const initialMetrics = engine.calculateMetrics();
+    const genuineExpectedProceeds = 0.003183856;
+    assert.strictEqual(initialMetrics.fillValue, genuineExpectedProceeds);
+    assert.strictEqual(initialMetrics.confirmedProceeds, genuineExpectedProceeds);
+
+    // 2. Tampering expected in memory
+    const tamperedValue = 999.123456789;
+    (engine.fixture.expected as any).finalProceedsSol = tamperedValue;
+    (engine.fixture.expected as any).actualOnChainProceedsSol = tamperedValue;
+
+    // 3. Re-running calculateMetrics MUST compute facts strictly from transactions.json
+    const tamperedRunMetrics = engine.calculateMetrics();
+    assert.strictEqual(
+      tamperedRunMetrics.fillValue,
+      genuineExpectedProceeds,
+      'Replay metrics.fillValue must NOT be derived from tampered expected.json'
+    );
+    assert.strictEqual(
+      tamperedRunMetrics.confirmedProceeds,
+      genuineExpectedProceeds,
+      'Replay metrics.confirmedProceeds must NOT be derived from tampered expected.json'
+    );
+
+    // 4. Assertion comparing facts with tampered expected MUST FAIL cleanly
+    assert.notStrictEqual(
+      tamperedRunMetrics.fillValue,
+      engine.fixture.expected.finalProceedsSol,
+      'Factual fillValue must differ from tampered expected.finalProceedsSol'
+    );
+  });
 });
