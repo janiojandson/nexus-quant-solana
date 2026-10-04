@@ -52,11 +52,12 @@ export class RugCheckService {
 
       const tokenData = data.token && typeof data.token === 'object' ? data.token : {};
       const hasOwn = (obj: any, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
-      const mintAuthorityKnown = hasOwn(tokenData, 'mintAuthority') || hasOwn(data, 'mintAuthority');
-      const freezeAuthorityKnown = hasOwn(tokenData, 'freezeAuthority') || hasOwn(data, 'freezeAuthority');
       const mintAuthority = hasOwn(tokenData, 'mintAuthority') ? tokenData.mintAuthority : data.mintAuthority;
       const freezeAuthority = hasOwn(tokenData, 'freezeAuthority') ? tokenData.freezeAuthority : data.freezeAuthority;
-      const holdersRaw = Number(data.totalHolders);
+      const validAuthority = (value: unknown) => value === null || (typeof value === 'string' && value.length > 0);
+      const mintAuthorityKnown = validAuthority(mintAuthority);
+      const freezeAuthorityKnown = validAuthority(freezeAuthority);
+      const holdersRaw = data.totalHolders == null ? NaN : Number(data.totalHolders);
       const holdersCount = Number.isFinite(holdersRaw) && holdersRaw >= 0 ? holdersRaw : undefined;
 
       // 1. Verificações fatais inequívocas. Campo ausente nunca significa autoridade revogada.
@@ -65,31 +66,27 @@ export class RugCheckService {
       const isRugged = Boolean(data.rugged) || isMintAuthActive || isFreezeAuthActive;
 
       // 2. Extração de métricas de LP trancada/queimada. Ausência permanece UNKNOWN.
-      const directLp = Number(data.lpLockedPct);
-      let lpLockedPct: number | undefined = Number.isFinite(directLp) ? directLp : undefined;
+      const directLp = data.lpLockedPct == null ? NaN : Number(data.lpLockedPct);
+      let lpLockedPct: number | undefined = Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
       if (Array.isArray(data.markets)) {
         const raydiumMarket = data.markets.find((m: any) => m.lp);
         if (raydiumMarket?.lp) {
           const locked = Number(raydiumMarket.lp.lpLockedPct ?? raydiumMarket.lp.lpLocked ?? NaN);
           const burned = Number(raydiumMarket.lp.lpBurnedPct ?? raydiumMarket.lp.lpBurned ?? NaN);
-          const candidates = [locked, burned].filter(Number.isFinite);
+          const candidates = [locked, burned].filter(value => Number.isFinite(value) && value >= 0 && value <= 100);
           if (candidates.length > 0) lpLockedPct = Math.max(...candidates);
         }
       }
 
-      const hasUnlockedLpRisk = rawRisks.some((r: any) => {
-        const name = (typeof r === 'string' ? r : (r.name || '')).toLowerCase();
-        return name.includes('large amount of lp unlocked');
-      });
-      if (hasUnlockedLpRisk && (lpLockedPct ?? 0) < 90) {
-        lpLockedPct = 0;
-      }
-
-      // 3. Top holders e completude dos fatos críticos.
+      // Top five measured holder percentages. Missing or invalid facts remain unknown.
       let topHoldersPct: number | undefined;
-      if (Array.isArray(data.topHolders)) {
+      if (Array.isArray(data.topHolders) && data.topHolders.length > 0) {
         const nonAmmHolders = data.topHolders.filter((h: any) => !h.isLpPool && !h.owner?.includes('Raydium') && !h.address?.includes('11111111111111111111111111111111'));
-        topHoldersPct = nonAmmHolders.slice(0, 5).reduce((acc: number, h: any) => acc + Number(h.pct || 0), 0);
+        const percentages = nonAmmHolders.map((h: any) => h.pct == null ? NaN : Number(h.pct));
+        if (percentages.every((pct: number) => Number.isFinite(pct) && pct >= 0 && pct <= 100)) {
+          const sum = percentages.sort((a: number, b: number) => b - a).slice(0, 5).reduce((acc: number, pct: number) => acc + pct, 0);
+          if (sum <= 100) topHoldersPct = sum;
+        }
       }
 
       const missingFacts: string[] = [];
@@ -97,7 +94,7 @@ export class RugCheckService {
       if (!freezeAuthorityKnown) missingFacts.push('freezeAuthority');
       if (holdersCount === undefined) missingFacts.push('totalHolders');
       if (lpLockedPct === undefined) missingFacts.push('lpLockedPct');
-      if (!Array.isArray(data.topHolders)) missingFacts.push('topHolders');
+      if (topHoldersPct === undefined) missingFacts.push('topHolders');
       const factsComplete = missingFacts.length === 0;
 
       // 4. Avaliação de riscos fatais vs penalidades benignas.
@@ -181,8 +178,8 @@ export class RugCheckService {
         isSafe: false,
         verified: false,
         factsComplete: false,
-        lpLockedPct: 0,
-        topHoldersPct: 100
+        lpLockedPct: undefined,
+        topHoldersPct: undefined
       };
     }
   }

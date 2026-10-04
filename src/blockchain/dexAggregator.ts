@@ -157,7 +157,7 @@ export class DexAggregatorService {
       queryParams.slippageBps = requestedSlippageBps;
     }
 
-    const cacheKey = JSON.stringify(queryParams);
+    const cacheKey = JSON.stringify({queryParams, slippageCapBps: requestedSlippageBps});
     const cached = this.quoteCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.result;
     if (cached) this.quoteCache.delete(cacheKey);
@@ -219,8 +219,8 @@ export class DexAggregatorService {
       );
     }
 
-    const returnedSlippageBps = Number(data.slippageBps || 0);
-    if (!Number.isFinite(returnedSlippageBps) || returnedSlippageBps < 0) {
+    const returnedSlippageBps = data.slippageBps == null ? NaN : Number(data.slippageBps);
+    if (!Number.isInteger(returnedSlippageBps) || returnedSlippageBps < 0) {
       throw new JupiterQuoteException('Jupiter V2: invalid quote slippage');
     }
     if (returnedSlippageBps > requestedSlippageBps && params.autoSlippage) {
@@ -234,7 +234,7 @@ export class DexAggregatorService {
     }
 
     const priceImpactFromPercent = Number(data.priceImpactPct || 0) * 100;
-    const priceImpactPct = Number.isFinite(Number(data.priceImpact))
+    const priceImpactPct = data.priceImpact != null && Number.isFinite(Number(data.priceImpact))
       ? Number(data.priceImpact)
       : priceImpactFromPercent;
 
@@ -244,9 +244,7 @@ export class DexAggregatorService {
       inAmount: Number(data.inAmount),
       outAmount: Number(data.outAmount),
       priceImpactPct: Number.isFinite(priceImpactPct) ? priceImpactPct : 0,
-      slippageBps: returnedSlippageBps > 0
-        ? returnedSlippageBps
-        : (params.autoSlippage ? 0 : requestedSlippageBps),
+      slippageBps: returnedSlippageBps,
       routePlanSummary:
         data.routePlan?.map((r: any) => r?.swapInfo?.label).filter(Boolean).join(' -> ') ||
         data.router ||

@@ -636,7 +636,7 @@ export function renderDashboardHtml(state: DashboardState): string {
               ${state.positions.length} / 2
             </span>
           </h2>
-          <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · DexScreener referência · SL inicial: -6% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
+          <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · DexScreener referência · SL inicial: -12.5% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
         </div>
         <button id="sweep-rent-button" disabled onclick="sweepRentManual()" title="Requer sessão ADMIN." class="admin-action text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
           <span>🧹</span>

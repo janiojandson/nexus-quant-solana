@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { RugCheckService } from './rugCheckService.js';
+import { RugCheckService, type RugCheckReport } from './rugCheckService.js';
 import { SolanaLayaAdapter, type SolanaLayaDecision, type SolanaLayaFacts } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
@@ -26,6 +26,8 @@ export interface MomentumValidationResult {
 }
 
 export interface SecurityAuditResult {
+  /** Provider facts used by both the decision and journal, including vetoes. */
+  rugCheckReport?: RugCheckReport;
   safe: boolean;
   reason?: string;
   score: number; // 0 a 100
@@ -155,9 +157,10 @@ export class MemeRiskGatekeeper {
     const rugReport = await this.rugCheckService.auditToken(token.mint);
     if (!rugReport.isSafe) {
       return {
+      rugCheckReport: rugReport,
         safe: false,
         reason: `Veto por risco on-chain (RugCheck): ${rugReport.risks.join(' | ') || 'Score de perigo excedido'}`,
-        score: Math.max(0, 100 - (rugReport.score / 10)),
+        score: rugReport.score,
         validatedBy: 'RUGCHECK_API',
         latencyMs: Date.now() - startTime
       };
@@ -165,6 +168,7 @@ export class MemeRiskGatekeeper {
 
     if (rugReport.factsComplete !== true || rugReport.holdersCount === undefined) {
       return {
+        rugCheckReport: rugReport,
         safe: false,
         reason: 'RugCheck não forneceu todos os fatos críticos do contrato. Entrada bloqueada por fail-closed.',
         score: 0,
@@ -175,6 +179,7 @@ export class MemeRiskGatekeeper {
 
     if (rugReport.holdersCount < this.minHolders) {
       return {
+        rugCheckReport: rugReport,
         safe: false,
         reason: `Base de detentores frágil: ${rugReport.holdersCount} holders < Mínimo seguro de ${this.minHolders}.`,
         score: 25,
@@ -215,9 +220,10 @@ export class MemeRiskGatekeeper {
     }
 
     return {
+        rugCheckReport: rugReport,
       safe: true,
       reason: 'Filtros determinísticos Solana aprovados. Laya nativa registrada apenas em shadow/advisory.',
-      score: Math.max(50, Math.min(100, 100 - (rugReport.score / 10))),
+      score: rugReport.score,
       validatedBy: 'DETERMINISTIC_SOLANA_PIPELINE',
       latencyMs: Date.now() - startTime,
       layaNativeShadow,

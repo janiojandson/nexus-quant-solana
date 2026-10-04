@@ -448,3 +448,27 @@ test('capped replacement rejected if provider ignores cap; no simulation or exec
  assert.strictEqual(state.simulateCalls,0);assert.strictEqual(postCalls,0);
  assert.match(result.error||'',/hard-cap/);
 });
+
+test('Jupiter V2 requires final wallet totals rather than gross route output', async()=>{
+ mockOrder();axios.post=(async()=>({data:{status:'Success',code:0,signature:'pending-accounting',inputAmountResult:'15000000',outputAmountResult:'900000'}})) as any;
+ const {conn}=makeConnection({err:null});const result=await makeEngine(conn).executeSwap(baseRequest);
+ assert.strictEqual(result.status,'SUBMITTED_UNCONFIRMED');assert.strictEqual(result.outAmount,0);assert.strictEqual(result.txSignature,'pending-accounting');
+});
+test('Jupiter V2 refuses expired RFQ before simulation',async()=>{
+ mockOrder(testSigner,{router:'jupiterz',expireAt:new Date(Date.now()-1000).toISOString()});
+ const {conn,state}=makeConnection({err:null});const result=await makeEngine(conn).simulateSwap(baseRequest);
+ assert.strictEqual(result.success,false);assert.strictEqual(state.simulateCalls,0);assert.match(result.error||'',/expireAt/);
+});
+test('Jupiter V2 checks RFQ expiry again after preflight',async()=>{
+ mockOrder(testSigner,{expireAt:new Date(Date.now()+60000).toISOString()});
+ let posts=0;axios.post=(async()=>{posts++;throw Error('never');}) as any;
+ const now=Date.now;const {conn}=makeConnection({err:null});
+ (conn as any).simulateTransaction=async()=>{Date.now=()=>now()+120000;return {value:{err:null}};};
+ try{const r=await makeEngine(conn).executeSwap(baseRequest);assert.strictEqual(r.status,'FAILED');assert.strictEqual(posts,0);}
+ finally{Date.now=now;}
+});
+test('Jupiter V2 refuses unknown slippage before signing',async()=>{
+ mockOrder(testSigner,{slippageBps:undefined});
+ const {conn,state}=makeConnection({err:null});const result=await makeEngine(conn).simulateSwap(baseRequest);
+ assert.strictEqual(result.success,false);assert.strictEqual(state.simulateCalls,0);
+});

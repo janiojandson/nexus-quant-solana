@@ -107,3 +107,23 @@ test('handleJournalRoutes: deve ignorar rotas não-journal', async () => {
   const handled = await handleJournalRoutes(req, res, null, null);
   assert.strictEqual(handled, false);
 });
+
+test('rejections show measured failures and mark historical placeholders unverified', async () => {
+  let query = '', body = '';
+  const pool = {query: async (sql: string) => {
+    query = sql;
+    return {rows: [
+      {gate_evidence_version:'2', gate_details:[{gate:'MATURITY_AGE',result:'PASS'}, {gate:'TOP_HOLDERS',result:'FAIL',value:98,threshold:35}]},
+      {gate_details:[{gate:'TOP_HOLDERS',result:'PASS',value:20,threshold:20}]}
+    ]};
+  }} as any;
+  await handleJournalRoutes({url:'/api/journal/rejections',method:'GET',headers:{}} as any,
+    {writeHead:()=>{},end:(s:string)=>{body=s;}} as any, pool, null);
+  assert.match(query, /WHERE decision = 'ENTRY_REJECTED'/);
+  assert.match(query, /gateEvidenceVersion/);
+  const rows=JSON.parse(body).rejections;
+  assert.strictEqual(rows[0].first_gate,'TOP_HOLDERS');
+  assert.strictEqual(rows[0].actual_value,98);
+  assert.strictEqual(rows[1].first_result,'WARN');
+  assert.strictEqual(rows[1].actual_value,null);
+});

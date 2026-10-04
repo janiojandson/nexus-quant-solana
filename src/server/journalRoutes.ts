@@ -1,3 +1,4 @@
+import { presentRejectionEvidence } from '../audit/contractGates.js';
 // ============================================================
 // journalRoutes.ts — Nexus Quant Solana
 // Rotas de observabilidade e telemetria para o Decision Journal & Calibração
@@ -193,10 +194,7 @@ export async function handleJournalRoutes(
     try {
       const q = await pgPool.query(`
         SELECT
-          gate_details->0->>'gate' as first_gate,
-          gate_details->0->>'result' as first_result,
-          gate_details->0->>'value' as actual_value,
-          gate_details->0->>'threshold' as required_threshold,
+          metadata->>'gateEvidenceVersion' AS gate_evidence_version,
           rejection_reason,
           token_age_minutes,
           liquidity_usd,
@@ -205,12 +203,13 @@ export async function handleJournalRoutes(
           gate_details,
           created_at
         FROM decision_journal
+        WHERE decision = 'ENTRY_REJECTED'
         ORDER BY created_at DESC
         LIMIT 25;
       `);
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ rejections: q.rows }, null, 2));
+      res.end(JSON.stringify({ rejections: q.rows.map(presentRejectionEvidence) }, null, 2));
     } catch (err: any) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err?.message || 'Falha ao buscar auditoria de rejeições' }));

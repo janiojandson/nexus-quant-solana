@@ -139,3 +139,41 @@ test('RugCheckService: campo crítico ausente deve bloquear em fail-closed', asy
   assert.match(report.risks.join(' | '), /mintAuthority/);
   assert.match(report.risks.join(' | '), /totalHolders/);
 });
+
+test('RugCheck unavailable never fabricates concentration or locked LP',async()=>{
+ const service=new RugCheckService({fetchClient:async()=>{throw Error('offline');}});
+ const r=await service.auditToken('test');assert.strictEqual(r.isSafe,false);
+ assert.strictEqual(r.topHoldersPct,undefined);assert.strictEqual(r.lpLockedPct,undefined);
+});
+test('RugCheck missing percentages cannot become zero concentration',async()=>{
+ for(const topHolders of [[],[{pct:null}],[{pct:'bad'}]]){
+ const service=new RugCheckService({fetchClient:async()=>({data:{token:{mintAuthority:null,freezeAuthority:null},
+ totalHolders:100,lpLockedPct:95,topHolders}})});
+ const r=await service.auditToken('test');assert.strictEqual(r.factsComplete,false);assert.strictEqual(r.topHoldersPct,undefined);
+ }
+});
+
+test('RugCheck sorts concentration and preserves the observed LP percentage', async () => {
+  const service = new RugCheckService({fetchClient:async()=>({data:{
+    token:{mintAuthority:null,freezeAuthority:null}, totalHolders:100, lpLockedPct:40,
+    topHolders:[{pct:1},{pct:2},{pct:3},{pct:4},{pct:5},{pct:30}],
+    risks:[{name:'Large Amount of LP Unlocked',level:'danger'}]
+  }})});
+  const report = await service.auditToken('test');
+  assert.strictEqual(report.topHoldersPct,44);
+  assert.strictEqual(report.lpLockedPct,40);
+  assert.strictEqual(report.isSafe,false);
+});
+
+test('RugCheck invalid authority and null counts remain unknown', async () => {
+  const service = new RugCheckService({fetchClient:async()=>({data:{
+    token:{mintAuthority:undefined,freezeAuthority:''}, totalHolders:null,
+    lpLockedPct:null, topHolders:[{pct:5}]
+  }})});
+  const report=await service.auditToken('test');
+  assert.strictEqual(report.isSafe,false);
+  assert.strictEqual(report.mintAuthority,undefined);
+  assert.strictEqual(report.freezeAuthority,undefined);
+  assert.strictEqual(report.holdersCount,undefined);
+  assert.strictEqual(report.lpLockedPct,undefined);
+});

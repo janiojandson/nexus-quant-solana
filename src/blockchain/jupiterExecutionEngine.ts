@@ -204,9 +204,9 @@ export class JupiterExecutionEngine {
       );
     }
 
-    const rtseSlippage = Number(order.slippageBps || 0);
+    const rtseSlippage = order.slippageBps == null ? NaN : Number(order.slippageBps);
     const allowedSlippage = req.autoSlippage ? (req.maxAutoSlippageBps ?? MAX_SLIPPAGE_BPS) : slippageBps!;
-    if (!Number.isFinite(rtseSlippage) || rtseSlippage < 0) throw new Error('Jupiter V2: invalid order slippage');
+    if (!Number.isInteger(rtseSlippage) || rtseSlippage < 0) throw new Error('Jupiter V2: invalid order slippage');
     if (rtseSlippage > allowedSlippage && req.autoSlippage) {
       console.warn(`[JUPITER_SLIPPAGE_REQUOTE] RTSE=${rtseSlippage}bps cap=${allowedSlippage}bps; requesting a new fixed-cap order`);
       return this.getOrder({ ...req, autoSlippage: false, slippageBps: allowedSlippage });
@@ -221,7 +221,16 @@ export class JupiterExecutionEngine {
       `🧭 [Jupiter V2 /order] router=${order.router || 'unknown'} mode=${order.mode || 'unknown'} ` +
       `| slippage=${rtseSlippage}bps | fee=${order.feeBps ?? 'n/d'}bps | out=${order.outAmount}`
     );
+    this.assertOrderNotExpired(order);
     return order;
+  }
+
+  private assertOrderNotExpired(order: JupiterV2OrderResponse): void {
+    if (order.expireAt == null) return;
+    const expiresAt = Date.parse(order.expireAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new Error('Jupiter V2: expired or invalid expireAt; obtain a fresh order before signing/submission.');
+    }
   }
 
   private signOrder(
@@ -431,6 +440,7 @@ export class JupiterExecutionEngine {
         }
       }
 
+      this.assertOrderNotExpired(order);
       const payload = {
         signedTransaction,
         requestId: order.requestId,
@@ -485,13 +495,13 @@ export class JupiterExecutionEngine {
       }
 
       const actualInput = Number(
-        result.totalInputAmount || result.inputAmountResult || order.inAmount || req.amountLamports
+        result.totalInputAmount ?? NaN
       );
       const actualOutput = Number(
-        result.totalOutputAmount || result.outputAmountResult || 0
+        result.totalOutputAmount ?? NaN
       );
 
-      if (!Number.isFinite(actualOutput) || actualOutput <= 0) {
+      if (!signature || !Number.isSafeInteger(actualInput) || actualInput <= 0 || !Number.isSafeInteger(actualOutput) || actualOutput <= 0) {
         return {
           txSignature: signature,
           status: 'SUBMITTED_UNCONFIRMED',
@@ -505,7 +515,7 @@ export class JupiterExecutionEngine {
           feeBps: order.feeBps,
           feeMint: order.feeMint,
           slippageBps: Number(order.slippageBps || 0),
-          error: 'Jupiter V2 retornou Success sem totalOutputAmount válido.'
+          error: 'Jupiter V2 Success missing a valid signature or final wallet totals; reconcile before another order.'
         };
       }
 

@@ -93,7 +93,7 @@ export class PositionExitEngine {
   /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
   private peakSolValues = new Map<string, number>();
   public static readonly DEFAULT_TIME_STOP_MS = 10 * 60 * 1000; // 10 minutos (hard limit ágil condicional)
-  public static readonly DEFAULT_STOP_LOSS_PCT = -0.06;         // -6% Stop Loss Lógico (efetivo ~-8% a -9% com slippage)
+  public static readonly DEFAULT_STOP_LOSS_PCT = -0.125;        // Initial loss trigger relative to actual entry cost.
   public static readonly BREAKEVEN_TRIGGER_PCT = 0.12;          // +12% ativa Breakeven (+1%)
   public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
   /** Proteção de momentum antes da parcial: ativa a partir de +8%. */

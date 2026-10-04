@@ -176,6 +176,9 @@ export class DecisionLogger {
    * NÃO bloqueia o chamador. Enfileira em buffer.
    */
   logDecision(entry: DecisionLogEntry): void {
+    if (entry.gateEvaluations.some(g => g.gate === 'TOP_HOLDERS' && g.threshold === 35)) {
+      entry = {...entry, metadata: {...entry.metadata, gateEvidenceVersion: 2}};
+    }
     this.buffer.push({ type: 'decision', payload: entry });
     this.totalLogged++;
 
