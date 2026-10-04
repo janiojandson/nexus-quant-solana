@@ -254,3 +254,34 @@ test('Dashboard Strategy Lab mostra janela, horizonte e replay de saída', () =>
   assert.match(html, /TIERED_PROFIT_LOCK/);
   assert.match(html, /11\.25%/);
 });
+
+
+test('Dashboard quantifica a primeira rota Jupiter dentro de 750 bps e a janela de 15s', () => {
+  const html = renderDashboardHtml({
+    ...state,
+    pumpStrategyLab: {
+      mode: 'SHADOW',
+      totalSamples: 0,
+      preferredJupiterPlan: 'INSUFFICIENT_DATA',
+      routeReadiness: {
+        maxSlippageBps: 750,
+        momentZeroWindowMs: 15_000,
+        probedMints: 2,
+        compliantRouteMints: 1,
+        compliantRouteRate: 0.5,
+        momentZeroMints: 1,
+        momentZeroRate: 0.5,
+        medianFirstCompliantRouteLagMs: 8_000,
+        p90FirstCompliantRouteLagMs: 8_000,
+        smallestFirstExecutableAmountLamports: 1_000_000,
+        medianFirstExecutableAmountLamports: 1_000_000
+      },
+      strategies: []
+    }
+  });
+
+  assert.match(html, /Primeira rota ≤ 750 bps/);
+  assert.match(html, /50\.0% \(1\/2\)/);
+  assert.match(html, /latência mediana: 8\.0s/);
+  assert.match(html, /Proxy SHADOW de momento 0/);
+});

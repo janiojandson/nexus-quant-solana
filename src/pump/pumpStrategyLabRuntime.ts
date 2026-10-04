@@ -1,6 +1,10 @@
 import type { SwapQuoteParams, SwapQuoteResult } from '../blockchain/dexAggregator.js';
 import type { PumpObservatorySnapshot } from './pumpObservatory.js';
-import { PumpJupiterTimingTracker } from './pumpJupiterTiming.js';
+import {
+  PUMP_JUPITER_MAX_SLIPPAGE_BPS,
+  PumpJupiterTimingTracker,
+  type PumpJupiterTimingSummary
+} from './pumpJupiterTiming.js';
 import type { PumpStrategyCohort } from './pumpCohorts.js';
 import {
   createShadowTrade,
@@ -68,6 +72,7 @@ export interface PumpStrategyLabSnapshot {
   totalSamples: number;
   preferredJupiterPlan: string;
   preferredPlanNetAfterCostSol?: number;
+  routeReadiness?: PumpJupiterTimingSummary;
   strategies: Array<{
     cohort: string;
     entryWindow: PumpEntryWindow;
@@ -90,6 +95,7 @@ export interface PumpStrategyLabRuntimeOptions {
   enabled?: boolean;
   intervalMs?: number;
   entryLamports?: number;
+  entryLamportLadder?: () => number[];
   networkFeeLamports?: number;
   priorityFeeLamports?: number;
   horizons?: PumpStrategyHorizon[];
@@ -118,6 +124,7 @@ export class PumpStrategyLabRuntime {
   private readonly enabled: boolean;
   private readonly intervalMs: number;
   private readonly entryLamports: number;
+  private readonly entryLamportLadder: () => number[];
   private readonly networkFeeLamports: number;
   private readonly priorityFeeLamports: number;
   private readonly horizons: PumpStrategyHorizon[];
@@ -146,6 +153,7 @@ export class PumpStrategyLabRuntime {
     this.enabled = options.enabled ?? true;
     this.intervalMs = Math.max(1_000, Number(options.intervalMs ?? 5_000));
     this.entryLamports = Math.max(1, Math.floor(Number(options.entryLamports ?? 1_000_000)));
+    this.entryLamportLadder = options.entryLamportLadder ?? (() => [this.entryLamports]);
     this.networkFeeLamports = Math.max(0, Math.floor(Number(options.networkFeeLamports ?? 0)));
     this.priorityFeeLamports = Math.max(0, Math.floor(Number(options.priorityFeeLamports ?? 0)));
     this.horizons = [...(options.horizons ?? [
@@ -159,6 +167,7 @@ export class PumpStrategyLabRuntime {
     this.now = options.now ?? Date.now;
     this.canRunResearch = options.canRunResearch ?? (() => true);
     this.timing = new PumpJupiterTimingTracker(provider, { now: this.now });
+    this.currentSnapshot.routeReadiness = this.timing.summary();
   }
 
   async restore(): Promise<void> {
@@ -239,6 +248,9 @@ export class PumpStrategyLabRuntime {
     return {
       ...this.currentSnapshot,
       lastError: this.lastError,
+      routeReadiness: this.currentSnapshot.routeReadiness
+        ? { ...this.currentSnapshot.routeReadiness }
+        : undefined,
       strategies: this.currentSnapshot.strategies.map(item => ({ ...item }))
     };
   }
@@ -352,15 +364,22 @@ export class PumpStrategyLabRuntime {
     now: number
   ): Promise<boolean> {
     const cohort = entryWindowToCohort(entryWindow);
+    const entryLadder = [...new Set(this.entryLamportLadder()
+      .map(value => Math.max(1, Math.floor(Number(value))))
+      .filter(Number.isFinite))]
+      .sort((a, b) => b - a);
     const timing = await this.timing.probe({
       mint,
       eventTimestampMs,
       inputMint: WSOL_MINT,
       outputMint: mint,
-      amountLamports: this.entryLamports
+      amountLamports: entryLadder[0] ?? this.entryLamports,
+      amountLadderLamports: entryLadder,
+      probeSeriesKey: `${mint}:${entryWindow}`
     });
     if (!timing.routeAvailable || !timing.outAmount || timing.outAmount <= 0) return false;
 
+    const entryAmountLamports = timing.lastProbeAmountLamports ?? this.entryLamports;
     const entryAtMs = this.now();
     const tracked = this.trackedMints.get(mint);
     if (!tracked || !dueEntryWindows({
@@ -376,7 +395,7 @@ export class PumpStrategyLabRuntime {
       cohort,
       venue: 'JUPITER_ROUTE',
       entryAtMs,
-      entryPrincipalSol: this.entryLamports / 1e9,
+      entryPrincipalSol: entryAmountLamports / 1e9,
       entryFeeBps: 0,
       entrySlippageBps: 0,
       priorityFeeLamports: this.priorityFeeLamports,
@@ -393,7 +412,13 @@ export class PumpStrategyLabRuntime {
         entryWindow,
         entryAgeMs: entryAtMs - eventTimestampMs,
         quoteRequestedAtMs: now,
+        quoteCompletedAtMs: entryAtMs,
         firstRouteLagMs: timing.firstRouteLagMs,
+        firstCompliantRouteLagMs: timing.firstCompliantRouteLagMs,
+        firstRouteAmountLamports: timing.firstRouteAmountLamports,
+        firstRouteLadderIndex: timing.firstRouteLadderIndex,
+        firstRouteSlippageBps: timing.firstRouteSlippageBps,
+        maxSlippageBps: PUMP_JUPITER_MAX_SLIPPAGE_BPS,
         router: timing.router,
         tokenAmountAtomic: timing.outAmount
       }
@@ -579,6 +604,7 @@ export class PumpStrategyLabRuntime {
       mode: 'SHADOW',
       totalSamples,
       preferredJupiterPlan: 'INSUFFICIENT_DATA',
+      routeReadiness: this.timing.summary(),
       strategies
     };
   }

@@ -79,3 +79,92 @@ test('counts 429 without inventing a route and preserves later first-route timin
   assert.equal(recovered.firstRouteLagMs, 3_000);
   assert.equal(recovered.rateLimitHits, 1);
 });
+
+
+test('walks the bankroll ladder across ticks and records the first 750 bps compliant size', async () => {
+  let now = 3_000_000;
+  const calls: SwapQuoteParams[] = [];
+  const tracker = new PumpJupiterTimingTracker({
+    async getQuote(params) {
+      calls.push(params);
+      if (params.amountLamports > 400_000) {
+        throw new JupiterQuoteException('Jupiter V2 RTSE excedeu hard-cap: 1000bps > 750bps.');
+      }
+      return {
+        inputMint: params.inputMint,
+        outputMint: params.outputMint,
+        inAmount: params.amountLamports,
+        outAmount: 360_000,
+        priceImpactPct: 0.9,
+        slippageBps: 700,
+        routePlanSummary: 'Pump -> SOL',
+        router: 'metis'
+      };
+    }
+  }, { now: () => now });
+
+  const input = {
+    mint: 'Mint333',
+    eventTimestampMs: 3_000_000,
+    inputMint: 'So11111111111111111111111111111111111111112',
+    outputMint: 'Mint333',
+    amountLamports: 1_000_000,
+    amountLadderLamports: [1_000_000, 700_000, 400_000, 200_000],
+    probeSeriesKey: 'Mint333:LAUNCH_0_15S'
+  };
+  await tracker.probe(input);
+  now += 5_000;
+  await tracker.probe(input);
+  now += 5_000;
+  const routed = await tracker.probe(input);
+
+  assert.deepEqual(calls.map(call => call.amountLamports), [1_000_000, 700_000, 400_000]);
+  assert.ok(calls.every(call => call.maxAutoSlippageBps === 750));
+  assert.equal(routed.firstRouteAmountLamports, 400_000);
+  assert.equal(routed.firstRouteLadderIndex, 2);
+  assert.equal(routed.firstCompliantRouteLagMs, 10_000);
+  assert.equal(routed.firstRouteSlippageBps, 700);
+});
+
+test('summarizes real moment-zero feasibility without treating an unavailable route as an entry', async () => {
+  const module = await import('./pumpJupiterTiming.js');
+  const summary = module.summarizePumpJupiterTiming([
+    {
+      mint: 'fast',
+      attempts: 1,
+      rateLimitHits: 0,
+      routeAvailable: true,
+      firstRouteAtMs: 10_000,
+      firstRouteLagMs: 8_000,
+      firstCompliantRouteLagMs: 8_000,
+      firstRouteAmountLamports: 1_000_000,
+      firstRouteSlippageBps: 500
+    },
+    {
+      mint: 'slow',
+      attempts: 4,
+      rateLimitHits: 0,
+      routeAvailable: true,
+      firstRouteAtMs: 40_000,
+      firstRouteLagMs: 35_000,
+      firstCompliantRouteLagMs: 35_000,
+      firstRouteAmountLamports: 400_000,
+      firstRouteSlippageBps: 750
+    },
+    {
+      mint: 'blocked',
+      attempts: 5,
+      rateLimitHits: 0,
+      routeAvailable: false,
+      lastFailureReason: 'SLIPPAGE_ABOVE_CAP'
+    }
+  ]);
+
+  assert.equal(summary.probedMints, 3);
+  assert.equal(summary.compliantRouteMints, 2);
+  assert.equal(summary.momentZeroMints, 1);
+  assert.equal(summary.momentZeroRate, 1 / 3);
+  assert.equal(summary.medianFirstCompliantRouteLagMs, 8_000);
+  assert.equal(summary.p90FirstCompliantRouteLagMs, 35_000);
+  assert.equal(summary.smallestFirstExecutableAmountLamports, 400_000);
+});
