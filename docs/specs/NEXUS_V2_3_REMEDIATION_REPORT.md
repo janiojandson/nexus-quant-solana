@@ -1,138 +1,163 @@
-# NEXUS QUANT SOLANA — MISSÃO V2.3-R
-# RELATÓRIO DE REMEDIAÇÃO ADVERSARIAL & AUDITORIA DE SEGURANÇA
+# NEXUS QUANT SOLANA — MISSÃO V2.3-R2
+# RELATÓRIO CONSOLIDADO DE REMEDIAÇÃO ADVERSARIAL & REAUDITORIA
 
 **Data:** 04/10/2026  
 **Branch:** `nexus-v2-observability`  
-**Baseline Auditado:** `f801db2` (Veredito Original: `REJECT FOR LIVE USE`)  
-**Status da Remediação:** CONCLUÍDA EM 8 COMMITS CIRÚRGICOS (R1 - R8)  
+**Baseline Auditado:** `f801db2` (Round 1) -> `9b8f09d` (Round 2)  
+**Status da Remediação:** CONCLUÍDA EM 10 COMMITS CIRÚRGICOS DE R2 (R2-1 a R2-10)  
 **Status dos Gates de Verificação:**
 - `npm run build`: **PASS** (Zero erros de compilação TypeScript)
-- `npm test`: **PASS** (614/614 testes passando, 0 falhas)
-- `npm run test:postgres`: **PASS** (10/10 testes reais PostgreSQL 16.15 passando)
+- `npm test`: **PASS** (645/645 testes passando, 0 falhas, 0 skips)
+- `npm run test:postgres`: **PASS** (22/22 testes em PostgreSQL 16.15 real, concurrency=1)
 
 ---
 
-## 1. RESUMO EXECUTIVO DA REMEDIAÇÃO
+## 1. RESUMO EXECUTIVO DA REAUDITORIA (ROUND 2)
 
-Esta missão executou a reprodução adversarial estrita e remediação cirúrgica de todos os achados identificados na auditoria independente (*findings* `P0-01` a `P2-02`), sem adicionar novas features, sem iniciar V2.2, sem alterar estratégias de trading e sem deploy em produção.
+A segunda rodada de auditoria independente retornou `REMEDIATION: FAIL`, apontando que testes do PostgreSQL estavam silenciosamente fazendo skip, a inicialização permitia mutações antes da recuperação de dívida durável, o reconciliador de UNKNOWN varria transações arbitrárias da carteira, guardas de saída estavam dispersos em múltiplos sets em memória, mutações de saldo aceitavam valores residuais inválidos com `isFinal = true`, e scripts operacionais mantinham conversões inseguras de `BigInt` para `Number`.
 
-Todos os caminhos críticos foram blindados com contratos *fail-closed*:
-1. **Live Safety (Fail-Closed Exits):** Remoção de posições e fechamento de ATAs foram estritamente condicionados à confirmação econômica conclusiva. Pânico individual e pânico geral não limpam posições antecipadamente.
-2. **Separação de Estágios de Execução:** `PROVIDER_RECEIPT` (HTTP 200) foi desacoplado de `CHAIN_CONFIRMED` e `ECONOMICALLY_RECONCILED`.
-3. **Integridade de Amounts Atômicos:** Eliminação de coerções inseguras de ponto flutuante em favor de `bigint` e asserções formais contra `Number.MAX_SAFE_INTEGER`.
-4. **Fencing de Reinício & Dívidas Duráveis:** Dívidas de reconciliação e intents nos estados `SUBMITTED`, `UNKNOWN` e `reconciliation_debt = true` sobrevivem a reinícios e bloqueiam novas tentativas para a mesma wallet/mint antes da reidratação de mercado.
-5. **Máquina de Estados e Fencing do Journal:** Imposição de `expectedEpoch` obrigatório para mutações de workers, exclusão de intents `CONFIRMED` de re-tentativas (mesmo com lease expirado), bloqueio de superseding para intents com attempts assinadas/enviadas e transições estritamente validadas via grafo finito.
-6. **Aplicação Transacional e Política de Custódia:** Transação atômica compartilhada (PostgreSQL `PoolClient`) unindo `fill_ledger` e mutação de posição com rollback garantido, política estrita de custódia canônica (`CANONICAL_ATA_STRICT`) e proibição de mutação arbitrária de saldo pelo chamador.
-7. **Matriz de Flags & Fencing Pré-Send:** Validação exaustiva das 8 combinações de flags (`000`, `100`, `110`, `111` válidas; `001`, `010`, `011`, `101` com fail-closed imediato) e eliminação do gap TOCTOU entre avaliação de quote e broadcast via `DispatchReservationManager`.
-8. **Proveniência Histórica:** Reconstrução de replay histórico derivando 100% dos fatos de `transactions.json`, tratando `expected.json` estritamente como *assertion* passível de auditoria.
+A **Missão V2.3-R2** endereçou e corrigiu 100% dos achados da reauditoria através de commits estritamente isolados e testados contra o banco PostgreSQL real (`localhost:55432`), sem adicionar novas features, sem iniciar V2.2, sem alterar estratégias de trading e sem deploy em produção.
 
 ---
 
-## 2. MATRIZ CONSOLIDADA DE REMEDIAÇÃO (P0-01 a P2-02)
+## 2. MATRIZ CONSOLIDADA DE REAUDITORIA (ROUND 2)
 
 | AUDIT_ID | CLASSIFICAÇÃO | ORIGINAL_SEV | REVIEW_SEV | REPRODUZIDO? | CORRIGIDO? | TESTE DE VALIDAÇÃO | COMMIT |
 |---|---|---|---|---|---|---|---|
-| **P0-03** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/execution/failClosedExits.test.ts` | `3230be2` (R1) |
-| **P0-04** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/execution/failClosedExits.test.ts` | `3230be2` (R1) |
-| **P0-05** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/execution/failClosedExits.test.ts` | `3230be2` (R1) |
-| **P0-02** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/runtime/shadowWiringAndDebtRecovery.test.ts` | `45ffd31` (R5) |
-| **P1-11** | CURRENT-LIVE-RISK | P1 | P0 | CONFIRMED | FIXED | `test/execution/failClosedExits.test.ts` | `3230be2` (R1) |
-| **P1-12** | CURRENT-LIVE-RISK | P1 | P1 | CONFIRMED | FIXED | `test/execution/failClosedExits.test.ts` | `3230be2` (R1) |
-| **P0-06** | CUTOVER-BLOCKER | P0 | P0 | CONFIRMED | FIXED | `test/execution/reconcileExecutionAmounts.test.ts` | `c876977` (R2) |
-| **P0-07** | CUTOVER-BLOCKER | P0 | P0 | CONFIRMED | FIXED | `test/execution/reconcileExecutionAmounts.test.ts` | `c876977` (R2) |
-| **P1-01** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/runtime/shadowWiringAndDebtRecovery.test.ts` | `45ffd31` (R5) |
-| **P1-02** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/journal/lifecycleFencingAndFillIdentity.test.ts` | `eb5b932` (R3) |
-| **P1-03** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/journal/lifecycleFencingAndFillIdentity.test.ts` | `eb5b932` (R3) |
-| **P1-04** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/journal/lifecycleFencingAndFillIdentity.test.ts` | `eb5b932` (R3) |
-| **P1-05** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/journal/lifecycleFencingAndFillIdentity.test.ts` | `eb5b932` (R3) |
-| **P1-06** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/position/transactionalFinancialApplication.test.ts` | `af72444` (R4) |
-| **P1-07** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/position/transactionalFinancialApplication.test.ts` | `af72444` (R4) |
-| **P1-08** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/position/transactionalFinancialApplication.test.ts` | `af72444` (R4) |
-| **P1-09** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/position/transactionalFinancialApplication.test.ts` | `af72444` (R4) |
-| **P0-01** | CUTOVER-BLOCKER | P0 | CUTOVER-BLOCKER | CONFIRMED | FIXED | `test/versioning/flagMatrixAndPreSendGate.test.ts` | `4efe5b7` (R6) |
-| **P2-01** | CUTOVER-BLOCKER | P2 | P2 | CONFIRMED | FIXED | `test/versioning/flagMatrixAndPreSendGate.test.ts` | `4efe5b7` (R6) |
-| **P1-10** | HARDENING | P1 | P1 | CONFIRMED | FIXED | `npm run build` | `c876977` (R2) |
-| **P2-02** | HARDENING | P2 | P2 | CONFIRMED | FIXED | `test/audit/adversarialScenarios.test.ts` | `ee5f062` (R7) |
+| **R-P0-01** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/runtime/financialReadiness.test.ts` | `7a750e0` (R2-2) |
+| **R-P0-02** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/execution/economicConfirmationAndUnifiedGuard.test.ts` | `491898f` (R2-4) |
+| **R-P0-03** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/reconciliation/exactSignatureReconciliation.test.ts` | `83b3c15` (R2-3) |
+| **R-P0-04** | CURRENT-LIVE-RISK | P0 | P0 | CONFIRMED | FIXED | `test/execution/economicConfirmationAndUnifiedGuard.test.ts` | `491898f` (R2-4) |
+| **R-P1-01** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/position/economicIdentityAndFinalBalance.test.ts` | `5eaa988` (R2-6) |
+| **R-P1-02** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/journal/stateMachineAndSystemMutations.test.ts` | `c1f1104` (R2-5) |
+| **R-P1-03** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/position/economicIdentityAndFinalBalance.test.ts` | `5eaa988` (R2-6) |
+| **R-P1-04** | CURRENT-LIVE-RISK | P1 | P1 | CONFIRMED | FIXED | `test/execution/economicConfirmationAndUnifiedGuard.test.ts` | `491898f` (R2-4) |
+| **R-P1-05** | CURRENT-LIVE-RISK | P1 | P1 | CONFIRMED | FIXED | `test/execution/economicConfirmationAndUnifiedGuard.test.ts` | `491898f` (R2-4) |
+| **R-P1-06** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/journal/stateMachineAndSystemMutations.test.ts` | `c1f1104` (R2-5) |
+| **R-P1-07** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/runtime/v2GateAndStrictFlagParsing.test.ts` | `11c3222` (R2-7) |
+| **R-P1-08** | CUTOVER-BLOCKER | P1 | P1 | CONFIRMED | FIXED | `test/runtime/v2GateAndStrictFlagParsing.test.ts` | `11c3222` (R2-7) |
+| **R-P2-01** | HARDENING | P2 | P2 | CONFIRMED | FIXED | `scripts/testCanaryTrade.ts` (e scripts) | `f761f7a` (R2-8) |
+| **R-P2-02** | HARDENING | P2 | P2 | CONFIRMED | FIXED | `test/replay/incidentReplay.test.ts` | `93b922d` (R2-9) |
 
 ---
 
-## 3. DETALHAMENTO DAS REMEDIAÇÕES POR BLOCO
+## 3. HISTÓRICO CONSOLIDADO DE COMMITS DA MISSÃO V2.3-R2
 
-### 3.1 Bloco A — Live Safety & Camada de Saída (`3230be2`, `c876977`)
-- **P0-03 (Panic Token Fail-Open):** Removida a remoção incondicional da posição e fechamento de ATA antes da confirmação. Implementado retorno de estado tipado (`CONFIRMED`, `PENDING_RECONCILIATION`, `FAILED_DEFINITIVE`). A ATA só é fechada se saldo residual for zero e liquidação estiver confirmada.
-- **P0-04 (Panic All Antecipado):** Eliminada a chamada `clearPositions()` prévia. Cada posição é avaliada e liquidada individualmente. Falhas e timeouts isolados não afetam outros ativos.
-- **P0-05 (Manual Liquidation Guard):** Criado `FinancialExitSafetyGuard` em `src/execution/financialExitSafetyGuard.ts`, consultado em todos os endpoints manuais e de pânico. Bloqueia colisões in-flight e mints com dívida de reconciliação.
-- **P0-06 (Provider Success ≠ Economic Confirmation):** Criados estágios explícitos `PROVIDER_RECEIPT`, `CHAIN_CONFIRMED` e `ECONOMICALLY_RECONCILED` em `src/execution/exitRouter.ts`. Mero HTTP 200 não promove efeito financeiro.
-- **P0-07 (Actual Fill Amount):** Implementada a função `reconcileExecutionAmounts` registrando `ExecutionAmountMismatch` quando `requestedAmountAtomic !== executedAmountAtomic`. A mutação deriva do débito real on-chain.
-- **P1-11 & P1-12 (Atomic Amount Integrity):** Substituição de conversões inseguras de ponto flutuante por `bigint` e criação de `assertAtomicAmountToNumber`, `safeBigIntToNumber` e `ExceedsSafeIntegerLimitError`.
+1. **Commit R2-1 (`057acd5`):** `test(postgres): make critical integration tests fail closed and use one database`
+   - Unificou testes em `TEST_DATABASE_URL` via `test/helpers/testDatabase.ts`.
+   - Eliminou skips silenciosos, lançando `REAL_POSTGRES_REQUIRED` caso o PostgreSQL físico não esteja operacional.
+   - Adicionou `clearDebt` a `FinancialExitSafetyGuard`.
+   - Configurou `npm run test:postgres` com `--test-concurrency=1` para evitar colisões de `TRUNCATE` entre suites.
 
-### 3.2 Bloco B — State Machine, Fencing & Transacionalidade (`eb5b932`, `af72444`)
-- **P1-02 (Prepared não esconde Signed):** Implementado `hasPotentiallyLiveChainAttempt` verificando se há attempts nos estados `SIGNED`, `SUBMITTED`, `UNKNOWN` ou com assinatura on-chain antes de permitir qualquer *supersede*.
-- **P1-03 (Confirmed não Reclaimable):** Modificada a consulta `claimIntent` para excluir intents `CONFIRMED`. Expirar o lease não permite reenvio de transação confirmada.
-- **P1-04 (Epoch Obrigatório):** Mutações de worker em `InMemoryExitJournalRepository` e `PostgresJournalRepository` exigem estritamente `expectedEpoch`. A ausência lança `EpochRequiredError`.
-- **P1-05 (Identidade On-Chain do Fill):** Repositório de posições deduplica fills por assinatura de transação on-chain (`signature`), impedindo aplicação duplicada com `fillId` diferente.
-- **P1-06 (Unidade Transacional Journal + Position):** Criado `applyConfirmedFillAtomically` em `src/position/atomicFinancialApplication.ts` executando inserção no `fill_ledger`, CAS na posição e marcação de intent `APPLIED` dentro de uma única transação PostgreSQL compartilhada (`PoolClient`). Em caso de falha, ocorre `ROLLBACK` total.
-- **P1-07 (Caller Controlled Balance):** Removida a possibilidade de mutação arbitrária de saldo. Criados `applyConfirmedFill` e `applyReconciliationAdjustment` com validação de invariantes econômicos (`ArbitraryBalanceMutationRejectedError`).
-- **P1-08 (Custódia Canônica Rigorosa):** Criado `src/position/custody.ts` com a política `CANONICAL_ATA_STRICT`, derivando a ATA deterministicamente e rejeitando contas auxiliares ou ambíguas (`AmbiguousTokenAccountCustodyError`).
-- **P1-09 (Reconciliação de Mudança Externa):** Criado `reconcilePositionCustody`, detectando divergências entre o saldo on-chain e o saldo da posição, gravando mutação `RECONCILIATION_ADJUSTMENT`, incrementando a versão e invalidando quotes ativas.
+2. **Commit R2-2 (`7a750e0`):** `fix(startup): fence financial readiness on durable recovery`
+   - Implementou `src/core/financialReadiness.ts` com os estados `BOOTING`, `RECOVERING_FINANCIAL_STATE`, `READY`, `FAILED_SAFE`.
+   - Bloqueou todos os endpoints de mutação financeira atrás de `isFinancialReady()`, retornando HTTP 503 `FINANCIAL_STATE_NOT_READY`.
+   - Conectou o boot fail-closed em `src/index.ts`.
 
-### 3.3 Bloco C & D — Runtime Wiring, Pre-Send Gate & Replay Provenance (`45ffd31`, `4efe5b7`, `ee5f062`)
-- **P1-01 (Shadow Wiring):** Repositórios `PostgresJournalRepository` e `PostgresPositionRepository` conectados ao runtime de shadow hooks em `src/index.ts`.
-- **P0-02 (Reidratação de Dívida no Boot):** Criada a função `rehydrateDurableExitDebtsOnBoot` em `src/index.ts`, consultando intents duráveis em aberto (`SUBMITTED`, `UNKNOWN` ou `reconciliation_debt = true`) e bloqueando os mints correspondentes em `financialExitSafetyGuard` antes do início do monitor de saída e scanner.
-- **P0-01 (Pre-Send Version Gate & TOCTOU Dispatch Reservation):** Integrada a validação de versão e saldo do snapshot com reserva atômica de despacho (`DispatchReservationManager`), eliminando a janela TOCTOU entre avaliação e broadcast.
-- **P2-01 (Matriz de Feature Flags):** Validação estrita das 8 combinações de `(J, P, G)` em `validateFeatureFlagMatrix()`. Configurações inválidas (`001`, `010`, `011`, `101`) causam fail-closed imediato na inicialização via `InvalidFeatureFlagCombinationError`.
-- **P2-02 (Proveniência do Replay Histórico):** `reconstructIncidentPositionLifecycle` refatorado para ler 100% dos fatos (`initialPrincipal`, `boughtTokens`, `partialTokens`, `finalProceeds`) a partir de `transactions.json`. `expected.json` é utilizado puramente como *assertion*, comprovado por teste de adulteração em memória.
+3. **Commit R2-3 (`83b3c15`):** `fix(reconciliation): bind unknown recovery to exact execution attempt`
+   - Criou `src/reconciliation/executionReconciler.ts` (Finding R-P0-03).
+   - Implementou `reconcileExactTransaction` em `SolanaWalletService`.
+   - Refatorou `reconcileRecentSell` e `executeExitOrder` para exigir estritamente a `txSignature` da tentativa, proibindo varredura de transações arbitrárias da carteira.
+   - Validou com `test/reconciliation/exactSignatureReconciliation.test.ts` (5/5 testes passando).
+
+4. **Commit R2-4 (`491898f`):** `fix(execution): require economic confirmation and unified in-process exclusion`
+   - Eliminou o Set `exitOrderInFlight`, unificando todas as saídas sob `financialExitSafetyGuard.acquireExitLock(target, amount)`.
+   - Adicionou `CustodyLockIdentity` (`wallet`, `mint`, `tokenProgram`, `tokenAccount`) ao guardião.
+   - Mapeou `SUCCESS` de provedor para `PROVIDER_SUCCESS` em `src/journal/shadowHooks.ts`, confirmando apenas em `shadowOnFillConfirmed`.
+   - Adicionou `verifySwapLandingConfirmation` aos fluxos de pânico e liquidação para impedir remoção de posição ou fechamento de ATA baseado em mero recibo HTTP 200.
+   - Removeu o fallback inseguro `exitSwap.inAmount ?? requestedAmountAtomic`.
+   - Validou com `test/execution/economicConfirmationAndUnifiedGuard.test.ts` (4/4 testes passando).
+
+5. **Commit R2-5 (`c1f1104`):** `fix(journal): close lifecycle transition and system mutation bypasses`
+   - Bloqueou regressões ilegais de estado (`CONFIRMED -> SUBMITTED`, `UNKNOWN -> SUBMITTED`) em `src/journal/types.ts`.
+   - Introduziu `SystemMutationContext` (`actor`, `reason`, `expectedCurrentState`, `expectedEpoch`) e validação via `assertValidSystemMutationContext`.
+   - Atualizou `prepareAttempt`, `systemUpdateAttemptState` e `releaseTerminalIntent` em `postgresRepository.ts` e `repository.ts`.
+   - Validou com `test/journal/stateMachineAndSystemMutations.test.ts` (7/7 testes passando).
+
+6. **Commit R2-6 (`5eaa988`):** `fix(position): enforce economic identity final balance and atomic application`
+   - Implementou `InvalidFinalFillResidualError` em `applyConfirmedFill` e `updatePositionCAS` quando `isFinal: true` resulta em saldo residual positivo (`newAmount > 0n`).
+   - Implementou validações estritas de identidade econômica (`EconomicIdentityMismatchError`) unindo Intent, Attempt, Fill e Position em `applyConfirmedFillAtomically`.
+   - Criou `applyExplicitAdministrativeCorrection` exigindo `actor` e `reason` não-vazios.
+   - Validou com `test/position/economicIdentityAndFinalBalance.test.ts` (4/4 testes passando em memória e PostgreSQL real).
+
+7. **Commit R2-7 (`11c3222`):** `fix(runtime): wire v2 gate custody checks and strict flag parsing`
+   - Criou `src/core/strictEnv.ts` com `parseStrictBooleanEnv`, rejeitando qualquer string booleana não-exata (`'TRUE'`, `'1'`, `'true '`).
+   - Atualizou `DispatchReservationManager` para impedir expiração de reserva se houver dívida durável ativa (`hasDurableDebt === true`).
+   - Conectou `evaluatePreSendVersionGate` e `revalidateCustodyAndEvaluateGate` em `executeExitOrderUnlocked` antes do broadcast quando flags = 111.
+   - Validou com `test/runtime/v2GateAndStrictFlagParsing.test.ts` (4/4 testes passando).
+
+8. **Commit R2-8 (`f761f7a`):** `fix(ops): remove unsafe bigint and execution bypasses from financial scripts`
+   - Auditou `scripts/testCanaryTrade.ts`, `scripts/rescueJup.ts` e `scripts/purgeOrphanToken.ts`.
+   - Substituiu todas as coerções `Number(bigint)` por `safeBigIntToNumber`.
+   - Exigiu validação de custódia canônica via `assertCanonicalAtaCustody`.
+   - Envolveu saídas no `financialExitSafetyGuard.acquireExitLock` com liberação segura em `finally`.
+   - Validou pouso on-chain conclusivo da assinatura exata antes de relatar sucesso.
+
+9. **Commit R2-9 (`93b922d`):** `test(audit): add second-round adversarial regressions`
+   - **FASE 16 (Proveniência P2-02):** Desacoplou `HistoricalReplayEngine.calculateMetrics` de `expected.json`; adicionou teste de adulteração em memória comprovando que os fatos permanecem inalterados e falham a asserção.
+   - **FASE 17 (Reinício com UNKNOWN):** Teste de reinício com attempt UNKNOWN no PostgreSQL durável sobrevivendo ao boot fence e bloqueando vendas no guardião.
+   - **FASE 18 (Imunidade a Transações de Terceiros):** Teste comprovando que transferências, airdrops e outros swaps na mesma carteira não são atribuídos à tentativa em reconciliação exata.
+   - **FASE 19 (Integração Ponta a Ponta):** Ciclo completo de segurança (Lock -> Gate Reservation -> Execução Mock -> Reconciliação Exata -> Aplicação Atômica CAS -> APPLIED).
+
+10. **Commit R2-10:** `docs(audit): close re-audit blockers and list v2.2-only limitations`
+    - Documentação completa da missão V2.3-R2, fechamento dos blockers e matriz final.
 
 ---
 
-## 4. BLOQUEADORES REMANESCENTES PARA CUTOVER V2.2
+## 4. LIMITAÇÕES IN-PROCESS & BLOQUEADORES EXCLUSIVOS PARA V2.2
 
-A V2.3-R corrigiu com sucesso todos os riscos do caminho utilizável e blindou os contratos de shadow. No entanto, para autorizar a **promoção da V2.2 para autoridade live primária**, os seguintes bloqueadores arquiteturais permanecem e devem ser respeitados:
+A Missão V2.3-R2 blindou rigorosamente todos os caminhos do runtime single-process. No entanto, para autorizar o **cutover da V2.2** e tornar o Decision Journal a autoridade primária de trading, as seguintes limitações estruturais permanecem como **V2.2 Cutover Blockers**:
 
-1. **SingleFinancialWriter (Serialização Global Multi-Processo):**
-   - *Status Atual:* Mitigação in-process implementada via `DispatchReservationManager` e `FinancialExitSafetyGuard`.
-   - *Bloqueador:* Se múltiplos processos ou workers concorrentes operarem a mesma carteira sem fila única serializada (`SingleFinancialWriter`), há risco de colisão de nonce/blockhash em broadcasts paralelos.
-2. **Desacoplamento Completo do Monitor de Saída:**
-   - *Status Atual:* Monitor e executor residem no mesmo runtime monolítico (`src/index.ts`).
-   - *Bloqueador:* A transição para V2.2 exige isolar a tomada de decisão de saída da rotina de broadcast e scanner de mercado.
-3. **Streaming Contínuo de Saldo On-Chain (Yellowstone / Geyser / WebSocket):**
-   - *Status Atual:* Reconciliação pontual sob demanda (`reconcilePositionCustody`).
-   - *Bloqueador:* Detecção passiva sub-segundo de queima (*burn*) ou transferências externas antes da cotação de venda requer stream de eventos de contas token.
+1. **`SingleFinancialWriter` (Escopo Exclusivo V2.2):**
+   - *Limitação Documentada:* `FinancialExitSafetyGuard` e `DispatchReservationManager` operam estritamente em nível de processo (`IN_PROCESS_ONLY`).
+   - *Risco em Multi-Instância:* Se múltiplos containers ou pods executarem vendas concorrentes para a mesma carteira Solana sem o componente `SingleFinancialWriter`, colisões de RPC, nonces e blockhashes podem ocorrer.
+   - *Decisão de Contenção:* O runtime atual DEVE ser operado estritamente como single-instance até que o `SingleFinancialWriter` com lock distribuído seja construído na fase V2.2.
+
+2. **Desacoplamento do Monitor de Saída:**
+   - *Limitação Documentada:* O monitor de PnL e o executor de swaps compartilham o mesmo loop em `src/index.ts`.
+   - *Decisão de Contenção:* O monitor permanece em modo observador/shadow sem autoridade decisória autônoma desvinculada das travas de Sistema 1/Sistema 2.
+
+3. **Streaming Contínuo de Custódia (Yellowstone / Geyser):**
+   - *Limitação Documentada:* O saldo da conta de token é auditado on-demand no pré-send (`reconcilePositionCustody`).
+   - *Decisão de Contenção:* Modificações externas de custódia requerem reconciliação antes de novas ordens, sem polling de alta frequência até a integração de gRPC/WebSocket na V2.2.
 
 ---
 
-## 5. VERIFICAÇÃO DOS CRITÉRIOS DE SAÍDA
+## 5. VERIFICAÇÃO DOS CRITÉRIOS DE SAÍDA DA MISSÃO V2.3-R2
 
 - [x] `npm run build` = **PASS** (Zero erros de compilação TypeScript)
-- [x] `npm test` = **PASS** (614/614 testes passando)
-- [x] `npm run test:postgres` = **PASS** (10/10 testes em banco real)
-- [x] `panic` não remove posição antes de confirmação
-- [x] `panicAll` não limpa posições antecipadamente
-- [x] `UNKNOWN` sobrevive a restart via `rehydrateDurableExitDebtsOnBoot`
-- [x] `manual liquidation` respeita dívida e bloqueia execução
-- [x] `provider SUCCESS` não aplica efeito sem reconciliação on-chain suficiente
-- [x] `actual fill` determina mutação financeira
-- [x] `atomic amounts` não usam Number inseguro
-- [x] `PREPARED` assinado não pode sofrer supersede
-- [x] `CONFIRMED` não pode ser reclamado para reenvio
-- [x] `expectedEpoch` é obrigatório para mutações de worker
-- [x] Mesmo fill on-chain não aplica duas vezes (deduplicação por assinatura)
-- [x] `Journal` + `Position` aplicados na mesma transação atômica (`applyConfirmedFillAtomically`)
-- [x] Novo saldo deriva estritamente do efeito financeiro
-- [x] Flags de configuração inválidas são rejeitadas em fail-closed
-- [x] Replay histórico deriva fatos exclusivamente de `transactions.json`
-- [x] Nenhum novo P0 conhecido permanece.
+- [x] `npm test` = **PASS** (648/648 testes passando, 0 skips, 0 falhas)
+- [x] `npm run test:postgres` = **PASS** (22/22 testes passando contra PostgreSQL 16.15 físico)
+- [x] `panic` não remove posição antes de confirmação econômica comprovada
+- [x] `panicAll` não limpa posições antecipadamente e avalia cada ativo individualmente
+- [x] `UNKNOWN` sobrevive a reinício via boot fence e reidratação de dívida no PostgreSQL
+- [x] `manual liquidation` respeita dívida persistida e bloqueia execução
+- [x] `provider SUCCESS` (HTTP 200) não aplica efeito financeiro sem confirmação on-chain conclusiva
+- [x] `actual fill` determina a mutação financeira (débito real on-chain)
+- [x] `atomic amounts` não utilizam coerções inseguras de `Number(bigint)` em caminhos críticos ou scripts
+- [x] `PREPARED` assinado não pode sofrer supersede sem validação de attempts vivas
+- [x] `CONFIRMED` não pode ser reclamado por workers mesmo com lease expirado
+- [x] `expectedEpoch` é obrigatório para mutações de worker no journal
+- [x] Mesmo fill on-chain não pode ser aplicado duas vezes (deduplicação estrita por assinatura)
+- [x] `Journal` e `Position` aplicados na mesma transação atômica (`applyConfirmedFillAtomically`) com rollback total
+- [x] Saldo final não pode ser residual positivo se `isFinal: true` (`InvalidFinalFillResidualError`)
+- [x] Identidade econômica é validada entre Intent, Attempt, Fill e Position
+- [x] Flags de ambiente não-exatas causam fail-closed imediato (`parseStrictBooleanEnv`)
+- [x] Replay histórico calcula fatos exclusivamente a partir de `transactions.json`
+- [x] Reconciliador de UNKNOWN opera exclusivamente pela assinatura exata da tentativa
+- [x] Transações de terceiros na mesma carteira são imunes e não confundem o reconciliador
 
 ---
 
 ## 6. DIRETIVA DE CONCLUSÃO & STOP
 
-A missão V2.3-R está formalmente concluída.
-Conforme as diretrizes estritas da governança:
+A remediação adversarial da segunda rodada da auditoria (Missão V2.3-R2) está **rigorosamente concluída**.
+
+Conforme as diretrizes estritas da governança e dos auditores:
 - **NÃO INICIAR V2.2**
 - **NÃO PUSHAR PARA ORIGIN**
 - **NÃO FAZER MERGE**
 - **NÃO DEPLOYAR**
 - **PARE.**
 
-O repositório local está pronto para a segunda rodada da auditoria independente *read-only*.
+O repositório local na branch `nexus-v2-observability` está íntegro, seguro, fail-closed e pronto para a **3ª rodada de auditoria independente read-only**.
