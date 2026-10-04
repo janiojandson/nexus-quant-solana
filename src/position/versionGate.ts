@@ -9,13 +9,21 @@
  * 5. Intent superseding for early states (CREATED, CLAIMED, PREPARED) vs MUST_RECONCILE for (SIGNED, SUBMITTED, UNKNOWN)
  */
 
+import { randomUUID } from 'crypto';
 import { PositionVersion } from '../types/telemetry.js';
-import { PositionSnapshot } from './types.js';
+import { PositionSnapshot, ReconciliationEvidenceMetadata, takePositionSnapshot } from './types.js';
 import { BoundExecutionQuote } from './quoteBinding.js';
 import { ExitIntent, ExitIntentStatus, ExecutionAttempt, hasPotentiallyLiveChainAttempt } from '../journal/types.js';
+import { validateFeatureFlagMatrix } from './shadowPosition.js';
+import { IPositionRepository } from './repository.js';
+import { reconcilePositionCustody } from './custody.js';
 
 export function isPositionVersionGateEnabled(): boolean {
-  return process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED === 'true';
+  if (process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED !== 'true') {
+    return false;
+  }
+  const matrix = validateFeatureFlagMatrix();
+  return matrix.positionVersionGate;
 }
 
 export type VersionGateDecision =
@@ -105,6 +113,239 @@ export function evaluatePreSendVersionGate(params: {
   }
 
   return { allowed: true, reason: 'VERSION_AND_AMOUNT_MATCH' };
+}
+
+export class DispatchReservationConflictError extends Error {
+  public readonly positionId: string;
+  public readonly activeVersion: PositionVersion;
+  public readonly activeIntentId?: string;
+
+  constructor(positionId: string, activeVersion: PositionVersion, activeIntentId: string | undefined, message: string) {
+    super(message);
+    this.name = 'DispatchReservationConflictError';
+    this.positionId = positionId;
+    this.activeVersion = activeVersion;
+    this.activeIntentId = activeIntentId;
+  }
+}
+
+export interface DispatchReservationReceipt {
+  readonly reservationToken: string;
+  readonly positionId: string;
+  readonly expectedVersion: PositionVersion;
+  readonly reservedAtWallMs: number;
+  readonly intentId?: string;
+  release: () => void;
+}
+
+export interface ActiveDispatchReservation {
+  readonly reservationToken: string;
+  readonly positionId: string;
+  readonly expectedVersion: PositionVersion;
+  readonly reservedAtWallMs: number;
+  readonly intentId?: string;
+  readonly timeoutMs: number;
+}
+
+/**
+ * Requirement (P0-01 TOCTOU):
+ * Manages dispatch reservations between pre-send gate evaluation and irreversible broadcast.
+ *
+ * TOCTOU Mitigation Notice:
+ * In-process TOCTOU between gate evaluation and broadcast is mitigated by DispatchReservationManager.
+ * However, true cross-process / multi-worker fencing requires the SingleFinancialWriter architecture (V2.2).
+ * Until V2.2 monitor decoupling is complete, this gate remains NOT SAFE FOR UNCOORDINATED MULTI-PROCESS PRODUCTION.
+ */
+export class DispatchReservationManager {
+  private activeReservations = new Map<string, ActiveDispatchReservation>();
+  private defaultTimeoutMs: number;
+
+  constructor(defaultTimeoutMs: number = 15_000) {
+    this.defaultTimeoutMs = defaultTimeoutMs;
+  }
+
+  public reserve(params: {
+    positionId: string;
+    expectedVersion: PositionVersion;
+    intentId?: string;
+    timeoutMs?: number;
+  }): DispatchReservationReceipt {
+    const now = Date.now();
+    const timeoutMs = params.timeoutMs ?? this.defaultTimeoutMs;
+    const existing = this.activeReservations.get(params.positionId);
+
+    if (existing) {
+      if (now - existing.reservedAtWallMs < existing.timeoutMs) {
+        throw new DispatchReservationConflictError(
+          params.positionId,
+          existing.expectedVersion,
+          existing.intentId,
+          `Concurrent dispatch reservation active for position ${params.positionId} (intent=${existing.intentId || 'none'}, version=${existing.expectedVersion}). Irreversible broadcast blocked to prevent TOCTOU race.`
+        );
+      }
+      // Expired reservation - remove it
+      this.activeReservations.delete(params.positionId);
+    }
+
+    const token = randomUUID();
+    const reservation: ActiveDispatchReservation = {
+      reservationToken: token,
+      positionId: params.positionId,
+      expectedVersion: params.expectedVersion,
+      reservedAtWallMs: now,
+      intentId: params.intentId,
+      timeoutMs
+    };
+
+    this.activeReservations.set(params.positionId, reservation);
+
+    return {
+      reservationToken: token,
+      positionId: params.positionId,
+      expectedVersion: params.expectedVersion,
+      reservedAtWallMs: now,
+      intentId: params.intentId,
+      release: () => {
+        const cur = this.activeReservations.get(params.positionId);
+        if (cur && cur.reservationToken === token) {
+          this.activeReservations.delete(params.positionId);
+        }
+      }
+    };
+  }
+
+  public getActiveReservation(positionId: string): ActiveDispatchReservation | null {
+    const res = this.activeReservations.get(positionId);
+    if (!res) return null;
+    if (Date.now() - res.reservedAtWallMs >= res.timeoutMs) {
+      this.activeReservations.delete(positionId);
+      return null;
+    }
+    return res;
+  }
+
+  public release(positionId: string, token: string): void {
+    const cur = this.activeReservations.get(positionId);
+    if (cur && cur.reservationToken === token) {
+      this.activeReservations.delete(positionId);
+    }
+  }
+
+  public clearAll(): void {
+    this.activeReservations.clear();
+  }
+}
+
+export const defaultDispatchReservationManager = new DispatchReservationManager();
+
+export type ReservedVersionGateDecision =
+  | {
+      allowed: true;
+      reason: 'VERSION_AND_AMOUNT_MATCH';
+      receipt: DispatchReservationReceipt;
+    }
+  | {
+      allowed: false;
+      code:
+        | 'QUOTE_STALE_FOR_POSITION'
+        | 'QUOTE_AMOUNT_MISMATCH'
+        | 'POSITION_RECONCILIATION_REQUIRED'
+        | 'DISPATCH_RESERVATION_CONFLICT';
+      reason: string;
+      expectedVersion?: PositionVersion;
+      currentVersion?: PositionVersion;
+      expectedAmount?: bigint;
+      currentAmount?: bigint;
+    };
+
+export function evaluateAndReservePreSendGate(params: {
+  currentPosition: PositionSnapshot;
+  boundQuote: BoundExecutionQuote;
+  intentPolicy: 'FULL_REMAINDER' | 'PARTIAL_50' | 'CUSTOM';
+  intendedAmountAtomic?: bigint;
+  intentId?: string;
+  timeoutMs?: number;
+  reservationManager?: DispatchReservationManager;
+}): ReservedVersionGateDecision {
+  const decision = evaluatePreSendVersionGate(params);
+  if (!decision.allowed) {
+    return decision;
+  }
+
+  const mgr = params.reservationManager ?? defaultDispatchReservationManager;
+  try {
+    const receipt = mgr.reserve({
+      positionId: params.currentPosition.positionId,
+      expectedVersion: params.currentPosition.positionVersion,
+      intentId: params.intentId,
+      timeoutMs: params.timeoutMs
+    });
+    return {
+      allowed: true,
+      reason: 'VERSION_AND_AMOUNT_MATCH',
+      receipt
+    };
+  } catch (err: any) {
+    if (err instanceof DispatchReservationConflictError) {
+      return {
+        allowed: false,
+        code: 'DISPATCH_RESERVATION_CONFLICT',
+        reason: err.message,
+        expectedVersion: params.boundQuote.positionVersion,
+        currentVersion: params.currentPosition.positionVersion
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Reconciles custody balance against on-chain evidence before evaluating pre-send gate (P1-09, P0-01).
+ * If on-chain balance diverged (e.g. external transfer/burn), bumps position version,
+ * causing stale quote revalidation to fail-closed.
+ */
+export async function revalidateCustodyAndEvaluateGate(params: {
+  positionRepo: IPositionRepository;
+  positionId: string;
+  boundQuote: BoundExecutionQuote;
+  intentPolicy: 'FULL_REMAINDER' | 'PARTIAL_50' | 'CUSTOM';
+  observedAtaBalanceAtomic?: bigint;
+  evidence?: ReconciliationEvidenceMetadata;
+  intendedAmountAtomic?: bigint;
+  intentId?: string;
+  timeoutMs?: number;
+  reservationManager?: DispatchReservationManager;
+}): Promise<ReservedVersionGateDecision> {
+  const currentPos = await params.positionRepo.getPosition(params.positionId);
+  if (!currentPos) {
+    throw new Error(`Position ${params.positionId} not found in repository`);
+  }
+
+  // Reconcile custody if external balance is observed
+  if (params.observedAtaBalanceAtomic !== undefined && params.evidence !== undefined) {
+    await reconcilePositionCustody({
+      positionRepo: params.positionRepo,
+      positionId: params.positionId,
+      expectedVersion: currentPos.positionVersion,
+      observedAtaBalanceAtomic: params.observedAtaBalanceAtomic,
+      evidence: params.evidence
+    });
+  }
+
+  const freshPos = await params.positionRepo.getPosition(params.positionId);
+  if (!freshPos) {
+    throw new Error(`Position ${params.positionId} disappeared after custody reconciliation`);
+  }
+
+  return evaluateAndReservePreSendGate({
+    currentPosition: takePositionSnapshot(freshPos),
+    boundQuote: params.boundQuote,
+    intentPolicy: params.intentPolicy,
+    intendedAmountAtomic: params.intendedAmountAtomic,
+    intentId: params.intentId,
+    timeoutMs: params.timeoutMs,
+    reservationManager: params.reservationManager
+  });
 }
 
 export type IntentSupersedeAction =

@@ -18,7 +18,6 @@ import { PositionVersion } from '../types/telemetry.js';
 import { DurablePosition, PositionStatus } from './types.js';
 import { IPositionRepository } from './repository.js';
 import { isShadowJournalEnabled } from '../journal/shadowJournal.js';
-import { isPositionVersionGateEnabled } from './versionGate.js';
 
 export function isPositionShadowEnabled(): boolean {
   return process.env.NEXUS_V2_POSITION_SHADOW_ENABLED === 'true';
@@ -34,27 +33,59 @@ export function getShadowPositionRepository(): IPositionRepository | null {
   return activeShadowPositionRepository;
 }
 
+export class InvalidFeatureFlagCombinationError extends Error {
+  public readonly code: string;
+
+  constructor(code: string, reason: string) {
+    super(`Invalid feature flag combination [${code}]: ${reason}`);
+    this.name = 'InvalidFeatureFlagCombinationError';
+    this.code = code;
+  }
+}
+
+export const VALID_FLAG_COMBINATIONS: ReadonlySet<string> = new Set(['000', '100', '110', '111']);
+
 export interface FeatureFlagMatrix {
   readonly journalShadow: boolean;
   readonly positionShadow: boolean;
   readonly positionVersionGate: boolean;
-  readonly code: '000' | '100' | '110' | '111' | string;
+  readonly code: '000' | '100' | '110' | '111';
   readonly description: string;
 }
 
 /**
- * Returns the current configuration matrix state:
- * - 000: legacy puro
- * - 100: journal shadow
- * - 110: journal + position shadow
- * - 111: teste local com version gate
+ * Requirement: Feature Flag Matrix Validation (P2-01)
+ * Evaluates and strictly validates the 8 possible states:
+ * - 000: legacy puro (VALID)
+ * - 001: gate without journal & position (INVALID - fails closed)
+ * - 010: position shadow without journal (INVALID - fails closed)
+ * - 011: position shadow + gate without journal (INVALID - fails closed)
+ * - 100: journal shadow (VALID)
+ * - 101: gate without position shadow (INVALID - fails closed)
+ * - 110: journal + position shadow (VALID)
+ * - 111: local test with version gate active (VALID)
  */
-export function getFeatureFlagMatrix(): FeatureFlagMatrix {
+export function validateFeatureFlagMatrix(): FeatureFlagMatrix {
   const j = isShadowJournalEnabled();
   const p = isPositionShadowEnabled();
-  const g = isPositionVersionGateEnabled();
+  const g = process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED === 'true';
 
   const code = `${j ? '1' : '0'}${p ? '1' : '0'}${g ? '1' : '0'}`;
+
+  if (!VALID_FLAG_COMBINATIONS.has(code)) {
+    let reason = 'Unrecognized or unsafe configuration combination.';
+    if (code === '001') {
+      reason = 'Position Version Gate (G=1) requires both Journal Shadow (J=1) and Position Shadow (P=1).';
+    } else if (code === '010') {
+      reason = 'Position Shadow (P=1) requires Journal Shadow (J=1) for intent and fill event sourcing.';
+    } else if (code === '011') {
+      reason = 'Position Shadow (P=1) and Version Gate (G=1) require Journal Shadow (J=1).';
+    } else if (code === '101') {
+      reason = 'Position Version Gate (G=1) requires Position Shadow (P=1) to verify durable position versions.';
+    }
+    throw new InvalidFeatureFlagCombinationError(code, reason);
+  }
+
   let description = 'Configuração Customizada';
   if (code === '000') description = 'Legacy Puro';
   else if (code === '100') description = 'Journal Shadow';
@@ -65,9 +96,16 @@ export function getFeatureFlagMatrix(): FeatureFlagMatrix {
     journalShadow: j,
     positionShadow: p,
     positionVersionGate: g,
-    code,
+    code: code as '000' | '100' | '110' | '111',
     description
   };
+}
+
+/**
+ * Returns the current configuration matrix state after validating consistency.
+ */
+export function getFeatureFlagMatrix(): FeatureFlagMatrix {
+  return validateFeatureFlagMatrix();
 }
 
 export interface PositionComparisonMismatch {

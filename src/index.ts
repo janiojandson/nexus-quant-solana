@@ -63,7 +63,10 @@ import {
   shadowOnLegacyPositionUpdate,
   setShadowRepository
 } from './journal/shadowHooks.js';
-import { setShadowPositionRepository } from './position/shadowPosition.js';
+import {
+  setShadowPositionRepository,
+  validateFeatureFlagMatrix
+} from './position/shadowPosition.js';
 
 
 dotenv.config();
@@ -3158,8 +3161,10 @@ async function rehydrateQuarantineFromDbOnBoot() {
 }
 
 async function main() {
+  const flagMatrix = validateFeatureFlagMatrix();
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');
+  console.log(`🧭 [V2 Feature Matrix] Code: ${flagMatrix.code} | ${flagMatrix.description}`);
   console.log(`🪙 Carteira Phantom Oficial: ${OFFICIAL_PHANTOM_WALLET}`);
   console.log(
     IS_DRY_RUN

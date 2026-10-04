@@ -283,11 +283,30 @@ test('Pre-Send Gate (C3) - Requisito 10: Reconciliation Required bloqueia irreve
 });
 
 test('Pre-Send Gate (C3) - Requisito 26 & 27: Feature flag NEXUS_V2_POSITION_VERSION_GATE_ENABLED', () => {
-  delete process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED;
-  assert.strictEqual(isPositionVersionGateEnabled(), false, 'Padrão deve ser FALSE');
+  const origJ = process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED;
+  const origP = process.env.NEXUS_V2_POSITION_SHADOW_ENABLED;
+  const origG = process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED;
 
-  process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED = 'true';
-  assert.strictEqual(isPositionVersionGateEnabled(), true);
+  try {
+    delete process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED;
+    delete process.env.NEXUS_V2_POSITION_SHADOW_ENABLED;
+    delete process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED;
+    assert.strictEqual(isPositionVersionGateEnabled(), false, 'Padrão deve ser FALSE');
 
-  delete process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED;
+    // 001 alone fails closed with InvalidFeatureFlagCombinationError
+    process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED = 'true';
+    assert.throws(() => isPositionVersionGateEnabled(), /Invalid feature flag combination \[001\]/);
+
+    // 111 (all three enabled) succeeds
+    process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED = 'true';
+    process.env.NEXUS_V2_POSITION_SHADOW_ENABLED = 'true';
+    assert.strictEqual(isPositionVersionGateEnabled(), true);
+  } finally {
+    if (origJ !== undefined) process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED = origJ;
+    else delete process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED;
+    if (origP !== undefined) process.env.NEXUS_V2_POSITION_SHADOW_ENABLED = origP;
+    else delete process.env.NEXUS_V2_POSITION_SHADOW_ENABLED;
+    if (origG !== undefined) process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED = origG;
+    else delete process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED;
+  }
 });
