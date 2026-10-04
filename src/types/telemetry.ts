@@ -324,13 +324,47 @@ export interface ErrorClassification {
 // 9. TELEMETRY SPAN (BOUNDED / DROP-TOLERANT)
 // ==========================================
 
+export type SolanaRpcProviderAlias =
+  | 'HELIUS'
+  | 'QUICKNODE'
+  | 'SOLANA_PUBLIC'
+  | 'CUSTOM_PRIVATE'
+  | 'UNKNOWN';
+
+export interface SolanaRpcSpanMetadata {
+  readonly providerAlias: SolanaRpcProviderAlias;
+  readonly method: string;
+  readonly commitment?: string;
+  readonly sourceSlot?: number;
+  readonly success: boolean;
+  readonly timedOut: boolean;
+  readonly errorClass?: string;
+  readonly customProgramError?: {
+    readonly programId?: string;
+    readonly customCode?: number | string;
+    readonly instructionIndex?: number;
+    readonly logsDigest?: string;
+    readonly classification?: string;
+  };
+  readonly attemptNumber?: number;
+  readonly timeoutConfiguredMs?: number;
+  readonly elapsedMs?: number;
+  readonly rpcStartedMonoNs?: string;
+  readonly rpcCompletedMonoNs?: string;
+  readonly tradeId?: TradeId;
+  readonly positionId?: PositionId;
+  readonly attemptId?: string;
+  readonly requestId?: string;
+}
+
 export interface TelemetrySpan {
   readonly id: string;
   readonly traceId: string;
   readonly spanName: string;
-  readonly providerAlias?: 'HELIUS' | 'QUICKNODE' | 'SOLANA_PUBLIC' | 'JUPITER' | 'CUSTOM';
+  readonly providerAlias?: SolanaRpcProviderAlias | 'JUPITER' | 'CUSTOM';
   readonly durationMs: number;
   readonly status: 'SUCCESS' | 'ERROR' | 'DROPPED';
   readonly metadata?: Record<string, unknown>;
   readonly createdAtWallMs: WallMs;
 }
+

@@ -19,6 +19,7 @@ export class TelemetryRingBuffer {
   private readonly capacity: number;
   private buffer: TelemetrySpan[];
   private droppedCount: number = 0;
+  private telemetryInternalErrorCount: number = 0;
 
   constructor(options: TelemetryBufferOptions = {}) {
     this.capacity = options.capacity && options.capacity > 0 ? options.capacity : 5000;
@@ -29,6 +30,7 @@ export class TelemetryRingBuffer {
    * Pushes a new telemetry span into the ring buffer.
    * If capacity is reached, drops the oldest span (FIFO) and increments droppedCount.
    * Wrapped in try/catch: guarantees zero exceptions escape to the caller.
+   * Increments telemetryInternalErrorCount if an internal failure occurs.
    */
   public push(span: TelemetrySpan): boolean {
     try {
@@ -48,6 +50,7 @@ export class TelemetryRingBuffer {
       return true;
     } catch {
       // Non-blocking & fault-tolerant: never allow telemetry to crash business logic
+      this.telemetryInternalErrorCount++;
       return false;
     }
   }
@@ -81,6 +84,27 @@ export class TelemetryRingBuffer {
   }
 
   /**
+   * Returns the total count of internal errors encountered in telemetry handling.
+   */
+  public getTelemetryInternalErrorCount(): number {
+    return this.telemetryInternalErrorCount;
+  }
+
+  /**
+   * Resets the internal error counter.
+   */
+  public resetTelemetryInternalErrorCount(): void {
+    this.telemetryInternalErrorCount = 0;
+  }
+
+  /**
+   * Explicitly records an internal telemetry error without throwing or recursing.
+   */
+  public recordInternalError(): void {
+    this.telemetryInternalErrorCount++;
+  }
+
+  /**
    * Drains and returns all spans currently in the buffer, resetting it.
    */
   public flush(): TelemetrySpan[] {
@@ -90,18 +114,32 @@ export class TelemetryRingBuffer {
       return items;
     } catch {
       this.buffer = [];
+      this.telemetryInternalErrorCount++;
       return [];
     }
   }
 
   /**
-   * Clears the buffer and resets dropped count.
+   * Clears the buffer and resets dropped and error counts.
    */
   public clear(): void {
     this.buffer = [];
     this.droppedCount = 0;
+    this.telemetryInternalErrorCount = 0;
   }
 }
 
 // Global default singleton for process-wide non-critical spans
 export const globalTelemetryBuffer = new TelemetryRingBuffer({ capacity: 5000 });
+
+export function getGlobalTelemetryInternalErrorCount(): number {
+  return globalTelemetryBuffer.getTelemetryInternalErrorCount();
+}
+
+export function resetGlobalTelemetryInternalErrorCount(): void {
+  globalTelemetryBuffer.resetTelemetryInternalErrorCount();
+}
+
+export function recordGlobalTelemetryInternalError(): void {
+  globalTelemetryBuffer.recordInternalError();
+}

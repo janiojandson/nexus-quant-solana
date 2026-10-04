@@ -1,9 +1,207 @@
 import { Keypair, Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
+import {
+  nowMonotonicNs,
+  nowWallMs,
+  diffMonotonicMs,
+  TelemetrySpan,
+  SolanaRpcProviderAlias,
+  SolanaRpcSpanMetadata,
+  TradeId,
+  PositionId
+} from '../types/telemetry.js';
+import {
+  globalTelemetryBuffer,
+  recordGlobalTelemetryInternalError
+} from '../telemetry/telemetryBuffer.js';
+import {
+  sanitizeLogMessage,
+  sanitizeTelemetryPayload
+} from '../telemetry/redaction.js';
+
+export { SolanaRpcProviderAlias };
+
+export function resolveRpcProviderAlias(rpcUrl?: string): SolanaRpcProviderAlias {
+  if (!rpcUrl || typeof rpcUrl !== 'string' || rpcUrl.trim() === '') {
+    return 'SOLANA_PUBLIC';
+  }
+  const trimmed = rpcUrl.trim();
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'UNKNOWN';
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes('helius')) {
+      return 'HELIUS';
+    }
+    if (host.includes('quicknode') || host.includes('quiknode')) {
+      return 'QUICKNODE';
+    }
+    if (
+      host === 'api.mainnet-beta.solana.com' ||
+      host === 'api.devnet.solana.com' ||
+      host === 'api.testnet.solana.com' ||
+      host.endsWith('.solana.com') ||
+      host === 'solana.com'
+    ) {
+      return 'SOLANA_PUBLIC';
+    }
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host.endsWith('.internal') ||
+      host.endsWith('.local') ||
+      host.includes('private') ||
+      host.includes('custom') ||
+      parsed.protocol === 'http:' ||
+      parsed.protocol === 'https:'
+    ) {
+      return 'CUSTOM_PRIVATE';
+    }
+    return 'UNKNOWN';
+  } catch {
+    const lower = trimmed.toLowerCase();
+    if (lower.includes('helius')) return 'HELIUS';
+    if (lower.includes('quicknode') || lower.includes('quiknode')) return 'QUICKNODE';
+    if (lower.includes('solana.com')) return 'SOLANA_PUBLIC';
+    return 'UNKNOWN';
+  }
+}
+
+export function parseRpcError(err: any): {
+  timedOut: boolean;
+  errorClass: string;
+  customProgramError?: {
+    programId?: string;
+    customCode?: number | string;
+    instructionIndex?: number;
+    logsDigest?: string;
+    classification?: string;
+  };
+} {
+  const message = String(err?.message || err || '');
+  const name = String(err?.name || err?.constructor?.name || '');
+
+  const timedOut =
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    err?.code === 'ETIMEDOUT' ||
+    /timeout|timed\s*out/i.test(message);
+
+  const errorClass = timedOut
+    ? 'TimeoutError'
+    : name || (err?.code ? `RpcError:${err.code}` : 'RpcError');
+
+  let customCode: number | string | undefined = err?.customProgramError?.customCode;
+  let instructionIndex: number | undefined = err?.customProgramError?.instructionIndex;
+  let programId: string | undefined = err?.customProgramError?.programId || err?.programId;
+
+  // 1. InstructionError array: [index, { Custom: code }]
+  if (Array.isArray(err?.instructionError)) {
+    if (typeof err.instructionError[0] === 'number') {
+      instructionIndex = err.instructionError[0];
+    }
+    const detail = err.instructionError[1];
+    if (detail && typeof detail === 'object' && 'Custom' in detail) {
+      customCode = detail.Custom;
+    }
+  }
+
+  // 2. Custom code from message regex
+  if (customCode === undefined) {
+    const customMatch = message.match(/custom program error:\s*(0x[0-9a-fA-F]+|\d+)/i);
+    if (customMatch) {
+      const codeStr = customMatch[1];
+      customCode = codeStr.startsWith('0x') || codeStr.startsWith('0X')
+        ? parseInt(codeStr, 16)
+        : parseInt(codeStr, 10);
+    }
+  }
+
+  // 3. Instruction index from message regex
+  if (instructionIndex === undefined) {
+    const ixMatch = message.match(/instruction\s+(\d+)/i);
+    if (ixMatch) {
+      instructionIndex = parseInt(ixMatch[1], 10);
+    }
+  }
+
+  // 4. Logs inspection for programId and logsDigest
+  const rawLogs = err?.logs || (Array.isArray(err?.transactionLogs) ? err.transactionLogs : undefined);
+  let logsDigest: string | undefined;
+
+  if (Array.isArray(rawLogs) && rawLogs.length > 0) {
+    const joined = rawLogs
+      .filter((l): l is string => typeof l === 'string')
+      .slice(0, 3)
+      .join(' | ');
+    const sanitized = sanitizeLogMessage(joined);
+    logsDigest = sanitized.length > 200 ? sanitized.slice(0, 197) + '...' : sanitized;
+
+    if (!programId) {
+      for (const log of rawLogs) {
+        if (typeof log !== 'string') continue;
+        const failedMatch = log.match(/Program\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s+failed/i);
+        if (failedMatch) {
+          programId = failedMatch[1];
+          break;
+        }
+        const invokeMatch = log.match(/Program\s+([1-9A-HJ-NP-Za-km-z]{32,44})\s+invoke/i);
+        if (invokeMatch && !programId) {
+          programId = invokeMatch[1];
+        }
+      }
+    }
+  } else if (message.length > 0) {
+    const sanitized = sanitizeLogMessage(message);
+    logsDigest = sanitized.length > 200 ? sanitized.slice(0, 197) + '...' : sanitized;
+  }
+
+  if (!logsDigest && err?.customProgramError?.logsDigest) {
+    logsDigest = sanitizeLogMessage(String(err.customProgramError.logsDigest));
+  }
+
+  let customProgramError: {
+    programId?: string;
+    customCode?: number | string;
+    instructionIndex?: number;
+    logsDigest?: string;
+    classification?: string;
+  } | undefined = undefined;
+
+  if (customCode !== undefined || programId !== undefined) {
+    let classification = 'UNKNOWN';
+    if (!programId) {
+      classification = 'UNKNOWN';
+    } else {
+      if (Number(customCode) === 6014 || customCode === '0x177e' || customCode === '0x177E') {
+        classification = 'SLIPPAGE_EXCEEDED';
+      } else {
+        classification = 'CUSTOM_PROGRAM_ERROR';
+      }
+    }
+
+    customProgramError = {
+      programId: programId ? sanitizeLogMessage(programId) : undefined,
+      customCode,
+      instructionIndex,
+      logsDigest,
+      classification
+    };
+  }
+
+  return {
+    timedOut,
+    errorClass,
+    customProgramError
+  };
+}
 
 export interface WalletServiceConfig {
   secretKeyRaw: string;
   rpcUrl?: string;
+  providerAlias?: SolanaRpcProviderAlias;
 }
 
 export interface TradeValidationResult {
@@ -15,13 +213,100 @@ export interface TradeValidationResult {
 export class SolanaWalletService {
   private keypair: Keypair;
   private connection: Connection;
+  private readonly providerAlias: SolanaRpcProviderAlias;
   public static readonly MAX_TRADE_ALLOCATION_RATIO = 0.10; // Teto de 10%
   public static readonly MIN_GAS_RESERVE_SOL = 0.005; // Reserva intangível para taxas
 
   constructor(config: WalletServiceConfig) {
     this.keypair = this.parseKeypair(config.secretKeyRaw);
     this.connection = new Connection(config.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
+    this.providerAlias = config.providerAlias || resolveRpcProviderAlias(config.rpcUrl);
   }
+
+  public getProviderAlias(): SolanaRpcProviderAlias {
+    return this.providerAlias;
+  }
+
+  private async measureRpcCall<T>(
+    methodName: string,
+    callFn: () => Promise<T>,
+    options?: {
+      commitment?: string;
+      timeoutConfiguredMs?: number;
+      attemptNumber?: number;
+      traceId?: string;
+      tradeId?: TradeId;
+      positionId?: PositionId;
+      attemptId?: string;
+      requestId?: string;
+    }
+  ): Promise<T> {
+    const startMonoNs = nowMonotonicNs();
+    let rawResult: T;
+    let succeeded = false;
+    let callError: any = null;
+
+    try {
+      rawResult = await callFn();
+      succeeded = true;
+      return rawResult;
+    } catch (err: any) {
+      callError = err;
+      throw err;
+    } finally {
+      const endMonoNs = nowMonotonicNs();
+      try {
+        const durationMs = diffMonotonicMs(startMonoNs, endMonoNs);
+
+        let sourceSlot: number | undefined = undefined;
+        if (succeeded && rawResult !== undefined && rawResult !== null) {
+          if (typeof (rawResult as any)?.context?.slot === 'number') {
+            sourceSlot = (rawResult as any).context.slot;
+          } else if (typeof (rawResult as any)?.slot === 'number') {
+            sourceSlot = (rawResult as any).slot;
+          }
+        }
+
+        const parsedError = !succeeded ? parseRpcError(callError) : null;
+
+        const metadata: SolanaRpcSpanMetadata = {
+          providerAlias: this.providerAlias,
+          method: methodName,
+          commitment: options?.commitment,
+          sourceSlot,
+          success: succeeded,
+          timedOut: parsedError?.timedOut ?? false,
+          errorClass: succeeded ? undefined : parsedError?.errorClass,
+          customProgramError: succeeded ? undefined : parsedError?.customProgramError,
+          attemptNumber: options?.attemptNumber,
+          timeoutConfiguredMs: options?.timeoutConfiguredMs,
+          elapsedMs: durationMs,
+          rpcStartedMonoNs: startMonoNs.toString(),
+          rpcCompletedMonoNs: endMonoNs.toString(),
+          tradeId: options?.tradeId,
+          positionId: options?.positionId,
+          attemptId: options?.attemptId,
+          requestId: options?.requestId
+        };
+
+        const span: TelemetrySpan = {
+          id: `rpc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          traceId: options?.traceId || `trace_rpc_${Date.now()}`,
+          spanName: 'solana_rpc',
+          providerAlias: this.providerAlias,
+          durationMs,
+          status: succeeded ? 'SUCCESS' : 'ERROR',
+          metadata: sanitizeTelemetryPayload(metadata as unknown as Record<string, unknown>),
+          createdAtWallMs: nowWallMs()
+        };
+
+        globalTelemetryBuffer.push(span);
+      } catch {
+        recordGlobalTelemetryInternalError();
+      }
+    }
+  }
+
 
   private parseKeypair(raw: string): Keypair {
     const trimmed = (raw || '').trim();
@@ -65,9 +350,13 @@ export class SolanaWalletService {
     return this.connection;
   }
 
-  public async getBalanceSol(): Promise<number> {
+  public async getBalanceSol(context?: { traceId?: string }): Promise<number> {
     try {
-      const lamports = await this.connection.getBalance(this.keypair.publicKey);
+      const lamports = await this.measureRpcCall(
+        'getBalance',
+        () => this.connection.getBalance(this.keypair.publicKey),
+        { commitment: 'confirmed', traceId: context?.traceId }
+      );
       return lamports / LAMPORTS_PER_SOL;
     } catch {
       return 0;
@@ -81,13 +370,18 @@ export class SolanaWalletService {
    */
   public async getReceivedTokenDeltaAtomic(
     txSignature: string,
-    mintAddress: string
+    mintAddress: string,
+    context?: { traceId?: string; tradeId?: TradeId }
   ): Promise<string | null> {
     try {
-      const tx = await this.connection.getParsedTransaction(txSignature, {
-        commitment: 'confirmed',
-        maxSupportedTransactionVersion: 0
-      });
+      const tx = await this.measureRpcCall(
+        'getParsedTransaction',
+        () => this.connection.getParsedTransaction(txSignature, {
+          commitment: 'confirmed',
+          maxSupportedTransactionVersion: 0
+        }),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId }
+      );
       if (!tx?.meta) return null;
 
       const owner = this.keypair.publicKey.toBase58();
@@ -122,7 +416,8 @@ export class SolanaWalletService {
   public async findRecentTokenDeltaTransaction(
     mintAddress: string,
     sinceTimestampMs: number,
-    direction: 'IN' | 'OUT' | 'ANY' = 'ANY'
+    direction: 'IN' | 'OUT' | 'ANY' = 'ANY',
+    context?: { traceId?: string; tradeId?: TradeId }
   ): Promise<{
     signature: string;
     deltaAtomic: string;
@@ -132,20 +427,28 @@ export class SolanaWalletService {
   } | null> {
     try {
       const owner = this.keypair.publicKey.toBase58();
-      const signatures = await this.connection.getSignaturesForAddress(
-        this.keypair.publicKey,
-        { limit: 30 },
-        'confirmed'
+      const signatures = await this.measureRpcCall(
+        'getSignaturesForAddress',
+        () => this.connection.getSignaturesForAddress(
+          this.keypair.publicKey,
+          { limit: 30 },
+          'confirmed'
+        ),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId }
       );
 
-      for (const item of signatures) {
+      for (const item of (signatures || [])) {
         const blockTimeMs = Number(item.blockTime || 0) * 1000;
         if (blockTimeMs > 0 && blockTimeMs < sinceTimestampMs - 5_000) continue;
 
-        const tx = await this.connection.getParsedTransaction(item.signature, {
-          commitment: 'confirmed',
-          maxSupportedTransactionVersion: 0
-        });
+        const tx = await this.measureRpcCall(
+          'getParsedTransaction',
+          () => this.connection.getParsedTransaction(item.signature, {
+            commitment: 'confirmed',
+            maxSupportedTransactionVersion: 0
+          }),
+          { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId }
+        );
         if (!tx?.meta) continue;
 
         const sumForOwner = (balances: any[] | null | undefined): bigint => {
@@ -189,7 +492,7 @@ export class SolanaWalletService {
     }
   }
 
-  private async getParsedTokenAccountsForSupportedPrograms(): Promise<any[]> {
+  private async getParsedTokenAccountsForSupportedPrograms(context?: { traceId?: string }): Promise<any[]> {
     const programIds = [
       new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'), // SPL Token clássico
       new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb')  // Token-2022
@@ -198,11 +501,16 @@ export class SolanaWalletService {
     const accounts: any[] = [];
     for (const programId of programIds) {
       try {
-        const response = await this.connection.getParsedTokenAccountsByOwner(
-          this.keypair.publicKey,
-          { programId }
+        const response = await this.measureRpcCall(
+          'getParsedTokenAccountsByOwner',
+          () => this.connection.getParsedTokenAccountsByOwner(
+            this.keypair.publicKey,
+            { programId }
+          ),
+          { commitment: 'confirmed', traceId: context?.traceId }
         );
-        accounts.push(...response.value);
+        const items = Array.isArray(response) ? response : (response?.value || []);
+        accounts.push(...items);
       } catch (err: any) {
         console.warn(`⚠️ [Wallet] Falha ao consultar contas do programa ${programId.toBase58()}: ${err?.message || err}`);
       }
@@ -210,9 +518,9 @@ export class SolanaWalletService {
     return accounts;
   }
 
-  public async getSplTokenAccounts(): Promise<Array<{ mint: string; tokenAmount: number; atomicAmount: string; decimals: number; ataAddress: string }>> {
+  public async getSplTokenAccounts(context?: { traceId?: string }): Promise<Array<{ mint: string; tokenAmount: number; atomicAmount: string; decimals: number; ataAddress: string }>> {
     try {
-      const accounts = await this.getParsedTokenAccountsForSupportedPrograms();
+      const accounts = await this.getParsedTokenAccountsForSupportedPrograms(context);
       return accounts
         .map(a => {
           const info = a.account.data.parsed.info;
@@ -265,7 +573,10 @@ export class SolanaWalletService {
     };
   }
 
-  public async closeTokenAccount(mintAddress: string): Promise<{ txSignature: string | null; success: boolean }> {
+  public async closeTokenAccount(
+    mintAddress: string,
+    context?: { traceId?: string; tradeId?: TradeId; positionId?: PositionId }
+  ): Promise<{ txSignature: string | null; success: boolean }> {
     try {
       const { Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
       const {
@@ -277,7 +588,11 @@ export class SolanaWalletService {
 
       const mint = new PublicKey(mintAddress);
       const owner = this.keypair.publicKey;
-      const mintInfo = await this.connection.getAccountInfo(mint);
+      const mintInfo = await this.measureRpcCall(
+        'getAccountInfo',
+        () => this.connection.getAccountInfo(mint),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+      );
       if (!mintInfo) {
         throw new Error(`Mint inexistente: ${mintAddress}`);
       }
@@ -294,7 +609,11 @@ export class SolanaWalletService {
       const ata = await getAssociatedTokenAddress(mint, owner, false, tokenProgramId);
 
       // Verifica se a conta existe antes de tentar fechar
-      const accountInfo = await this.connection.getAccountInfo(ata);
+      const accountInfo = await this.measureRpcCall(
+        'getAccountInfo',
+        () => this.connection.getAccountInfo(ata),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+      );
       if (!accountInfo) {
         return { txSignature: null, success: true };
       }
@@ -308,11 +627,20 @@ export class SolanaWalletService {
       );
 
       const transaction = new Transaction().add(closeIx);
-      const { blockhash } = await this.connection.getLatestBlockhash('confirmed');
+      const blockhashRes = await this.measureRpcCall(
+        'getLatestBlockhash',
+        () => this.connection.getLatestBlockhash('confirmed'),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+      );
+      const { blockhash } = blockhashRes;
       transaction.recentBlockhash = blockhash;
       transaction.feePayer = owner;
 
-      const txid = await sendAndConfirmTransaction(this.connection, transaction, [this.keypair]);
+      const txid = await this.measureRpcCall(
+        'sendAndConfirmTransaction',
+        () => sendAndConfirmTransaction(this.connection, transaction, [this.keypair]),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+      );
       console.log(`💰 [Rent Exemption Resgatado] ATA de ${mintAddress} fechada com sucesso. ~0.00204 SOL devolvidos! Tx: ${txid}`);
       return { txSignature: txid, success: true };
     } catch (err: any) {
@@ -327,9 +655,9 @@ export class SolanaWalletService {
    * e executa o fechamento (createCloseAccountInstruction), resgatando a caução (~0.00204 SOL por ATA)
    * diretamente para a carteira Phantom.
    */
-  public async sweepEmptyTokenAccounts(): Promise<{ closedCount: number; reclaimedSolEst: number; errors: string[] }> {
+  public async sweepEmptyTokenAccounts(context?: { traceId?: string }): Promise<{ closedCount: number; reclaimedSolEst: number; errors: string[] }> {
     try {
-      const accounts = await this.getParsedTokenAccountsForSupportedPrograms();
+      const accounts = await this.getParsedTokenAccountsForSupportedPrograms(context);
 
       let closedCount = 0;
       const errors: string[] = [];
@@ -341,7 +669,7 @@ export class SolanaWalletService {
 
         if (amount === 0 && mint) {
           try {
-            const res = await this.closeTokenAccount(mint);
+            const res = await this.closeTokenAccount(mint, context);
             if (res.success && res.txSignature) {
               closedCount++;
             }

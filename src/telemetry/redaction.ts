@@ -238,3 +238,17 @@ export function safeJsonStringify(obj: unknown, space?: number): string {
     space
   );
 }
+
+/**
+ * Sanitizes any log message or arbitrary string.
+ */
+export function sanitizeLogMessage(msg: string): string {
+  if (!msg || typeof msg !== 'string') return '';
+  return sanitizeTelemetry(msg);
+}
+
+/**
+ * Alias for sanitizeTelemetry for structured payloads.
+ */
+export const sanitizeTelemetryPayload = sanitizeTelemetry;
+
