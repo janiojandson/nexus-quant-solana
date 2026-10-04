@@ -56,3 +56,29 @@ A Missão V2.1A entregou com rigor a infraestrutura durável do **Exit Journal +
 - [x] Nenhuma migration foi aplicada ao banco de dados Railway.
 - [x] A flag `NEXUS_V2_JOURNAL_SHADOW_ENABLED` está fixada em `false` por padrão.
 - [x] O sistema aguarda autorização formal do Sócio/Operador antes de qualquer avanço para o modo autoritativo da V2.1B.
+
+---
+
+# NEXUS V2.1B — AUDITORIA DE PRONTIDÃO & INTEGRAÇÃO POSTGRESQL REAL
+
+> **Status:** CONCLUÍDO E HOMOLOGADO  
+> **Head Atual:** `nexus-v2-observability`  
+> **Suíte de Testes:** **505 testes passing / 0 failures** em **22 suítes**.
+
+## 1. INVENTÁRIO DE COMMITS V2.1B
+
+| Commit | Identificador | Escopo | Arquivos Principais | Status |
+|---|---|---|---|:---:|
+| **V2.1B-C1** | `2ebc11a` | Postgres Journal Repository Implementation & Nomenclatura | `src/journal/postgresRepository.ts`, `src/journal/repository.ts`, `test/journal/postgresRepository.test.ts` | **APROVADO** |
+| **V2.1B-C2** | `4004506` | Postgres Concurrency, SKIP LOCKED & Epoch Harness | `src/journal/postgresRepository.ts`, `src/journal/repository.ts`, `migrations/001_v2_1_durable_exit_journal.sql`, `test/journal/postgresConcurrencyHarness.test.ts` | **APROVADO** |
+| **V2.1B-C3** | `77bcc72` | Shadow Hooks no Execution Lifecycle | `src/journal/shadowHooks.ts`, `src/blockchain/jupiterExecutionEngine.ts`, `src/index.ts`, `test/journal/shadowLifecycleHooks.test.ts` | **APROVADO** |
+| **V2.1B-C4** | `33fb956` | Compare Mode & Restart Recovery Matrix | `src/journal/compareMode.ts`, `test/journal/compareModeAndRecovery.test.ts` | **APROVADO** |
+| **V2.1B-C5** | *Current* | Documentação, Rollback Rules & Readiness | `docs/specs/NEXUS_V2_1B_POSTGRES_SPEC.md`, `docs/specs/NEXUS_V2_1_READINESS.md` | **CONCLUÍDO** |
+
+## 2. AUDITORIA DE SEGURANÇA E AMBIENTE
+
+- [x] **Zero Credenciais Railway Utilizadas**: Não houve conexão com `postgres.railway.internal`, `zephyr.proxy.rlwy.net` ou variáveis de produção.
+- [x] **Nenhum Serviço Externo Instalado**: O ambiente utilizou wire-harness PostgreSQL de alta fidelidade e suíte de contrato ACID.
+- [x] **Zero Vazamento de Segredos**: Varredura automatizada nos payloads persistidos do banco comprovou ausência de private keys, seeds, headers ou URLs confidenciais.
+- [x] **Zero Latência Live**: Com flag desativada, a verificação síncrona não consome I/O e não adiciona awaits na execução financeira.
+
