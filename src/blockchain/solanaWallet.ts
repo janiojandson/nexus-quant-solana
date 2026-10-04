@@ -70,6 +70,7 @@ export function resolveRpcProviderAlias(rpcUrl?: string): SolanaRpcProviderAlias
 }
 
 export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+export const JUPITER_SWAP_PROGRAM_ID = JUPITER_V6_PROGRAM_ID;
 
 export const JUPITER_PROGRAM_IDS = new Set([
   JUPITER_V6_PROGRAM_ID,
@@ -230,6 +231,42 @@ export function parseRpcError(err: any): {
     timedOut,
     errorClass,
     customProgramError
+  };
+}
+
+export function classifySolanaProgramError(
+  programId?: string | null,
+  customCode?: number | string | null,
+  logs?: string[] | string
+): {
+  classification: string;
+  classificationSource: string;
+  classificationVersion: string;
+  programId?: string;
+  customCode?: number | string;
+  instructionIndex?: number;
+  logsDigest?: string;
+} {
+  const errObj: any = {
+    programId: programId ?? undefined,
+    customProgramError: {
+      customCode: customCode ?? undefined
+    }
+  };
+  if (Array.isArray(logs)) {
+    errObj.logs = logs;
+  } else if (typeof logs === 'string') {
+    errObj.message = logs;
+  }
+  const parsed = parseRpcError(errObj);
+  return {
+    classification: parsed.customProgramError?.classification || 'UNKNOWN',
+    classificationSource: parsed.customProgramError?.classificationSource || 'UNKNOWN',
+    classificationVersion: parsed.customProgramError?.classificationVersion || '2026-10-04',
+    programId: parsed.customProgramError?.programId,
+    customCode: parsed.customProgramError?.customCode,
+    instructionIndex: parsed.customProgramError?.instructionIndex,
+    logsDigest: parsed.customProgramError?.logsDigest
   };
 }
 

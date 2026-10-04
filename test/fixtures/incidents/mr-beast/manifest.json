@@ -1,0 +1,56 @@
+{
+  "incidentId": "MR_BEAST",
+  "tokenSymbol": "Mr Beast",
+  "mint": "8nzyZHNFhbpZrf6VpvJPenbc6WrhW6isidrbKAgTMyJ1",
+  "poolId": "E3KkCcPjdBd7Qf5WqaKUuwZytyNXvUt7MinCZExdC7Yy",
+  "sourceFiles": [
+    {
+      "file": "beast-path.jsonl",
+      "bytes": 41410,
+      "sha256": "bee2f8305cc5c9fc3996f4d72f11966be48c798e59089fb27ab8f0b9b5f7c8f4",
+      "recordCount": 152
+    },
+    {
+      "file": "beast-crash.jsonl",
+      "bytes": 43359,
+      "sha256": "d9007644aecaec02cca65010985403fb94d340f1565ee26c16ee159eeb4d37c1",
+      "recordCount": 174
+    },
+    {
+      "file": "beast-entry.jsonl",
+      "bytes": 50356,
+      "sha256": "253fbb9a7f4c9609f7f38566671574590f53d8265bdabeac5531b6dde44414a2",
+      "recordCount": 213
+    },
+    {
+      "file": "chain-summary.json",
+      "bytes": 21992,
+      "sha256": "5a8d232b346c3c83c5a4a1dd4559d43f8cffdb4e5dfc60af235504f1a195ea71",
+      "recordCount": 33
+    },
+    {
+      "file": "pool-crash-transactions.json",
+      "bytes": 1290495,
+      "sha256": "a12a3c45bde258093ee58d85b20c262b921ace5ae76f86892da542078a32b3f9",
+      "recordCount": 2
+    },
+    {
+      "file": "database.json",
+      "bytes": 31326,
+      "sha256": "fcd2fe2f9aac32dc373b0a3d95503c7ed86f5f943b39b6828411cd703bb8705e",
+      "recordCount": 12
+    }
+  ],
+  "sourceSha256": "7d6cdb29e50aa25c59530dae5b7ef0a6ebd0a0e27be4e2e9a70073683c71e70e",
+  "sourceRecordCount": 152,
+  "auditVersion": "2026-10-04",
+  "firstTimestamp": "2026-10-04T04:15:09.000Z",
+  "lastTimestamp": "2026-10-04T04:19:03.608Z",
+  "knownDeploymentSha": "7904d9c",
+  "dataCompleteness": "HIGH_PAGINATED_SERIES",
+  "knownLimitations": [
+    "Sub-millisecond internal latency not captured in legacy logs",
+    "Monotonic offsets and positionVersion null in legacy system",
+    "Dex liquidity numbers reflect third-party aggregation delay"
+  ]
+}

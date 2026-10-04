@@ -1,0 +1,62 @@
+{
+  "incidentId": "SSI",
+  "tokenSymbol": "SSI",
+  "mint": "Da6ptrSSQWxGtyQwYpZSgMEZbm5Z9jc1ACjife9kpump",
+  "poolId": "8hPEGeDiQRZazBNswiXcnMYee8LJwyAxPRhDQuKSuS98",
+  "sourceFiles": [
+    {
+      "file": "ssi-path.jsonl",
+      "bytes": 831715,
+      "sha256": "a45037e073bd07a39b2e87aeb81cbd6afce702f6078724995d4f852efbf47f9e",
+      "recordCount": 2891
+    },
+    {
+      "file": "ssi-crash.jsonl",
+      "bytes": 25106,
+      "sha256": "bfeaa271db04816172f77c6d1c7bb1c30c80f5378e34fec15880b551f15131da",
+      "recordCount": 100
+    },
+    {
+      "file": "ssi-entry.jsonl",
+      "bytes": 43271,
+      "sha256": "a68062330b009fc5abb3f603d8119031dcddd23653009a669c302962995d4713",
+      "recordCount": 182
+    },
+    {
+      "file": "ssi-partial.jsonl",
+      "bytes": 8690,
+      "sha256": "888ed2af079dadd6d54926fceb09b6ba2978d154fe8a4eca116ee451bda10dae",
+      "recordCount": 37
+    },
+    {
+      "file": "chain-summary.json",
+      "bytes": 21992,
+      "sha256": "5a8d232b346c3c83c5a4a1dd4559d43f8cffdb4e5dfc60af235504f1a195ea71",
+      "recordCount": 33
+    },
+    {
+      "file": "pool-crash-transactions.json",
+      "bytes": 1290495,
+      "sha256": "a12a3c45bde258093ee58d85b20c262b921ace5ae76f86892da542078a32b3f9",
+      "recordCount": 2
+    },
+    {
+      "file": "database.json",
+      "bytes": 31326,
+      "sha256": "fcd2fe2f9aac32dc373b0a3d95503c7ed86f5f943b39b6828411cd703bb8705e",
+      "recordCount": 12
+    }
+  ],
+  "sourceSha256": "2ab8c661a225a37df0cc37d9f58ac00f4d65cad25627d24528732618328e7d75",
+  "sourceRecordCount": 2891,
+  "auditVersion": "2026-10-04",
+  "firstTimestamp": "2026-10-04T05:07:39.000Z",
+  "lastTimestamp": "2026-10-04T06:20:03.805Z",
+  "knownDeploymentSha": "7904d9c",
+  "dataCompleteness": "HIGH_PAGINATED_SERIES",
+  "knownLimitations": [
+    "Sub-millisecond internal latency not captured in legacy logs",
+    "Monotonic offsets and positionVersion null in legacy system",
+    "Dex liquidity numbers reflect third-party aggregation delay"
+  ]
+}

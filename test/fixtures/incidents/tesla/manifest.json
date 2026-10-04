@@ -1,0 +1,62 @@
+{
+  "incidentId": "TESLA",
+  "tokenSymbol": "Tesla",
+  "mint": "3A75w27ssueStCEEp6KGxKJ3EtP57P9FxT6YxHmDnt7a",
+  "poolId": "7xZSFrmsrZ2NqLN76wzQicVtdV877PsCLUAnHvXMGsdW",
+  "sourceFiles": [
+    {
+      "file": "tesla-path.jsonl",
+      "bytes": 816337,
+      "sha256": "aaac2556e01382473d5e73dd39640a9e84e2171b198fa9b45c3743fcca64445b",
+      "recordCount": 2807
+    },
+    {
+      "file": "tesla-crash.jsonl",
+      "bytes": 41712,
+      "sha256": "5cd2f897ac36ce24dcafbd25dbdc94eb955c5803c0ad4a197f9be97a38cdf586",
+      "recordCount": 166
+    },
+    {
+      "file": "tesla-entry.jsonl",
+      "bytes": 47712,
+      "sha256": "ba9531eba7788799edeba985626ced9c22e2f0d481a39ae7cd43b82efa95d45e",
+      "recordCount": 203
+    },
+    {
+      "file": "tesla-partial.jsonl",
+      "bytes": 14736,
+      "sha256": "14d77d2e5fd02ec344a316232a83414499482a2dec0d69b41d344f5b1ce69d24",
+      "recordCount": 63
+    },
+    {
+      "file": "chain-summary.json",
+      "bytes": 21992,
+      "sha256": "5a8d232b346c3c83c5a4a1dd4559d43f8cffdb4e5dfc60af235504f1a195ea71",
+      "recordCount": 33
+    },
+    {
+      "file": "pool-summary.json",
+      "bytes": 23828,
+      "sha256": "70f5640a14266787b9a33a06df73aa21d86a84c2df852cfa29f5782a01bbb8fd",
+      "recordCount": 15
+    },
+    {
+      "file": "database.json",
+      "bytes": 31326,
+      "sha256": "fcd2fe2f9aac32dc373b0a3d95503c7ed86f5f943b39b6828411cd703bb8705e",
+      "recordCount": 12
+    }
+  ],
+  "sourceSha256": "7827cd7a857386c8d91b2972cb4dc6e28ccf2cd7beb8e734d3d5d4a28ca46091",
+  "sourceRecordCount": 2807,
+  "auditVersion": "2026-10-04",
+  "firstTimestamp": "2026-10-03T00:29:22.000Z",
+  "lastTimestamp": "2026-10-03T01:51:09.518Z",
+  "knownDeploymentSha": "9157d42",
+  "dataCompleteness": "HIGH_PAGINATED_SERIES",
+  "knownLimitations": [
+    "Sub-millisecond internal latency not captured in legacy logs",
+    "Monotonic offsets and positionVersion null in legacy system",
+    "Dex liquidity numbers reflect third-party aggregation delay"
+  ]
+}

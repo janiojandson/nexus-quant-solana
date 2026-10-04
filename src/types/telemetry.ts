@@ -14,6 +14,8 @@
 export type MonotonicNs = bigint & { readonly __brand: unique symbol };
 export type WallMs = number & { readonly __brand: unique symbol };
 
+export const JUPITER_SWAP_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+
 /**
  * Returns current monotonic timestamp in nanoseconds using process.hrtime.bigint().
  * Use ONLY for relative interval and process-local latency measurements.

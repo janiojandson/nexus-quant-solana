@@ -1,0 +1,26 @@
+{
+  "incidentId": "SSI",
+  "taxonomy": [
+    "PRICE_GAP"
+  ],
+  "capitalSwapSol": 0.021826256,
+  "partialTaken": true,
+  "partialProceedsSol": 0.014854168,
+  "finalProceedsSol": 0.002137281,
+  "netLiquidSol": -0.004860143,
+  "netReturnPct": -22.2674,
+  "boughtTokensAtomic": 5447502420,
+  "partialTokensAtomic": 2723751210,
+  "finalTokensAtomic": 2723751210,
+  "peakObservedPnlPct": 986.98,
+  "firstDeterioratedPnlPct": -80.46,
+  "poolDropReservePreSol": 863.876225463,
+  "poolDropReservePostSol": 101.581357745,
+  "poolDropPct": -88.2412,
+  "poolCrashTxSignature": "2UJoZzLXErPHjWLsbBcdhFfbwRB8zRLHHvnmPnR3uqKffUjiENe2eZwUgFjAmxediX6iRW9m641ogYT4V55ihPML",
+  "finalExitTxSignature": "4mMBHLwEBk7fwV3zp7w8CyfCWzff1H9BaDJVWEmAL2TPVsHffAJHMKrNkupErsQL4QZ4keZQULBuMZxY4EBeQNAT",
+  "fillVsSignalQuotePct": 0.2171,
+  "firstBadObservationAlreadyDeteriorated": true,
+  "partialOccurredBeforeCrash": true,
+  "finalFillConfirmed": true
+}

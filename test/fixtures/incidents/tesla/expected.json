@@ -1,0 +1,27 @@
+{
+  "incidentId": "TESLA",
+  "taxonomy": [
+    "PRICE_GAP"
+  ],
+  "capitalSwapSol": 0.02,
+  "partialTaken": true,
+  "partialProceedsSol": 0.013533348,
+  "finalProceedsSol": 0.000041149,
+  "netLiquidSol": -0.00645572,
+  "netReturnPct": -32.2786,
+  "boughtTokensAtomic": 4375826130,
+  "partialTokensAtomic": 2187913065,
+  "finalTokensAtomic": 2187913065,
+  "peakObservedPnlPct": 376.47,
+  "lastGoodObservationPnlPct": 376.26,
+  "firstDeterioratedPnlPct": -99.59,
+  "poolDropReservePreSol": 605.208278216,
+  "poolDropReservePostSol": 1.373794508,
+  "poolDropPct": -99.773,
+  "poolCrashTxSignature": "2ti4qD2YffXcJnTj5swzvgoNGYd798qQD6gECvP88UfAcacTY53mmWgoH7GzLsaqSveQ3Y6a7BS18ruyv4FX8Hye",
+  "finalExitTxSignature": "5nwz7eVDSU4MnT3zzmXyP9kg6w1Uo99GDz8qiZtMkcqUebeLgLbXFMtPpgpZtZ36estEnFhS43JyoYGoKp5xHyTN",
+  "fillVsSignalQuotePct": 0,
+  "firstBadObservationAlreadyDeteriorated": true,
+  "partialOccurredBeforeCrash": true,
+  "finalFillConfirmed": true
+}

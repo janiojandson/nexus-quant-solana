@@ -1,0 +1,28 @@
+{
+  "incidentId": "MR_BEAST",
+  "taxonomy": [
+    "PRICE_GAP"
+  ],
+  "capitalSwapSol": 0.022731387,
+  "partialTaken": true,
+  "partialProceedsSol": 0.015402873,
+  "finalProceedsSol": 0.001655182,
+  "netLiquidSol": -0.005698573,
+  "netReturnPct": -25.0692,
+  "boughtTokensAtomic": 5506284374,
+  "partialTokensAtomic": 2753142187,
+  "finalTokensAtomic": 2753142187,
+  "peakObservedPnlPct": 39.54,
+  "firstDeterioratedPnlPct": -85.48,
+  "poolDropReservePreSol": 302.822274317,
+  "poolDropReservePostSol": 86.08490058,
+  "poolDropPct": -71.5725,
+  "poolCrashTxSignature": "59U3QJFGEAEyzLUGDKeEAcd2ryJEZv9hcwQV9DSk8WySXiUKqKZzAcgsSbSyBRqx973Hm69bYYKpste7sAPd8SdA",
+  "finalExitTxSignature": "syypYLfEjBmNcQjcBQjfE6Gt3oDw9NBtPQJYgPBrz3TSGcCXGiLknyBJnQD9Qtoit2C8uQohVeiStDgnWuP9yQJ",
+  "fillVsSignalQuotePct": 0.3062,
+  "isPreQuoteCollapse": true,
+  "isExecutionSlippage": false,
+  "firstBadObservationAlreadyDeteriorated": true,
+  "partialOccurredBeforeCrash": true,
+  "finalFillConfirmed": true
+}

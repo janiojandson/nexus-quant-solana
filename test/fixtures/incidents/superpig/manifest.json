@@ -1,0 +1,45 @@
+{
+  "incidentId": "SUPERPIG",
+  "tokenSymbol": "SUPERPIG",
+  "mint": "tHj1JQKxCV2orW48CA5Nge6MYBJJ73XuJU2pwBapump",
+  "poolId": null,
+  "sourceFiles": [
+    {
+      "file": "pig-crash.jsonl",
+      "bytes": 36759,
+      "sha256": "a1429b02fe525c84b2f00a0e100fc352f7594a371147595d485f9fbf240edeae",
+      "recordCount": 154
+    },
+    {
+      "file": "chain-summary.json",
+      "bytes": 21992,
+      "sha256": "5a8d232b346c3c83c5a4a1dd4559d43f8cffdb4e5dfc60af235504f1a195ea71",
+      "recordCount": 33
+    },
+    {
+      "file": "true-errors.jsonl",
+      "bytes": 1109,
+      "sha256": "2731a294f58e81ac19a5b94bd59c2ec53b971b12bef2deae102bd3db78a0e064",
+      "recordCount": 4
+    },
+    {
+      "file": "database.json",
+      "bytes": 31326,
+      "sha256": "fcd2fe2f9aac32dc373b0a3d95503c7ed86f5f943b39b6828411cd703bb8705e",
+      "recordCount": 12
+    }
+  ],
+  "sourceSha256": "a0c5d6aacfc8282b430969ee81a290c8c1a066f764b663c30ba8fd3ab893a58d",
+  "sourceRecordCount": 154,
+  "auditVersion": "2026-10-04",
+  "firstTimestamp": "2026-10-03T02:35:04.000Z",
+  "lastTimestamp": "2026-10-03T02:35:52.876Z",
+  "knownDeploymentSha": "7904d9c",
+  "dataCompleteness": "CRASH_SERIES_COMPLETE",
+  "knownLimitations": [
+    "Sub-millisecond internal latency not captured in legacy logs",
+    "Monotonic offsets and positionVersion null in legacy system",
+    "OutAmount of last signed order not captured in legacy logs",
+    "Database trade_outcomes table recorded quote instead of on-chain fill"
+  ]
+}

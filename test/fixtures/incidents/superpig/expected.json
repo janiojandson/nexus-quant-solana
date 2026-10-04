@@ -1,0 +1,29 @@
+{
+  "incidentId": "SUPERPIG",
+  "taxonomy": [
+    "EXECUTION_FAILURE",
+    "ACCOUNTING_FAILURE",
+    "EXECUTION_DELAY",
+    "INSUFFICIENT_DEPTH"
+  ],
+  "capitalSwapSol": 0.02,
+  "partialTaken": false,
+  "partialProceedsSol": 0,
+  "finalProceedsSol": 0.003183856,
+  "netLiquidSol": -0.016954403,
+  "netReturnPct": -84.772,
+  "boughtTokensAtomic": 120790429663,
+  "finalTokensAtomic": 120790429663,
+  "firstObservationAlreadyNegative": true,
+  "firstObservationPnlPct": -15.96,
+  "simulationsRejectedCustomCode": 6001,
+  "simulationRejectedCount": 3,
+  "confirmationTimeoutOccurred": true,
+  "databaseRecordedExitSol": 0.010301,
+  "databaseRecordedPnlPct": -48.49,
+  "actualOnChainProceedsSol": 0.003183856,
+  "actualOnChainNetPnlPct": -84.772,
+  "accountingDivergenceSol": 0.007117144,
+  "accountingDivergencePctPoints": 36.282,
+  "finalExitTxSignature": "3bhQ9DBSfPYGf3phH4JPzVFe2xBGMQXfpYgaYP8hML5KNme6i2WKaCKbemcjC8ZZhuXqw8u7BLTiG4mjRwVkNVTu"
+}
