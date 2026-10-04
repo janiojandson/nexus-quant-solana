@@ -1,10 +1,15 @@
 import type { SwapQuoteParams, SwapQuoteResult } from '../blockchain/dexAggregator.js';
 import type { PumpObservatorySnapshot } from './pumpObservatory.js';
-import { PumpJupiterTimingTracker } from './pumpJupiterTiming.js';
+import {
+  PUMP_JUPITER_MAX_SLIPPAGE_BPS,
+  PumpJupiterTimingTracker,
+  type PumpJupiterTimingSummary
+} from './pumpJupiterTiming.js';
 import type { PumpStrategyCohort } from './pumpCohorts.js';
 import {
   createShadowTrade,
   recordShadowExitMark,
+  type PumpShadowExitMark,
   type PumpShadowTrade,
   type PumpShadowVenue
 } from './pumpShadowTrade.js';
@@ -37,6 +42,23 @@ export interface PumpStrategyLabStore {
   appendMarketSample(record: any): Promise<void>;
   appendShadowTrade(record: any): Promise<void>;
   upsertStrategySummary(record: any): Promise<void>;
+  loadRecoveryState?(sinceMs: number): Promise<{
+    observations: Array<{ mint: string; signature: string; payload: Record<string, unknown> }>;
+    shadowTrades: Array<{
+      mint: string;
+      cohort: string;
+      venue: string;
+      entryAtMs: number;
+      payload: Record<string, unknown>;
+    }>;
+    marketSamples: Array<{
+      mint: string;
+      sampledAtMs: number;
+      cohort?: string;
+      venue?: string;
+      payload: Record<string, unknown>;
+    }>;
+  }>;
 }
 
 export interface PumpStrategyHorizon {
@@ -50,6 +72,7 @@ export interface PumpStrategyLabSnapshot {
   totalSamples: number;
   preferredJupiterPlan: string;
   preferredPlanNetAfterCostSol?: number;
+  routeReadiness?: PumpJupiterTimingSummary;
   strategies: Array<{
     cohort: string;
     entryWindow: PumpEntryWindow;
@@ -72,6 +95,7 @@ export interface PumpStrategyLabRuntimeOptions {
   enabled?: boolean;
   intervalMs?: number;
   entryLamports?: number;
+  entryLamportLadder?: () => number[];
   networkFeeLamports?: number;
   priorityFeeLamports?: number;
   horizons?: PumpStrategyHorizon[];
@@ -100,6 +124,7 @@ export class PumpStrategyLabRuntime {
   private readonly enabled: boolean;
   private readonly intervalMs: number;
   private readonly entryLamports: number;
+  private readonly entryLamportLadder: () => number[];
   private readonly networkFeeLamports: number;
   private readonly priorityFeeLamports: number;
   private readonly horizons: PumpStrategyHorizon[];
@@ -128,6 +153,7 @@ export class PumpStrategyLabRuntime {
     this.enabled = options.enabled ?? true;
     this.intervalMs = Math.max(1_000, Number(options.intervalMs ?? 5_000));
     this.entryLamports = Math.max(1, Math.floor(Number(options.entryLamports ?? 1_000_000)));
+    this.entryLamportLadder = options.entryLamportLadder ?? (() => [this.entryLamports]);
     this.networkFeeLamports = Math.max(0, Math.floor(Number(options.networkFeeLamports ?? 0)));
     this.priorityFeeLamports = Math.max(0, Math.floor(Number(options.priorityFeeLamports ?? 0)));
     this.horizons = [...(options.horizons ?? [
@@ -141,6 +167,68 @@ export class PumpStrategyLabRuntime {
     this.now = options.now ?? Date.now;
     this.canRunResearch = options.canRunResearch ?? (() => true);
     this.timing = new PumpJupiterTimingTracker(provider, { now: this.now });
+    this.currentSnapshot.routeReadiness = this.timing.summary();
+  }
+
+  async restore(): Promise<void> {
+    if (!this.enabled || !this.store?.loadRecoveryState) return;
+    const cutoff = this.now() - 30 * 60_000;
+    const recovered = await this.store.loadRecoveryState(cutoff);
+
+    for (const observation of recovered.observations) {
+      this.persistedObservations.add(`${observation.signature}:${observation.mint}`);
+    }
+
+    for (const record of recovered.shadowTrades) {
+      const payload = record.payload || {};
+      const entryWindow = payload.entryWindow as PumpEntryWindow;
+      const rawTrade = payload.trade as PumpShadowTrade | undefined;
+      const tokenAmountAtomic = Number(payload.tokenAmountAtomic);
+      if (!entryWindow || !rawTrade || !Number.isFinite(tokenAmountAtomic) || tokenAmountAtomic <= 0) {
+        continue;
+      }
+      const trade: PumpShadowTrade = {
+        ...rawTrade,
+        exitMarks: []
+      };
+      const entryAgeMs = Number(payload.entryAgeMs || 0);
+      const eventTimestampMs = Number.isFinite(entryAgeMs)
+        ? record.entryAtMs - Math.max(0, entryAgeMs)
+        : record.entryAtMs;
+      const key = `${record.mint}:${entryWindow}`;
+      this.shadows.set(key, {
+        mint: record.mint,
+        entryWindow,
+        eventTimestampMs,
+        tokenAmountAtomic,
+        trade,
+        markedHorizons: new Set()
+      });
+
+      const tracked = this.trackedMints.get(record.mint) ?? {
+        eventTimestampMs,
+        complete: false,
+        attemptedWindows: new Set<PumpEntryWindow>()
+      };
+      tracked.attemptedWindows.add(entryWindow);
+      this.trackedMints.set(record.mint, tracked);
+    }
+
+    for (const sample of recovered.marketSamples) {
+      const payload = sample.payload || {};
+      const entryWindow = payload.entryWindow as PumpEntryWindow;
+      const mark = payload.mark as PumpShadowExitMark | undefined;
+      if (!entryWindow || !mark?.horizon) continue;
+      const state = this.shadows.get(`${sample.mint}:${entryWindow}`);
+      if (!state) continue;
+      const duplicate = state.trade.exitMarks.some(existing =>
+        existing.horizon === mark.horizon && existing.observedAtMs === mark.observedAtMs
+      );
+      if (!duplicate) state.trade.exitMarks.push({ ...mark });
+      state.markedHorizons.add(mark.horizon);
+    }
+
+    await this.refreshSummary();
   }
 
   start(): void {
@@ -160,6 +248,9 @@ export class PumpStrategyLabRuntime {
     return {
       ...this.currentSnapshot,
       lastError: this.lastError,
+      routeReadiness: this.currentSnapshot.routeReadiness
+        ? { ...this.currentSnapshot.routeReadiness }
+        : undefined,
       strategies: this.currentSnapshot.strategies.map(item => ({ ...item }))
     };
   }
@@ -273,15 +364,22 @@ export class PumpStrategyLabRuntime {
     now: number
   ): Promise<boolean> {
     const cohort = entryWindowToCohort(entryWindow);
+    const entryLadder = [...new Set(this.entryLamportLadder()
+      .map(value => Math.max(1, Math.floor(Number(value))))
+      .filter(Number.isFinite))]
+      .sort((a, b) => b - a);
     const timing = await this.timing.probe({
       mint,
       eventTimestampMs,
       inputMint: WSOL_MINT,
       outputMint: mint,
-      amountLamports: this.entryLamports
+      amountLamports: entryLadder[0] ?? this.entryLamports,
+      amountLadderLamports: entryLadder,
+      probeSeriesKey: `${mint}:${entryWindow}`
     });
     if (!timing.routeAvailable || !timing.outAmount || timing.outAmount <= 0) return false;
 
+    const entryAmountLamports = timing.lastProbeAmountLamports ?? this.entryLamports;
     const entryAtMs = this.now();
     const tracked = this.trackedMints.get(mint);
     if (!tracked || !dueEntryWindows({
@@ -297,7 +395,7 @@ export class PumpStrategyLabRuntime {
       cohort,
       venue: 'JUPITER_ROUTE',
       entryAtMs,
-      entryPrincipalSol: this.entryLamports / 1e9,
+      entryPrincipalSol: entryAmountLamports / 1e9,
       entryFeeBps: 0,
       entrySlippageBps: 0,
       priorityFeeLamports: this.priorityFeeLamports,
@@ -314,7 +412,13 @@ export class PumpStrategyLabRuntime {
         entryWindow,
         entryAgeMs: entryAtMs - eventTimestampMs,
         quoteRequestedAtMs: now,
+        quoteCompletedAtMs: entryAtMs,
         firstRouteLagMs: timing.firstRouteLagMs,
+        firstCompliantRouteLagMs: timing.firstCompliantRouteLagMs,
+        firstRouteAmountLamports: timing.firstRouteAmountLamports,
+        firstRouteLadderIndex: timing.firstRouteLadderIndex,
+        firstRouteSlippageBps: timing.firstRouteSlippageBps,
+        maxSlippageBps: PUMP_JUPITER_MAX_SLIPPAGE_BPS,
         router: timing.router,
         tokenAmountAtomic: timing.outAmount
       }
@@ -500,6 +604,7 @@ export class PumpStrategyLabRuntime {
       mode: 'SHADOW',
       totalSamples,
       preferredJupiterPlan: 'INSUFFICIENT_DATA',
+      routeReadiness: this.timing.summary(),
       strategies
     };
   }

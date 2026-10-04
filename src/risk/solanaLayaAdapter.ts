@@ -3,9 +3,14 @@ import axios from 'axios';
 export type SolanaLayaRoute = 'MECHANICAL_PIPELINE' | 'DEEP_REVIEW' | 'ABSTAIN';
 export type SolanaLayaEntryAction = 'BUY' | 'WAIT' | 'ABSTAIN';
 export type SolanaLayaPositionAction = 'HOLD' | 'EXIT' | 'ABSTAIN';
+export type SolanaLayaTacticalMode = 'OFF' | 'SHADOW';
 
-export function shouldBlockSolanaEntryFromLaya(action: SolanaLayaEntryAction): boolean {
-  return action === 'WAIT';
+export function normalizeSolanaLayaTacticalMode(value: unknown): SolanaLayaTacticalMode {
+  return String(value || 'SHADOW').trim().toUpperCase() === 'OFF' ? 'OFF' : 'SHADOW';
+}
+
+export function shouldBlockSolanaEntryFromLaya(_action: SolanaLayaEntryAction): boolean {
+  return false;
 }
 
 export interface SolanaLayaFacts {

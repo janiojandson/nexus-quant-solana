@@ -78,6 +78,19 @@ export interface DashboardState {
     totalSamples: number;
     preferredJupiterPlan?: string;
     preferredPlanNetAfterCostSol?: number;
+    routeReadiness?: {
+      maxSlippageBps: number;
+      momentZeroWindowMs: number;
+      probedMints: number;
+      compliantRouteMints: number;
+      compliantRouteRate: number;
+      momentZeroMints: number;
+      momentZeroRate: number;
+      medianFirstCompliantRouteLagMs?: number;
+      p90FirstCompliantRouteLagMs?: number;
+      smallestFirstExecutableAmountLamports?: number;
+      medianFirstExecutableAmountLamports?: number;
+    };
     strategies: Array<{
       cohort: string;
       entryWindow?: string;
@@ -219,6 +232,12 @@ function renderPumpObservatorySection(state: DashboardState): string {
 
 function renderPumpStrategyLabSection(state: DashboardState): string {
   const lab = state.pumpStrategyLab;
+  const readiness = lab?.routeReadiness;
+  const routeRate = readiness ? `${(readiness.compliantRouteRate * 100).toFixed(1)}% (${readiness.compliantRouteMints}/${readiness.probedMints})` : '—';
+  const momentZeroRate = readiness ? `${(readiness.momentZeroRate * 100).toFixed(1)}% (${readiness.momentZeroMints}/${readiness.probedMints})` : '—';
+  const medianLag = readiness?.medianFirstCompliantRouteLagMs == null
+    ? '—'
+    : `${(readiness.medianFirstCompliantRouteLagMs / 1000).toFixed(1)}s`;
   const rows = (lab?.strategies || []).map(item => {
     const replayText = (item.exitPolicyReplays || [])
       .map(replay =>
@@ -250,7 +269,7 @@ function renderPumpStrategyLabSection(state: DashboardState): string {
         <div id="pump-strategy-lab-samples" class="text-xs font-mono text-slate-400">Amostras: ${lab?.totalSamples ?? 0}</div>
       </div>
       <div id="pump-strategy-lab-error" ${lab?.lastError ? '' : 'hidden'} class="p-3 text-xs text-amber-300 border-b border-slate-800">${lab?.lastError ? 'Coleta temporariamente indisponível; aguardando recuperação.' : ''}</div>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-4">
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 p-4">
         <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
           <div class="text-[10px] uppercase text-slate-500">Jupiter economicamente preferido</div>
           <div id="pump-strategy-lab-plan" class="text-lg font-black font-mono text-cyan-300">${escapeDashboardHtml(lab?.preferredJupiterPlan || 'INSUFFICIENT_DATA')}</div>
@@ -258,6 +277,16 @@ function renderPumpStrategyLabSection(state: DashboardState): string {
         <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
           <div class="text-[10px] uppercase text-slate-500">Resultado líquido após custo do plano</div>
           <div id="pump-strategy-lab-net" class="text-lg font-black font-mono text-emerald-300">${lab?.preferredPlanNetAfterCostSol == null ? '—' : lab.preferredPlanNetAfterCostSol.toFixed(6) + ' SOL'}</div>
+        </div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
+          <div class="text-[10px] uppercase text-slate-500">Primeira rota ≤ 750 bps</div>
+          <div id="pump-strategy-route-rate" class="text-lg font-black font-mono text-cyan-300">${routeRate}</div>
+          <div id="pump-strategy-route-lag" class="text-[10px] font-mono text-slate-500">latência mediana: ${medianLag}</div>
+        </div>
+        <div class="bg-slate-950/50 border border-slate-800 rounded-xl p-3">
+          <div class="text-[10px] uppercase text-slate-500">Entrada executável até 15s</div>
+          <div id="pump-strategy-moment-zero" class="text-lg font-black font-mono text-fuchsia-300">${momentZeroRate}</div>
+          <div class="text-[10px] text-slate-500">Proxy SHADOW de momento 0; usa o horário concluído da cotação.</div>
         </div>
       </div>
       <div class="overflow-x-auto">
@@ -1103,6 +1132,9 @@ export function renderDashboardHtml(state: DashboardState): string {
         const labSamples = document.getElementById('pump-strategy-lab-samples');
         const labPlan = document.getElementById('pump-strategy-lab-plan');
         const labNet = document.getElementById('pump-strategy-lab-net');
+        const labRouteRate = document.getElementById('pump-strategy-route-rate');
+        const labRouteLag = document.getElementById('pump-strategy-route-lag');
+        const labMomentZero = document.getElementById('pump-strategy-moment-zero');
         const labTbody = document.getElementById('pump-strategy-lab-tbody');
         const labError = document.getElementById('pump-strategy-lab-error');
         if (labError) {
@@ -1117,6 +1149,21 @@ export function renderDashboardHtml(state: DashboardState): string {
           labNet.textContent = strategyLab.preferredPlanNetAfterCostSol == null
             ? '—'
             : Number(strategyLab.preferredPlanNetAfterCostSol).toFixed(6) + ' SOL';
+        }
+        const readiness = strategyLab.routeReadiness || {};
+        const probedMints = Number(readiness.probedMints || 0);
+        if (labRouteRate) {
+          labRouteRate.textContent = probedMints === 0 ? '—' :
+            (Number(readiness.compliantRouteRate || 0) * 100).toFixed(1) + '% (' +
+            Number(readiness.compliantRouteMints || 0) + '/' + probedMints + ')';
+        }
+        if (labRouteLag) {
+          labRouteLag.textContent = 'latência mediana: ' + pumpLagText(readiness.medianFirstCompliantRouteLagMs);
+        }
+        if (labMomentZero) {
+          labMomentZero.textContent = probedMints === 0 ? '—' :
+            (Number(readiness.momentZeroRate || 0) * 100).toFixed(1) + '% (' +
+            Number(readiness.momentZeroMints || 0) + '/' + probedMints + ')';
         }
         if (labTbody) {
           const strategies = Array.isArray(strategyLab.strategies) ? strategyLab.strategies : [];

@@ -35,6 +35,28 @@ export interface PumpStrategySummaryRecord {
   metrics: Record<string, unknown>;
 }
 
+export interface PumpStrategyRecoveryState {
+  observations: Array<{
+    mint: string;
+    signature: string;
+    payload: Record<string, unknown>;
+  }>;
+  shadowTrades: Array<{
+    mint: string;
+    cohort: string;
+    venue: string;
+    entryAtMs: number;
+    payload: Record<string, unknown>;
+  }>;
+  marketSamples: Array<{
+    mint: string;
+    sampledAtMs: number;
+    cohort?: string;
+    venue?: string;
+    payload: Record<string, unknown>;
+  }>;
+}
+
 export class PumpStrategyRepository {
   constructor(private readonly db: PumpStrategyQueryable | null | undefined) {}
 
@@ -89,4 +111,58 @@ export class PumpStrategyRepository {
       [record.cohort, record.venue, record.state, record.sampleCount, JSON.stringify(record.metrics)]
     );
   }
+
+  async loadRecoveryState(sinceMs: number): Promise<PumpStrategyRecoveryState> {
+    if (!this.db) return { observations: [], shadowTrades: [], marketSamples: [] };
+    const [observations, shadows, samples] = await Promise.all([
+      this.db.query(
+        `SELECT mint,signature,payload
+         FROM solana_pump_observations
+         WHERE observed_at >= to_timestamp($1 / 1000.0)
+         ORDER BY observed_at ASC`,
+        [sinceMs]
+      ),
+      this.db.query(
+        `SELECT mint,cohort,venue,
+                floor(extract(epoch from entry_at) * 1000)::bigint AS entry_at_ms,
+                payload
+         FROM solana_pump_shadow_trades
+         WHERE entry_at >= to_timestamp($1 / 1000.0)
+         ORDER BY entry_at ASC`,
+        [sinceMs]
+      ),
+      this.db.query(
+        `SELECT mint,cohort,venue,
+                floor(extract(epoch from sampled_at) * 1000)::bigint AS sampled_at_ms,
+                payload
+         FROM solana_pump_market_samples
+         WHERE sampled_at >= to_timestamp($1 / 1000.0)
+         ORDER BY sampled_at ASC`,
+        [sinceMs]
+      )
+    ]);
+
+    return {
+      observations: (observations.rows || []).map((row: any) => ({
+        mint: String(row.mint),
+        signature: String(row.signature),
+        payload: row.payload || {}
+      })),
+      shadowTrades: (shadows.rows || []).map((row: any) => ({
+        mint: String(row.mint),
+        cohort: String(row.cohort),
+        venue: String(row.venue),
+        entryAtMs: Number(row.entry_at_ms),
+        payload: row.payload || {}
+      })),
+      marketSamples: (samples.rows || []).map((row: any) => ({
+        mint: String(row.mint),
+        sampledAtMs: Number(row.sampled_at_ms),
+        cohort: row.cohort == null ? undefined : String(row.cohort),
+        venue: row.venue == null ? undefined : String(row.venue),
+        payload: row.payload || {}
+      }))
+    };
+  }
+
 }

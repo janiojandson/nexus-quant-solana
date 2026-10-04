@@ -333,3 +333,79 @@ test('a failed market write is retried with one fresh mark rather than losing th
   assert.equal(markets[0].sampledAtMs, 26_000);
   assert.equal(runtime.snapshot().strategies[0].sampleCount, 1);
 });
+
+
+test('runtime rebuilds persisted shadows, horizons and policy summaries after restart', async () => {
+  let appendedObservations = 0;
+  const summaries: any[] = [];
+  const trade = {
+    mint: 'Mint111',
+    cohort: 'BIRTH_0_15S',
+    venue: 'JUPITER_ROUTE',
+    entryAtMs: 10_000,
+    entryPrincipalSol: 0.001,
+    entryFeeBps: 0,
+    entrySlippageBps: 0,
+    priorityFeeLamports: 0,
+    networkFeeLamports: 0,
+    exitMarks: []
+  };
+  const mark = {
+    horizon: '15s',
+    observedAtMs: 25_000,
+    grossExitValueSol: 0.0011,
+    executable: true,
+    exitFeeBps: 0,
+    exitSlippageBps: 0,
+    priorityFeeLamports: 0,
+    networkFeeLamports: 0,
+    netPnlSol: 0.0001,
+    netReturnPct: 10,
+    totalCostSol: 0
+  };
+  const store = {
+    appendObservation: async () => { appendedObservations++; },
+    appendShadowTrade: async () => {},
+    appendMarketSample: async () => {},
+    upsertStrategySummary: async (row: any) => { summaries.push(row); },
+    loadRecoveryState: async () => ({
+      observations: [{ mint: 'Mint111', signature: 'Sig111', payload: {} }],
+      shadowTrades: [{
+        mint: 'Mint111',
+        cohort: 'BIRTH_0_15S',
+        venue: 'JUPITER_ROUTE',
+        entryAtMs: 10_000,
+        payload: {
+          trade,
+          entryWindow: 'LAUNCH_0_15S',
+          entryAgeMs: 10_000,
+          tokenAmountAtomic: 1_000_000
+        }
+      }],
+      marketSamples: [{
+        mint: 'Mint111',
+        sampledAtMs: 25_000,
+        cohort: 'BIRTH_0_15S',
+        venue: 'JUPITER_ROUTE',
+        payload: { entryWindow: 'LAUNCH_0_15S', mark }
+      }]
+    })
+  };
+
+  const runtime = new PumpStrategyLabRuntime(source(), new FakeProvider(), store, {
+    now: () => 25_000,
+    horizons: [{ label: '15s', ms: 15_000 }]
+  });
+  await runtime.restore();
+
+  const snapshot = runtime.snapshot();
+  assert.equal(snapshot.totalSamples, 1);
+  assert.equal(snapshot.strategies.length, 1);
+  assert.equal(snapshot.strategies[0].entryWindow, 'LAUNCH_0_15S');
+  assert.equal(snapshot.strategies[0].sampleCount, 1);
+  assert.equal(snapshot.strategies[0].exitPolicyReplays.length, 5);
+  assert.ok(summaries.length > 0);
+
+  await runtime.sample();
+  assert.equal(appendedObservations, 0);
+});
