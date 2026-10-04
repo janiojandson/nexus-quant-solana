@@ -15,6 +15,9 @@ import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { SolanaWalletService } from '../src/blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from '../src/blockchain/jupiterExecutionEngine.js';
 import { DexAggregatorService } from '../src/blockchain/dexAggregator.js';
+import { assertCanonicalAtaCustody } from '../src/position/custody.js';
+import { financialExitSafetyGuard, safeBigIntToNumber } from '../src/execution/financialExitSafetyGuard.js';
+import { atomicToUiAmount } from '../src/execution/atomicAmount.js';
 
 dotenv.config();
 
@@ -47,6 +50,7 @@ async function main() {
   const owner = keypair.publicKey;
   const jup = new PublicKey(JUP_MINT);
   const ata = await getAssociatedTokenAddress(jup, owner);
+  assertCanonicalAtaCustody(owner.toBase58(), JUP_MINT, ata.toBase58());
 
   console.log(`Conta : ${owner.toBase58()}`);
   console.log(`RPC   : ${rpcUrl.split('?')[0]}`);
@@ -92,6 +96,12 @@ async function main() {
   // ------------------------------------------------------------------
   banner('2. COTAÇÃO DE SAÍDA');
 
+  const lock = financialExitSafetyGuard.acquireExitLock(JUP_MINT, raw);
+  if (!lock.allowed) {
+    console.error(`❌ Saída bloqueada pelo safety guard: ${lock.reason || lock.code}`);
+    process.exit(1);
+  }
+
   const aggregator = new DexAggregatorService();
   const engine = new JupiterExecutionEngine({
     connection,
@@ -99,72 +109,88 @@ async function main() {
     dexAggregator: aggregator
   });
 
-  let quote;
-  try {
-    quote = await aggregator.getQuote({
-      inputMint: JUP_MINT,
-      outputMint: SOL_MINT,
-      amountLamports: Number(raw),
-      slippageBps: 100
-    });
-  } catch (err: any) {
-    console.error(`❌ Falha na cotação: ${err?.message || err}`);
-    process.exit(1);
-  }
-
-  const expectedSol = quote.outAmount / LAMPORTS_PER_SOL;
-  console.log(`Rota           : ${quote.routePlanSummary}`);
-  console.log(`Price Impact   : ${(quote.priceImpactPct || 0).toFixed(4)}%`);
-  console.log(`Amount bruto   : ${raw}`);
-  console.log(`SOL esperado   : ${expectedSol.toFixed(6)}`);
-
-  if (expectedSol <= 0.0001) {
-    console.error('\n❌ Cotação devolve valor irrisório — abortando para não gastar taxa à toa.');
-    process.exit(1);
-  }
-
-  // ------------------------------------------------------------------
-  // 3. Swap de saída (com retentativa a 200 bps)
-  // ------------------------------------------------------------------
-  banner('3. VENDA');
-
-  const blockhash = await connection.getLatestBlockhash('confirmed');
-
   let sold = false;
   let exitSig = '';
-  for (const slippageBps of [100, 200]) {
-    console.log(`\nTentando saída com slippage ${slippageBps} bps...`);
-    const res = await engine.executeSwap({
-      inputMint: JUP_MINT,
-      outputMint: SOL_MINT,
-      amountLamports: Number(raw),
-      slippageBps,
-      autoSlippage: false,
-      skipPreflight: false,
-      userPublicKey: owner.toBase58(),
-      keypair,
-      priorityLevel: 'veryHigh'
-    });
 
-    if (res.status !== 'SUCCESS') {
-      console.error(`   ❌ Falhou: ${res.error}`);
-      continue;
-    }
-
-    console.log(`   ⏳ Assinatura: ${res.txSignature}`);
-    console.log(`   CU: ${res.unitsConsumed ?? 'n/d'}`);
+  try {
+    let quote;
     try {
-      await connection.confirmTransaction(
-        { signature: res.txSignature, ...blockhash },
-        'confirmed'
-      );
-      console.log(`   ✅ Confirmada. Solscan: ${SOLSCAN}${res.txSignature}`);
-      exitSig = res.txSignature;
-      sold = true;
-      break;
+      quote = await aggregator.getQuote({
+        inputMint: JUP_MINT,
+        outputMint: SOL_MINT,
+        amountLamports: safeBigIntToNumber(raw, 'rescueJup_quote_amount'),
+        slippageBps: 100
+      });
     } catch (err: any) {
-      console.error(`   ❌ Timeout de confirmação: ${err?.message || err}`);
+      console.error(`❌ Falha na cotação: ${err?.message || err}`);
+      process.exit(1);
     }
+
+    const expectedSol = quote.outAmount / LAMPORTS_PER_SOL;
+    console.log(`Rota           : ${quote.routePlanSummary}`);
+    console.log(`Price Impact   : ${(quote.priceImpactPct || 0).toFixed(4)}%`);
+    console.log(`Amount bruto   : ${raw}`);
+    console.log(`SOL esperado   : ${expectedSol.toFixed(6)}`);
+
+    if (expectedSol <= 0.0001) {
+      console.error('\n❌ Cotação devolve valor irrisório — abortando para não gastar taxa à toa.');
+      process.exit(1);
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Swap de saída (com retentativa a 200 bps)
+    // ------------------------------------------------------------------
+    banner('3. VENDA');
+
+    const blockhash = await connection.getLatestBlockhash('confirmed');
+
+    for (const slippageBps of [100, 200]) {
+      console.log(`\nTentando saída com slippage ${slippageBps} bps...`);
+      const res = await engine.executeSwap({
+        inputMint: JUP_MINT,
+        outputMint: SOL_MINT,
+        amountLamports: safeBigIntToNumber(raw, 'rescueJup_executeSwap_amount'),
+        slippageBps,
+        autoSlippage: false,
+        skipPreflight: false,
+        userPublicKey: owner.toBase58(),
+        keypair,
+        priorityLevel: 'veryHigh'
+      });
+
+      if (res.status !== 'SUCCESS') {
+        console.error(`   ❌ Falhou: ${res.error}`);
+        continue;
+      }
+
+      console.log(`   ⏳ Assinatura: ${res.txSignature}`);
+      console.log(`   CU: ${res.unitsConsumed ?? 'n/d'}`);
+      try {
+        await connection.confirmTransaction(
+          { signature: res.txSignature, ...blockhash },
+          'confirmed'
+        );
+        // Verificação econômica de landing por assinatura exata (Finding R-P0-03)
+        const reconciled = await wallet.reconcileExactTransaction({
+          signature: res.txSignature,
+          mintAddress: JUP_MINT,
+          expectedOwner: owner.toBase58(),
+          direction: 'OUT'
+        });
+        if (reconciled && reconciled.error) {
+          console.error(`   ❌ Reconciliação acusou erro on-chain: ${reconciled.error}`);
+          continue;
+        }
+        console.log(`   ✅ Confirmada e reconciliada on-chain. Solscan: ${SOLSCAN}${res.txSignature}`);
+        exitSig = res.txSignature;
+        sold = true;
+        break;
+      } catch (err: any) {
+        console.error(`   ❌ Timeout de confirmação/reconciliação: ${err?.message || err}`);
+      }
+    }
+  } finally {
+    financialExitSafetyGuard.releaseExitLock(JUP_MINT);
   }
 
   if (!sold) {
@@ -193,7 +219,7 @@ async function main() {
       console.log('⚠️  Falha ao fechar a ATA.');
     }
   } else {
-    console.log(`🛡️  Restam ${Number(remainingRaw) / 10 ** 6} JUP — ATA mantida.`);
+    console.log(`🛡️  Restam ${atomicToUiAmount(remainingRaw.toString(), 6)} JUP — ATA mantida.`);
   }
 
   // ------------------------------------------------------------------

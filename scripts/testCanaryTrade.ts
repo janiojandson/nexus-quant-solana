@@ -28,6 +28,8 @@ import {
   atomicToUiAmount,
   evaluateCapitalReturn
 } from '../src/execution/atomicAmount.js';
+import { assertCanonicalAtaCustody } from '../src/position/custody.js';
+import { financialExitSafetyGuard, safeBigIntToNumber } from '../src/execution/financialExitSafetyGuard.js';
 
 dotenv.config();
 
@@ -148,6 +150,7 @@ async function main() {
   const keypair = wallet.getKeypair();
   const owner = keypair.publicKey;
   const ata = await getAssociatedTokenAddress(new PublicKey(target.mint), owner);
+  assertCanonicalAtaCustody(owner.toBase58(), target.mint, ata.toBase58());
 
   const initialBalance = await wallet.getBalanceSol();
   report.initialBalanceSol = initialBalance;
@@ -305,50 +308,76 @@ async function main() {
   const exitStart = Date.now();
   let sold = false;
 
-  for (let attempt = 0; attempt < EXIT_SLIPPAGE_BPS.length; attempt++) {
-    const slippageBps = EXIT_SLIPPAGE_BPS[attempt];
-    const label = attempt === 0 ? 'tentativa padrão' : `retentativa ${attempt + 1}`;
-    console.log(`\n${label} — slippage ${slippageBps} bps...`);
+  const lockResult = financialExitSafetyGuard.acquireExitLock(target.mint, sellAtomicBig);
+  if (!lockResult.allowed) {
+    report.status = 'FALHA_NA_SAIDA';
+    report.errors.push(`Lock de saída rejeitado: ${lockResult.reason || lockResult.code}`);
+    console.error(`❌ Lock de saída rejeitado: ${lockResult.reason || lockResult.code}`);
+    return finalize();
+  }
 
-    try {
-      const res = await engine.executeSwap({
-        inputMint: target.mint,
-        outputMint: SOL_MINT,
-        amountLamports: Number(sellAtomicBig),
-        slippageBps,
-        autoSlippage: false,
-        skipPreflight: false,
-        userPublicKey: owner.toBase58(),
-        keypair,
-        priorityLevel: 'veryHigh'
-      });
+  try {
+    for (let attempt = 0; attempt < EXIT_SLIPPAGE_BPS.length; attempt++) {
+      const slippageBps = EXIT_SLIPPAGE_BPS[attempt];
+      const label = attempt === 0 ? 'tentativa padrão' : `retentativa ${attempt + 1}`;
+      console.log(`\n${label} — slippage ${slippageBps} bps...`);
 
-      if (res.status !== 'SUCCESS') {
-        console.error(`   ❌ Falhou: ${res.error}`);
-        report.errors.push(`Saída (${slippageBps} bps): ${res.error}`);
-        continue;
+      try {
+        const res = await engine.executeSwap({
+          inputMint: target.mint,
+          outputMint: SOL_MINT,
+          amountLamports: safeBigIntToNumber(sellAtomicBig, 'testCanaryTrade_sellAtomicBig'),
+          slippageBps,
+          autoSlippage: false,
+          skipPreflight: false,
+          userPublicKey: owner.toBase58(),
+          keypair,
+          priorityLevel: 'veryHigh'
+        });
+
+        if (res.status !== 'SUCCESS') {
+          console.error(`   ❌ Falhou: ${res.error}`);
+          report.errors.push(`Saída (${slippageBps} bps): ${res.error}`);
+          continue;
+        }
+
+        console.log(`   ⏳ Assinatura: ${res.txSignature}`);
+        console.log(`   CU: ${res.unitsConsumed ?? 'n/d'}`);
+        await connection.confirmTransaction(
+          { signature: res.txSignature, ...exitBlockhash },
+          'confirmed'
+        );
+
+        // Verificação econômica de landing por assinatura exata (Finding R-P0-03)
+        const reconciled = await wallet.reconcileExactTransaction({
+          signature: res.txSignature,
+          mintAddress: target.mint,
+          expectedOwner: owner.toBase58(),
+          direction: 'OUT'
+        });
+        if (reconciled && reconciled.error) {
+          console.error(`   ❌ Reconciliação acusou erro on-chain: ${reconciled.error}`);
+          report.errors.push(`Reconciliação da saída falhou: ${reconciled.error}`);
+          continue;
+        }
+
+        report.exit.confirmMs = Date.now() - exitStart;
+        report.exit.signature = res.txSignature;
+        report.exit.unitsConsumed = res.unitsConsumed;
+        report.exit.atomicAmount = String(res.outAmount);
+        report.exit.uiAmount = res.outAmount / LAMPORTS_PER_SOL;
+        console.log(`   ✅ Confirmada em ${report.exit.confirmMs} ms`);
+        console.log(`   SOL recuperado: ${report.exit.uiAmount}`);
+        console.log(`   Solscan: ${link(res.txSignature)}`);
+        sold = true;
+        break;
+      } catch (err: any) {
+        console.error(`   ❌ Erro: ${err?.message || err}`);
+        report.errors.push(`Saída (${slippageBps} bps): ${err?.message || err}`);
       }
-
-      console.log(`   ⏳ Assinatura: ${res.txSignature}`);
-      console.log(`   CU: ${res.unitsConsumed ?? 'n/d'}`);
-      await connection.confirmTransaction(
-        { signature: res.txSignature, ...exitBlockhash },
-        'confirmed'
-      );
-      report.exit.confirmMs = Date.now() - exitStart;
-      report.exit.signature = res.txSignature;
-      report.exit.unitsConsumed = res.unitsConsumed;
-      report.exit.atomicAmount = String(res.outAmount);
-      report.exit.uiAmount = res.outAmount / LAMPORTS_PER_SOL;
-      console.log(`   ✅ Confirmada em ${report.exit.confirmMs} ms`);
-      console.log(`   SOL recuperado: ${report.exit.uiAmount}`);
-      console.log(`   Solscan: ${link(res.txSignature)}`);
-      sold = true;
-      break;
-    } catch (err: any) {
-      console.error(`   ❌ Erro: ${err?.message || err}`);
-      report.errors.push(`Saída (${slippageBps} bps): ${err?.message || err}`);
     }
+  } finally {
+    financialExitSafetyGuard.releaseExitLock(target.mint);
   }
 
   if (!sold) {

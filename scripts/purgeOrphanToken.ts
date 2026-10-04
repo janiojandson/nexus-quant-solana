@@ -28,6 +28,9 @@ import {
 } from '@solana/spl-token';
 import { SolanaWalletService } from '../src/blockchain/solanaWallet.js';
 import { DexAggregatorService } from '../src/blockchain/dexAggregator.js';
+import { assertCanonicalAtaCustody } from '../src/position/custody.js';
+import { financialExitSafetyGuard, safeBigIntToNumber } from '../src/execution/financialExitSafetyGuard.js';
+import { assertAtomicAmount } from '../src/execution/atomicAmount.js';
 
 dotenv.config();
 
@@ -63,6 +66,7 @@ async function main() {
   const owner = keypair.publicKey;
   const mint = new PublicKey(TARGET_MINT);
   const ata = await getAssociatedTokenAddress(mint, owner);
+  assertCanonicalAtaCustody(owner.toBase58(), TARGET_MINT, ata.toBase58());
 
   console.log(`Conta : ${owner.toBase58()}`);
   console.log(`Mint  : ${TARGET_MINT}`);
@@ -83,7 +87,9 @@ async function main() {
   }
 
   const bal = await connection.getTokenAccountBalance(ata);
-  const rawAmount = BigInt(bal.value.amount);
+  const rawString = bal?.value?.amount || '0';
+  assertAtomicAmount(rawString);
+  const rawAmount = BigInt(rawString);
   const ui = Number(bal.value.uiAmountString);
   const decimals = bal.decimals;
 
@@ -95,91 +101,111 @@ async function main() {
     console.log('Saldo já é zero — apenas fechando a ATA.');
   }
 
-  // ------------------------------------------------------------------
-  // 2. Tentar vender na Jupiter
-  // ------------------------------------------------------------------
-  banner('2. TENTATIVA DE VENDA (JUPITER)');
-
+  let lockAcquired = false;
   if (rawAmount > 0n) {
-    const aggregator = new DexAggregatorService();
-    try {
-      const quote = await aggregator.getQuote({
-        inputMint: TARGET_MINT,
-        outputMint: SOL_MINT,
-        amountLamports: Number(rawAmount),
-        slippageBps: 500
-      });
-      const solOut = quote.outAmount / LAMPORTS_PER_SOL;
-      console.log(`Rota        : ${quote.routePlanSummary}`);
-      console.log(`SOL esperado: ${solOut.toFixed(9)}`);
-
-      if (solOut > 0.000001) {
-        console.log('✅ Rota de venda viável — use /api/wallet/liquidate-holding no painel.');
-        console.log('   (A purga destrói o token; prefira vender se houver rota.)');
-        process.exit(2);
-      }
-      console.log('Retorno irrisório — sem rota útil.');
-    } catch (err: any) {
-      console.log(`Sem rota de venda: ${err?.message || err}`);
+    const lock = financialExitSafetyGuard.acquireExitLock(TARGET_MINT, rawAmount);
+    if (!lock.allowed) {
+      console.error(`❌ Purga bloqueada pelo safety guard: ${lock.reason || lock.code}`);
+      process.exit(1);
     }
-    console.log('➜ Prosseguindo para burn + fechamento da ATA.');
+    lockAcquired = true;
   }
 
-  // ------------------------------------------------------------------
-  // 3. Queimar o saldo e fechar a ATA
-  // ------------------------------------------------------------------
-  banner('3. BURN + FECHAMENTO DA ATA');
+  try {
+    // ------------------------------------------------------------------
+    // 2. Tentar vender na Jupiter
+    // ------------------------------------------------------------------
+    banner('2. TENTATIVA DE VENDA (JUPITER)');
 
-  const lamports = await connection.getLatestBlockhash('confirmed');
-  const tx = new Transaction({ feePayer: owner, recentBlockhash: lamports.blockhash });
+    if (rawAmount > 0n) {
+      const aggregator = new DexAggregatorService();
+      try {
+        const quote = await aggregator.getQuote({
+          inputMint: TARGET_MINT,
+          outputMint: SOL_MINT,
+          amountLamports: safeBigIntToNumber(rawAmount, 'purgeOrphanToken_quote'),
+          slippageBps: 500
+        });
+        const solOut = quote.outAmount / LAMPORTS_PER_SOL;
+        console.log(`Rota        : ${quote.routePlanSummary}`);
+        console.log(`SOL esperado: ${solOut.toFixed(9)}`);
 
-  // Garante que a ATA exista (idempotente) antes de operar nela.
-  tx.add(
-    createAssociatedTokenAccountIdempotentInstruction(
-      owner,
-      ata,
-      mint,
-      TOKEN_PROGRAM
-    )
-  );
+        if (solOut > 0.000001) {
+          console.log('✅ Rota de venda viável — use /api/wallet/liquidate-holding no painel.');
+          console.log('   (A purga destrói o token; prefira vender se houver rota.)');
+          process.exit(2);
+        }
+        console.log('Retorno irrisório — sem rota útil.');
+      } catch (err: any) {
+        console.log(`Sem rota de venda: ${err?.message || err}`);
+      }
+      console.log('➜ Prosseguindo para burn + fechamento da ATA.');
+    }
 
-  if (rawAmount > 0n) {
+    // ------------------------------------------------------------------
+    // 3. Queimar o saldo e fechar a ATA
+    // ------------------------------------------------------------------
+    banner('3. BURN + FECHAMENTO DA ATA');
+
+    const lamports = await connection.getLatestBlockhash('confirmed');
+    const tx = new Transaction({ feePayer: owner, recentBlockhash: lamports.blockhash });
+
+    // Garante que a ATA exista (idempotente) antes de operar nela.
     tx.add(
-      createBurnCheckedInstruction(
+      createAssociatedTokenAccountIdempotentInstruction(
+        owner,
         ata,
         mint,
-        owner,
-        rawAmount,
+        TOKEN_PROGRAM
+      )
+    );
+
+    if (rawAmount > 0n) {
+      tx.add(
+        createBurnCheckedInstruction(
+          ata,
+          mint,
+          owner,
+          rawAmount,
+          [],
+          TOKEN_PROGRAM
+        )
+      );
+      console.log(`🔥 Burn de ${bal.value.amount} unidades (${ui} tokens).`);
+    }
+
+    tx.add(
+      createCloseAccountInstruction(
+        ata,
+        owner, // destino do rent
+        owner, // autoridade
         [],
         TOKEN_PROGRAM
       )
     );
-    console.log(`🔥 Burn de ${bal.value.amount} unidades (${ui} tokens).`);
-  }
+    console.log(`🔒 Fechamento da ATA → ${owner.toBase58()} (~${RENT_EXEMPTION_SOL} SOL).`);
 
-  tx.add(
-    createCloseAccountInstruction(
-      ata,
-      owner, // destino do rent
-      owner, // autoridade
-      [],
-      TOKEN_PROGRAM
-    )
-  );
-  console.log(`🔒 Fechamento da ATA → ${owner.toBase58()} (~${RENT_EXEMPTION_SOL} SOL).`);
-
-  try {
-    const sig = await sendAndConfirmTransaction(connection, tx, [keypair], {
-      commitment: 'confirmed',
-      preflightCommitment: 'confirmed'
-    });
-    console.log(`\n✅ Transação confirmada`);
-    console.log(`🔗 ${SOLSCAN}${sig}`);
-  } catch (err: any) {
-    console.error(`\n❌ Falha ao executar burn/close: ${err?.message || err}`);
-    const logs = err?.transactionLogs;
-    if (logs?.length) console.error('Logs on-chain:', logs.join(' | '));
-    process.exit(1);
+    try {
+      const sig = await sendAndConfirmTransaction(connection, tx, [keypair], {
+        commitment: 'confirmed',
+        preflightCommitment: 'confirmed'
+      });
+      const sigStatus = await connection.getSignatureStatus(sig);
+      if (sigStatus?.value?.err) {
+        throw new Error(`Transação de burn/close falhou on-chain: ${JSON.stringify(sigStatus.value.err)}`);
+      }
+      console.log(`\n✅ Transação confirmada`);
+      console.log(`🔗 ${SOLSCAN}${sig}`);
+    } catch (err: any) {
+      console.error(`\n❌ Falha ao executar burn/close: ${err?.message || err}`);
+      const logs = err?.transactionLogs;
+      if (logs?.length) console.error('Logs on-chain:', logs.join(' | '));
+      process.exit(1);
+    }
+  } finally {
+    if (lockAcquired) {
+      financialExitSafetyGuard.releaseExitLock(TARGET_MINT);
+    }
   }
 
   // ------------------------------------------------------------------
