@@ -228,18 +228,22 @@ export async function reconstructIncidentPositionLifecycle(
   const txs: Array<{
     signature: string;
     transactionType?: string;
+    walletDelta?: number | null;
+    tokenDelta?: number | null;
   }> = JSON.parse(fs.readFileSync(path.join(incidentDir, 'transactions.json'), 'utf8'));
-  const expected: Record<string, any> = JSON.parse(
-    fs.readFileSync(path.join(incidentDir, 'expected.json'), 'utf8')
-  );
 
   const incidentId = manifest.incidentId;
   const positionId = `pos_synth_${incidentKey}`;
   const tradeId = `trade_synth_${incidentKey}`;
   const walletId = 'Wallet1111111111111111111111111111111111';
   const mint = `Mint_${incidentId}`;
-  const initialPrincipal = BigInt(Math.round(expected.capitalSwapSol * 1e9));
-  const boughtTokens = BigInt(expected.boughtTokensAtomic);
+
+  // REQUIREMENT (P2-02 Replay Provenance):
+  // Transactions and observations are FACTS.
+  // expected.json is purely an ASSERTION and must NOT be used to derive lifecycle state.
+  const entryTx = txs.find(t => t.transactionType === 'ENTRY_BUY') || txs[0];
+  const initialPrincipal = BigInt(Math.abs(Math.round((entryTx.walletDelta ?? 0.02) * 1e9)));
+  const boughtTokens = BigInt(Math.abs(entryTx.tokenDelta ?? 0));
 
   // 1. Position Entry (v1)
   const pos = await repo.createPosition({
@@ -261,10 +265,10 @@ export async function reconstructIncidentPositionLifecycle(
     const partialTx = txs.find(t => t.transactionType === 'PARTIAL_SELL') || txs[1];
     const finalTx = txs.find(t => t.transactionType === 'FINAL_SELL') || txs[3];
 
-    const partialTokens = BigInt(expected.partialTokensAtomic);
-    const partialProceeds = BigInt(Math.round(expected.partialProceedsSol * 1e9));
-    const finalTokens = BigInt(expected.finalTokensAtomic);
-    const finalProceeds = BigInt(Math.round(expected.finalProceedsSol * 1e9));
+    const partialTokens = BigInt(Math.abs(partialTx.tokenDelta ?? 0));
+    const partialProceeds = BigInt(Math.abs(Math.round((partialTx.walletDelta ?? 0) * 1e9)));
+    const finalTokens = BigInt(Math.abs(finalTx.tokenDelta ?? 0));
+    const finalProceeds = BigInt(Math.abs(Math.round((finalTx.walletDelta ?? 0) * 1e9)));
 
     // Fill 1: Partial sell -> moves v1 to v2
     const fill1Res = await repo.applyFill({
@@ -309,8 +313,9 @@ export async function reconstructIncidentPositionLifecycle(
 
   // Simulações rejeitadas: nada é aplicado ao repositório de posição
   // O versionamento econômico permanece intacto em v1
-  const finalTx = txs.find(t => t.transactionType === 'FINAL_SELL') || txs[0];
-  const finalProceeds = BigInt(3_183_856); // Proceeds históricos on-chain auditados
+  const finalTx = txs.find(t => t.transactionType === 'FINAL_SELL') || txs[1];
+  const finalTokens = BigInt(Math.abs(finalTx.tokenDelta ?? 0));
+  const finalProceeds = BigInt(Math.abs(Math.round((finalTx.walletDelta ?? 0) * 1e9)));
 
   // Aplicação do único fill confirmado: transição v1 -> v2
   const finalFillRes = await repo.applyFill({
@@ -318,7 +323,7 @@ export async function reconstructIncidentPositionLifecycle(
     expectedVersion: currentExpectedVersion,
     fillId: `fill_${incidentKey}_final`,
     signature: finalTx.signature,
-    fillAmountAtomic: boughtTokens,
+    fillAmountAtomic: finalTokens > 0n ? finalTokens : boughtTokens,
     proceedsLamports: finalProceeds,
     isFinal: true
   });
