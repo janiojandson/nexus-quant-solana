@@ -385,3 +385,31 @@ test('PositionExitEngine: separa pico observado do executável e outage Jupiter 
   assert.strictEqual(afterRecovery.lastHealthyExitRouteAt, 2000);
   assert.strictEqual(engine.getPeakSolValue(mint), 0.030);
 });
+
+test('Tesla: restored runner gap closes entire position at observed executable value', () => {
+ const engine = new PositionExitEngine();
+ engine.addPosition({mint:'TeslaGap',symbol:'TESLA',tokenAmount:2187913065,entryPriceUsd:1,entryTimestamp:Date.now(),
+ entrySol:0.01,partialTaken:true,executablePeakSolValue:0.047647,peakSolValue:0.047647});
+ const signal=engine.evaluateExitBySol('TeslaGap',0.000041149);
+ assert.strictEqual(signal.type,'TRAILING_STOP');
+ assert.strictEqual(signal.exitTokenAmount,2187913065);
+ assert.strictEqual(signal.currentPriceUsd,0.000041149);
+});
+test('partial confirmation preserves proportional executable high-water mark',()=>{
+ const engine = new PositionExitEngine();
+ engine.addPosition({mint:'Peak',symbol:'PEAK',tokenAmount:1000,entryPriceUsd:1,entryTimestamp:Date.now(),entrySol:0.02});
+ engine.evaluateExitBySol('Peak',0.04);
+ assert.strictEqual(engine.commitPartialExit('Peak',500,0.03),true);
+ assert.strictEqual(engine.getPosition('Peak')?.executablePeakSolValue,0.02);
+ assert.strictEqual(engine.evaluateExitBySol('Peak',0.015).type,'TRAILING_STOP');
+});
+test('full protective exits precede profit partials after a pullback or liquidity drain',()=>{
+ for (const kind of ['pullback','drain']) {
+ const engine = new PositionExitEngine();
+ engine.addPosition({mint:kind,symbol:kind,tokenAmount:1000,entryPriceUsd:1,entryTimestamp:Date.now(),entrySol:0.02,entryLiquidityUsd:1000});
+ if(kind==='pullback')engine.evaluateExitBySol(kind,0.04);
+ const signal=engine.evaluateExitBySol(kind,0.03,Date.now(),{currentLiquidityUsd:kind==='drain'?500:1000});
+ assert.strictEqual(signal.shouldExit,true);assert.strictEqual(signal.exitTokenAmount,1000);
+ assert.notStrictEqual(signal.type,'PARTIAL_TAKE_PROFIT_50');
+ }
+});
