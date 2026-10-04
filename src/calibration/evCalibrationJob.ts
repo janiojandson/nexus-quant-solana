@@ -1,3 +1,4 @@
+import { UNMEASURED_LEGACY_GATES } from '../audit/contractGates.js';
 // ============================================================
 // evCalibrationJob.ts — Nexus Quant Solana
 // Cron noturno (03:00 UTC) — Modo Informativo (READ-ONLY)
@@ -210,6 +211,7 @@ export class EVCalibrationJob {
     mint: string;
     decision: string;
     gate_details: string;
+    gate_evidence_version?: string | number | null;
     token_age_minutes: number | null;
     liquidity_usd: number | null;
     buy_sell_ratio: number | null;
@@ -221,7 +223,7 @@ export class EVCalibrationJob {
     try {
       const result = await client.query(
         `SELECT
-          trace_id, mint, decision, gate_details,
+          trace_id, mint, decision, gate_details, metadata->>'gateEvidenceVersion' AS gate_evidence_version,
           token_age_minutes, liquidity_usd,
           buy_sell_ratio, distance_from_low,
           sentinel_regime, session_hour_utc, latency_to_send_ms
@@ -288,6 +290,7 @@ export class EVCalibrationJob {
       trace_id: string;
       decision: string;
       gate_details: string;
+      gate_evidence_version?: string | number | null;
     }>,
     trades: Array<{ trace_id: string; pnl_pct: number }>,
     report: CalibrationReport
@@ -324,6 +327,8 @@ export class EVCalibrationJob {
       if (!Array.isArray(gates)) continue;
 
       for (const g of gates) {
+        if (g.result !== 'PASS' && g.result !== 'FAIL') continue;
+        if (!(Number(d.gate_evidence_version) >= 2) && UNMEASURED_LEGACY_GATES.has(g.gate)) continue;
         if (!gateData.has(g.gate)) {
           gateData.set(g.gate, {
             pass: { traceIds: [], pnls: [] },

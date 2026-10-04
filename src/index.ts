@@ -1,3 +1,4 @@
+import { buildContractGates } from './audit/contractGates.js';
 import { NonBlockingTelemetry } from './protection/nonBlockingTelemetry.js';
 import { reportProfitProtectionShadow } from './protection/profitProtectionShadow.js';
 import http from 'http';
@@ -121,6 +122,7 @@ let isRunningFastExit = false;
 let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
+console.log('[RISK_POLICY] initialStopLossPct=' + PositionExitEngine.DEFAULT_STOP_LOSS_PCT + ' gateEvidenceVersion=2');
 const exitPathHealth = new ExitPathHealth({
   emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
 });
@@ -1349,7 +1351,7 @@ async function runUltraFastExitMonitor() {
           `[ExitSensor] Token: ${pos.symbol} | Fonte: ${sensorSource} | PnL: ${(pnlPct * 100).toFixed(2)}% | ` +
           `Impacto: ${executableQuote.priceImpactPct.toFixed(3)}% | ` +
           `Liq: ${liquidityNow !== undefined ? '$' + Math.round(liquidityNow).toLocaleString('en-US') : 'N/D'} | ` +
-          `SL: ${((pos.stopLossPct || -0.06) * 100).toFixed(0)}% | Trailing: ${trailingStatus}`
+          `SL: ${((pos.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT) * 100).toFixed(1)}% | Trailing: ${trailingStatus}`
         );
 
         const elapsedMin = Math.floor((Date.now() - pos.entryTimestamp) / 60000);
@@ -1696,7 +1698,7 @@ async function executeAutonomousCycle() {
             isWeekend: [0, 6].includes(new Date().getUTCDay())
           },
           gateEvaluations: [
-            DecisionLogger.evaluateGate('MATURITY_AGE', tokenAgeMinutes >= 5, tokenAgeMinutes, 5),
+            DecisionLogger.evaluateGate('MATURITY_AGE', tokenAgeMinutes >= 5 && tokenAgeMinutes <= 60, tokenAgeMinutes, 5),
             DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', (token.liquidityUsd || 0) >= 15000, token.liquidityUsd, 15000)
           ],
           rejectionReason: classification.reason || 'Descarte por classificação técnica'
@@ -1787,17 +1789,14 @@ async function executeAutonomousCycle() {
       const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
 
       const gates: GateEvaluation[] = [
-        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 5, candidateAgeMinutes, 5),
+        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 5 && candidateAgeMinutes <= 60, candidateAgeMinutes, 5),
         DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
-        DecisionLogger.evaluateGate('MINT_AUTHORITY', true),
-        DecisionLogger.evaluateGate('FREEZE_AUTHORITY', true),
-        DecisionLogger.evaluateGate('TOP_HOLDERS', true, 20, 20),
+        ...buildContractGates(audit, topCandidate),
         DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 85),
         DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.0),
         DecisionLogger.evaluateGate('SENTINEL_REGIME', isSentinelValid),
         DecisionLogger.evaluateGate('SLOT_AVAILABILITY', openPositions < MAX_CONCURRENT_POSITIONS, openPositions, MAX_CONCURRENT_POSITIONS),
         DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
-        DecisionLogger.evaluateGate('DISTANCE_FROM_LOW', true, 15, 35),
       ];
 
       const currentTraceId = randomUUID();
@@ -1841,6 +1840,8 @@ async function executeAutonomousCycle() {
           rejectionReason: vetoReasonText,
           metadata: {
             layaNativeShadow: audit.layaNativeShadow ?? null,
+            rugCheckReport: audit.rugCheckReport ?? null,
+            gateEvidenceVersion: 2,
             activeValidator: audit.validatedBy
           },
         });
@@ -2251,6 +2252,7 @@ async function executeAutonomousCycle() {
           
           // Snapshot de Entrada (Contexto Inicial da Operação):
           const nowTs = Date.now();
+          const confirmedEntrySol = swapSim.inAmount / 1e9;
 
           // A quote Jupiter informa uma expectativa. Para posição REAL, a quantidade
           // gerida deve vir do delta efetivamente confirmado na própria transação.
@@ -2284,10 +2286,10 @@ async function executeAutonomousCycle() {
             tokenAmount: managedEntryAtomic,
             entryPriceUsd: topCandidate.priceUsd,
             entryTimestamp: nowTs,
-            stopLossPct: -0.06,
+            stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
             takeProfitPct: 0.35, // +35% para colheita parcial 50%
-            entrySol: dynamicAllocSol,
-            entrySolValue: dynamicAllocSol,
+            entrySol: confirmedEntrySol,
+            entrySolValue: confirmedEntrySol,
             entryLiquidityUsd: topCandidate.liquidityUsd,
             entryVolume5m: topCandidate.volume5mUsd || 0,
             entryPairAddress: topCandidate.pairAddress,
@@ -2319,12 +2321,13 @@ async function executeAutonomousCycle() {
               isWeekend: [0, 6].includes(new Date().getUTCDay())
             },
             execution: {
-              sizeSol: dynamicAllocSol,
-              estimatedSlippagePct: 7.5
+              sizeSol: confirmedEntrySol,
+              estimatedSlippagePct: (swapSim.slippageBps ?? 750) / 100
             },
             gateEvaluations: gates,
             metadata: {
               phase: 'ENTRY_EXECUTED',
+              gateEvidenceVersion: 2,
               txSignature: swapSim.txSignature,
               outAmountAtomic: String(managedEntryAtomic),
               quotedOutAmountAtomic: String(Math.trunc(swapSim.outAmount)),
@@ -2334,7 +2337,7 @@ async function executeAutonomousCycle() {
               jupiterFeeBps: swapSim.feeBps ?? null,
               jupiterFeeMint: swapSim.feeMint ?? null,
               jupiterSlippageBps: swapSim.slippageBps ?? null,
-              stopLossPct: -0.06,
+              stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
               takeProfitPct: 0.35,
               entryTimestampMs: nowTs,
               isDryRun: swapSim.isDryRun,
@@ -2358,14 +2361,14 @@ async function executeAutonomousCycle() {
             traceId: currentTraceId,
             mint: topCandidate.mint,
             entryPriceUsd: topCandidate.priceUsd,
-            entrySizeSol: dynamicAllocSol,
+            entrySizeSol: confirmedEntrySol,
             entryTimestamp: new Date(nowTs),
-            entrySlippagePct: (swapSim.slippageBps ?? 750) / 100,
+            // Slippage tolerance is not realized slippage; leave the latter unknown.
             status: 'OPEN'
           });
           await journal.flush();
 
-          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -6% | TP: +35%)`);
+          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -12.5% | TP: +35%)`);
           
           // CORREÇÃO: Atualiza saldo imediatamente após compra
           const newBalance = await wallet.getBalanceSol();
@@ -2564,7 +2567,7 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
           lastHealthyExitRouteAt: row.last_healthy_exit_route_at
             ? new Date(row.last_healthy_exit_route_at).getTime()
             : undefined,
-          stopLossPct: Number(metadata.stopLossPct ?? -0.06),
+          stopLossPct: Number(metadata.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT),
           takeProfitPct: Number(metadata.takeProfitPct ?? 0.35),
           partialTaken: row.status === 'PARTIAL_CLOSED',
           entryTxSignature: String(metadata.txSignature)
@@ -2633,7 +2636,7 @@ async function rehydratePositionsFromWalletOnBoot() {
 
       const remainingRatio = managedAtomic / recovery.initialTokenAmountAtomic;
       const remainingEntrySol = recovery.entrySizeSol * remainingRatio;
-      const effectiveStopLossPct = recovery.partialTaken ? 0.01 : recovery.stopLossPct;
+      const effectiveStopLossPct = recovery.partialTaken ? 0.01 : (recovery.stopLossPct >= 0 ? recovery.stopLossPct : PositionExitEngine.DEFAULT_STOP_LOSS_PCT);
 
       positionEngine.addPosition({
         mint: spl.mint,

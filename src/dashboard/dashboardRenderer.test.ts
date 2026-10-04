@@ -87,7 +87,7 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /Elegíveis para Auditoria/);
   assert.match(html, /PnL\/Stop Jupiter executável 1\.5s/);
   assert.match(html, /DexScreener referência/);
-  assert.match(html, /SL inicial: -6%/);
+  assert.match(html, /SL inicial: -12.5%/);
   assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
   assert.match(html, /Stop Ativo: Trailing Momentum/);
   assert.match(html, /Proteção de Saída/);

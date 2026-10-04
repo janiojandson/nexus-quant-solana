@@ -78,7 +78,7 @@ test('PositionExitEngine: pos-parcial, deve encerrar TRAILING_STOP se recuar 10%
   assert.strictEqual(evalTrailing.shouldCloseAta, true);
 });
 
-test('PositionExitEngine: deve disparar STOP_LOSS inicial a -6% antes da parcial e fechar ATA', () => {
+test('PositionExitEngine: deve disparar STOP_LOSS inicial a -12.5% antes da parcial e fechar ATA', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestStopLoss';
   engine.addPosition({
@@ -90,8 +90,9 @@ test('PositionExitEngine: deve disparar STOP_LOSS inicial a -6% antes da parcial
     entrySol: 0.015
   });
 
-  // -6% de 0.015 = 0.0141 SOL. 0.0140 dispara Stop Loss
-  const evalStop = engine.evaluateExitBySol(mint, 0.0140);
+  // 0.015 SOL spent: the -12.5% trigger is 0.013125 SOL in executable value.
+  assert.strictEqual(engine.evaluateExitBySol(mint, 0.013875).shouldExit, false, '-7.5% is above the new initial stop');
+  const evalStop = engine.evaluateExitBySol(mint, 0.013125);
   assert.strictEqual(evalStop.shouldExit, true);
   assert.strictEqual(evalStop.type, 'STOP_LOSS');
   assert.strictEqual(evalStop.shouldCloseAta, true);

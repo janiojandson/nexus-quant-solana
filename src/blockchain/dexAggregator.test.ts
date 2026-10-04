@@ -17,7 +17,7 @@ describe('DexAggregatorService - Jupiter', () => {
       data: {
         inAmount: '100000000',
         outAmount: '20000000',
-        priceImpactPct: '0.0042',
+        slippageBps: 250, priceImpactPct: '0.0042',
         routePlan: [{ swapInfo: { label: 'Raydium CPMM' } }]
       }
     })) as any;
@@ -112,7 +112,7 @@ describe('DexAggregatorService - Jupiter', () => {
 
   it('preserva outAmount real', async () => {
     axios.get = (async () => ({
-      data: { inAmount: '50000000', outAmount: '1234', priceImpactPct: '0.001' }
+      data: { inAmount: '50000000', outAmount: '1234', slippageBps: 250, priceImpactPct: '0.001' }
     })) as any;
 
     const dex = new DexAggregatorService('https://fake.invalid');
@@ -130,7 +130,7 @@ describe('DexAggregatorService - Jupiter', () => {
     let calls = 0;
     axios.get = (async () => {
       calls++;
-      return { data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' } };
+      return { data: { inAmount: '100', outAmount: '200', slippageBps: 250, priceImpactPct: '0.001' } };
     }) as any;
 
     const dex = new DexAggregatorService('https://fake.invalid', {
@@ -153,7 +153,7 @@ describe('DexAggregatorService - Jupiter', () => {
         data: {
           inAmount: '100',
           outAmount: '200',
-          priceImpactPct: '0.001',
+          slippageBps: 250, priceImpactPct: '0.001',
           router: 'metis',
           mode: 'ultra'
         }
@@ -183,7 +183,7 @@ it('DexAggregatorService routes quote traffic through injected coordinator prior
   const seen: Array<{ priority: number; bucket: string }> = [];
   try {
     axios.get = (async () => ({
-      data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' }
+      data: { inAmount: '100', outAmount: '200', slippageBps: 250, priceImpactPct: '0.001' }
     })) as any;
     const coordinator: any = {
       async schedule(priority: number, op: () => Promise<unknown>, bucket = 'general') {
@@ -224,7 +224,7 @@ it('DexAggregatorService: faz um único retry após 429 e reaproveita sucesso', 
         e.response = { status: 429, headers: {}, data: { error: 'rate limit exceeded' } };
         throw e;
       }
-      return { data: { inAmount: '100', outAmount: '200', priceImpactPct: '0.001' } };
+      return { data: { inAmount: '100', outAmount: '200', slippageBps: 250, priceImpactPct: '0.001' } };
     }) as any;
 
     const dex = new DexAggregatorService('https://fake.invalid', {
@@ -262,4 +262,33 @@ describe('bounded RTSE quote replacement',()=>{
   await assert.rejects(()=>dex.getQuote({inputMint:'SOL',outputMint:'TOKEN',amountLamports:1000000,autoSlippage:true,maxAutoSlippageBps:750}),/hard-cap/);
   assert.strictEqual(calls,2);
  });
+});
+
+describe('V2 quote evidence and cache policy', () => {
+  const original = axios.get;
+  afterEach(() => { axios.get = original; });
+  it('rejects missing slippage instead of assuming zero', async () => {
+    axios.get = (async () => ({data:{inAmount:'100',outAmount:'200',priceImpact:0}})) as any;
+    const dex = new DexAggregatorService('https://fake.invalid',{rateLimitMs:0,cacheTtlMs:0});
+    await assert.rejects(()=>dex.getQuote({inputMint:'SOL',outputMint:'TOKEN',amountLamports:100}),/invalid quote slippage/);
+  });
+  it('never reuses a cached quote above a later, tighter cap', async () => {
+    const seen:any[]=[];
+    axios.get=(async (_url:string,c:any)=>{
+      seen.push({...c.params});
+      return {data:{inAmount:'100',outAmount:'200',slippageBps:c.params.slippageBps ?? 700,priceImpact:0}};
+    }) as any;
+    const dex=new DexAggregatorService('https://fake.invalid',{rateLimitMs:0,cacheTtlMs:5000});
+    const params={inputMint:'SOL',outputMint:'TOKEN',amountLamports:100,autoSlippage:true};
+    await dex.getQuote({...params,maxAutoSlippageBps:750});
+    const q=await dex.getQuote({...params,maxAutoSlippageBps:300});
+    assert.strictEqual(q.slippageBps,300);
+    assert.strictEqual(seen.length,3);
+    assert.strictEqual(seen[2].slippageBps,300);
+  });
+  it('falls back from null modern impact to the documented decimal ratio', async () => {
+    axios.get=(async()=>({data:{inAmount:'100',outAmount:'200',slippageBps:250,priceImpact:null,priceImpactPct:'0.0042'}})) as any;
+    const dex=new DexAggregatorService('https://fake.invalid',{rateLimitMs:0,cacheTtlMs:0});
+    assert.strictEqual((await dex.getQuote({inputMint:'SOL',outputMint:'TOKEN',amountLamports:100})).priceImpactPct,0.42);
+  });
 });
