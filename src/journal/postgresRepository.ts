@@ -361,11 +361,11 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         INSERT INTO execution_attempts (
           attempt_id, intent_id, provider, route, request_id, message_hash,
           signature, requested_amount_atomic, expected_out_atomic, minimum_out_atomic,
-          state, failure_reason, error_classification, started_at, prepared_at
+          state, failure_reason, error_classification, last_valid_block_height, started_at, prepared_at
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL,
-          to_timestamp($12 / 1000.0),
-          CASE WHEN $11 IN ('ORDER_READY', 'SIGNED') THEN to_timestamp($12 / 1000.0) ELSE NULL END
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, $12,
+          to_timestamp($13 / 1000.0),
+          CASE WHEN $11 IN ('ORDER_READY', 'SIGNED') THEN to_timestamp($13 / 1000.0) ELSE NULL END
         ) RETURNING *;
       `;
 
@@ -381,6 +381,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         input.expectedOutAtomic || null,
         input.minimumOutAtomic || null,
         input.initialState || 'INITIALIZED',
+        input.lastValidBlockHeight !== undefined && input.lastValidBlockHeight !== null ? String(input.lastValidBlockHeight) : null,
         now
       ]);
 
@@ -446,11 +447,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
             message_hash = COALESCE($4, message_hash),
             failure_reason = COALESCE($5, failure_reason),
             error_classification = COALESCE($6, error_classification),
-            prepared_at = CASE WHEN $7::bigint IS NOT NULL THEN to_timestamp($7::bigint / 1000.0) ELSE prepared_at END,
-            submitted_at = CASE WHEN $8::bigint IS NOT NULL THEN to_timestamp($8::bigint / 1000.0) ELSE submitted_at END,
-            provider_receipt_at = CASE WHEN $9::bigint IS NOT NULL THEN to_timestamp($9::bigint / 1000.0) ELSE provider_receipt_at END,
-            confirmed_at = CASE WHEN $10::bigint IS NOT NULL THEN to_timestamp($10::bigint / 1000.0) ELSE confirmed_at END
-        WHERE attempt_id = $11
+            last_valid_block_height = COALESCE($7, last_valid_block_height),
+            prepared_at = CASE WHEN $8::bigint IS NOT NULL THEN to_timestamp($8::bigint / 1000.0) ELSE prepared_at END,
+            submitted_at = CASE WHEN $9::bigint IS NOT NULL THEN to_timestamp($9::bigint / 1000.0) ELSE submitted_at END,
+            provider_receipt_at = CASE WHEN $10::bigint IS NOT NULL THEN to_timestamp($10::bigint / 1000.0) ELSE provider_receipt_at END,
+            confirmed_at = CASE WHEN $11::bigint IS NOT NULL THEN to_timestamp($11::bigint / 1000.0) ELSE confirmed_at END
+        WHERE attempt_id = $12
         RETURNING *;
       `;
 
@@ -461,6 +463,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         updates?.messageHash || null,
         updates?.failureReason || null,
         updates?.errorClassification || null,
+        updates?.lastValidBlockHeight !== undefined && updates.lastValidBlockHeight !== null ? String(updates.lastValidBlockHeight) : null,
         updates?.preparedAtWallMs ? Number(updates.preparedAtWallMs) : null,
         updates?.submittedAtWallMs ? Number(updates.submittedAtWallMs) : null,
         updates?.providerReceiptAtWallMs ? Number(updates.providerReceiptAtWallMs) : null,
@@ -653,6 +656,157 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     };
   }
 
+  public async getIntent(id: string): Promise<ExitIntent | null> {
+    return this.getIntentById(id);
+  }
+
+  public async claimNextIntent(input: ClaimIntentInput): Promise<ExitIntent | null> {
+    return this.claimIntent(input);
+  }
+
+  public async renewLease(
+    intentId: string,
+    workerId: string,
+    durationMs: number,
+    expectedEpoch?: number
+  ): Promise<ExitIntent> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [intentId]);
+      if (intentRes.rows.length === 0) {
+        throw new Error(`ExitIntent not found: ${intentId}`);
+      }
+      const row = intentRes.rows[0];
+      if (row.claimed_by !== workerId) {
+        throw new Error(`Cannot renew lease for intent ${intentId}: claimed by ${row.claimed_by}, caller is ${workerId}`);
+      }
+      if (expectedEpoch !== undefined && row.claim_epoch !== expectedEpoch) {
+        throw new StaleEpochError(
+          `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
+          intentId,
+          expectedEpoch,
+          row.claim_epoch
+        );
+      }
+      const now = nowWallMs();
+      const newExpiresAt = Number(now) + durationMs;
+      const up = await client.query(
+        'UPDATE exit_intents SET lease_expires_at = to_timestamp($1 / 1000.0) WHERE id = $2 RETURNING *',
+        [newExpiresAt, intentId]
+      );
+      await client.query('COMMIT');
+      return this.mapRowToIntent(up.rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async recordSeverityEvent(
+    intentId: string,
+    newSeverity: ExitIntentSeverity,
+    reason: ExitIntentReason,
+    observationId?: string,
+    expectedEpoch?: number
+  ): Promise<IntentSeverityEvent> {
+    return this.updateIntentSeverity(intentId, newSeverity, reason, observationId, expectedEpoch);
+  }
+
+  public async createAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
+    return this.prepareAttempt(input, expectedEpoch);
+  }
+
+  public async markReconciliationDebt(
+    intentId: string,
+    debt: boolean,
+    expectedEpoch?: number
+  ): Promise<ExitIntent> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [intentId]);
+      if (intentRes.rows.length === 0) {
+        throw new Error(`ExitIntent not found: ${intentId}`);
+      }
+      const row = intentRes.rows[0];
+      if (expectedEpoch !== undefined && row.claim_epoch !== expectedEpoch) {
+        throw new StaleEpochError(
+          `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
+          intentId,
+          expectedEpoch,
+          row.claim_epoch
+        );
+      }
+      const up = await client.query(
+        'UPDATE exit_intents SET reconciliation_debt = $1 WHERE id = $2 RETURNING *',
+        [debt, intentId]
+      );
+      await client.query('COMMIT');
+      return this.mapRowToIntent(up.rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async applyFillIdempotently(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }> {
+    return this.recordFill(fill, expectedEpoch);
+  }
+
+  public async releaseTerminalIntent(
+    intentId: string,
+    terminalStatus: ExitIntentStatus,
+    expectedEpoch?: number
+  ): Promise<ExitIntent> {
+    if (!isIntentTerminal(terminalStatus)) {
+      throw new Error(`Cannot release intent ${intentId} with non-terminal status: ${terminalStatus}`);
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [intentId]);
+      if (intentRes.rows.length === 0) {
+        throw new Error(`ExitIntent not found: ${intentId}`);
+      }
+      const row = intentRes.rows[0];
+      if (expectedEpoch !== undefined && row.claim_epoch !== expectedEpoch) {
+        throw new StaleEpochError(
+          `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
+          intentId,
+          expectedEpoch,
+          row.claim_epoch
+        );
+      }
+      const up = await client.query(
+        `UPDATE exit_intents
+         SET status = $1, reconciliation_debt = false, claimed_by = NULL, lease_expires_at = NULL
+         WHERE id = $2 RETURNING *`,
+        [terminalStatus, intentId]
+      );
+      await client.query('COMMIT');
+      return this.mapRowToIntent(up.rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async getUnreconciledIntents(): Promise<ExitIntent[]> {
+    const res = await this.pool.query(
+      `SELECT * FROM exit_intents
+       WHERE reconciliation_debt = true OR status = 'UNKNOWN'
+       ORDER BY created_at ASC`
+    );
+    return res.rows.map(r => this.mapRowToIntent(r));
+  }
+
   // Row mapping helpers
   private mapRowToIntent(row: any): ExitIntent {
     return {
@@ -698,6 +852,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       state: row.state,
       failureReason: row.failure_reason,
       errorClassification: row.error_classification,
+      lastValidBlockHeight: row.last_valid_block_height ? String(row.last_valid_block_height) : undefined,
       startedAtWallMs: Math.round(new Date(row.started_at).getTime()) as any,
       preparedAtWallMs: row.prepared_at ? Math.round(new Date(row.prepared_at).getTime()) as any : undefined,
       submittedAtWallMs: row.submitted_at ? Math.round(new Date(row.submitted_at).getTime()) as any : undefined,

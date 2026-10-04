@@ -202,6 +202,7 @@ export interface ExecutionAttempt {
   state: ExecutionAttemptState;
   failureReason?: string;
   errorClassification?: string;
+  lastValidBlockHeight?: number | string;
 
   readonly startedAtWallMs: WallMs;
   preparedAtWallMs?: WallMs;

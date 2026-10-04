@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS execution_attempts (
     state VARCHAR(32) NOT NULL DEFAULT 'INITIALIZED',
     failure_reason TEXT NULL,
     error_classification VARCHAR(64) NULL,
+    last_valid_block_height BIGINT NULL,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     prepared_at TIMESTAMPTZ NULL,
     submitted_at TIMESTAMPTZ NULL,

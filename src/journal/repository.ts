@@ -87,6 +87,7 @@ export interface PrepareAttemptInput {
   expectedOutAtomic?: string;
   minimumOutAtomic?: string;
   initialState?: ExecutionAttemptState;
+  lastValidBlockHeight?: number | string;
   nowMs?: number;
 }
 
@@ -127,6 +128,15 @@ export interface IExitJournalRepository {
   recordReconciliationEvent(
     event: Omit<ExecutionReconciliationEvent, 'id' | 'createdAtWallMs'>
   ): Promise<ExecutionReconciliationEvent>;
+  getIntent?(id: string): Promise<ExitIntent | null>;
+  claimNextIntent?(input: ClaimIntentInput): Promise<ExitIntent | null>;
+  renewLease?(intentId: string, workerId: string, durationMs: number, expectedEpoch?: number): Promise<ExitIntent>;
+  recordSeverityEvent?(intentId: string, newSeverity: ExitIntentSeverity, reason: ExitIntentReason, observationId?: string, expectedEpoch?: number): Promise<IntentSeverityEvent>;
+  createAttempt?(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt>;
+  markReconciliationDebt?(intentId: string, debt: boolean, expectedEpoch?: number): Promise<ExitIntent>;
+  applyFillIdempotently?(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }>;
+  releaseTerminalIntent?(intentId: string, terminalStatus: ExitIntentStatus, expectedEpoch?: number): Promise<ExitIntent>;
+  getUnreconciledIntents?(): Promise<ExitIntent[]>;
 }
 
 // ==========================================
@@ -367,6 +377,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       expectedOutAtomic: input.expectedOutAtomic,
       minimumOutAtomic: input.minimumOutAtomic,
       state: input.initialState ?? 'INITIALIZED',
+      lastValidBlockHeight: input.lastValidBlockHeight,
       startedAtWallMs: now,
       preparedAtWallMs: input.initialState === 'ORDER_READY' || input.initialState === 'SIGNED' ? now : undefined
     };
@@ -507,6 +518,111 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     return Array.from(this.fills.values()).filter(f => f.positionId === positionId);
   }
 
+  public async getIntent(id: string): Promise<ExitIntent | null> {
+    return this.getIntentById(id);
+  }
+
+  public async claimNextIntent(input: ClaimIntentInput): Promise<ExitIntent | null> {
+    return this.claimIntent(input);
+  }
+
+  public async renewLease(
+    intentId: string,
+    workerId: string,
+    durationMs: number,
+    expectedEpoch?: number
+  ): Promise<ExitIntent> {
+    const intent = this.intents.get(intentId);
+    if (!intent) {
+      throw new Error(`ExitIntent not found: ${intentId}`);
+    }
+    if (intent.claimedBy !== workerId) {
+      throw new Error(`Cannot renew lease for intent ${intentId}: claimed by ${intent.claimedBy}, caller is ${workerId}`);
+    }
+    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      throw new StaleEpochError(
+        `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+        intentId,
+        expectedEpoch,
+        intent.claimEpoch
+      );
+    }
+    intent.leaseExpiresAtWallMs = (Number(nowWallMs()) + durationMs) as WallMs;
+    return { ...intent };
+  }
+
+  public async recordSeverityEvent(
+    intentId: string,
+    newSeverity: ExitIntentSeverity,
+    reason: ExitIntentReason,
+    observationId?: string,
+    expectedEpoch?: number
+  ): Promise<IntentSeverityEvent> {
+    return this.updateIntentSeverity(intentId, newSeverity, reason, observationId, expectedEpoch);
+  }
+
+  public async createAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
+    return this.prepareAttempt(input, expectedEpoch);
+  }
+
+  public async markReconciliationDebt(
+    intentId: string,
+    debt: boolean,
+    expectedEpoch?: number
+  ): Promise<ExitIntent> {
+    const intent = this.intents.get(intentId);
+    if (!intent) {
+      throw new Error(`ExitIntent not found: ${intentId}`);
+    }
+    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      throw new StaleEpochError(
+        `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+        intentId,
+        expectedEpoch,
+        intent.claimEpoch
+      );
+    }
+    intent.reconciliationDebt = debt;
+    return { ...intent };
+  }
+
+  public async applyFillIdempotently(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }> {
+    return this.recordFill(fill, expectedEpoch);
+  }
+
+  public async releaseTerminalIntent(
+    intentId: string,
+    terminalStatus: ExitIntentStatus,
+    expectedEpoch?: number
+  ): Promise<ExitIntent> {
+    if (!isIntentTerminal(terminalStatus)) {
+      throw new Error(`Cannot release intent ${intentId} with non-terminal status: ${terminalStatus}`);
+    }
+    const intent = this.intents.get(intentId);
+    if (!intent) {
+      throw new Error(`ExitIntent not found: ${intentId}`);
+    }
+    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      throw new StaleEpochError(
+        `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+        intentId,
+        expectedEpoch,
+        intent.claimEpoch
+      );
+    }
+    intent.status = terminalStatus;
+    intent.reconciliationDebt = false;
+    intent.claimedBy = undefined;
+    intent.leaseExpiresAtWallMs = undefined;
+    return { ...intent };
+  }
+
+  public async getUnreconciledIntents(): Promise<ExitIntent[]> {
+    return Array.from(this.intents.values()).filter(
+      i => i.reconciliationDebt || i.status === 'UNKNOWN'
+    );
+  }
+
   public async recordReconciliationEvent(
     event: Omit<ExecutionReconciliationEvent, 'id' | 'createdAtWallMs'>
   ): Promise<ExecutionReconciliationEvent> {
@@ -518,6 +634,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     this.reconciliationEvents.push(fullEvent);
     return fullEvent;
   }
+
 
   /**
    * Helper for crash testing: snapshots in-memory state and reloads into a fresh repository.
