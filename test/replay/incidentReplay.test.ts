@@ -2,6 +2,7 @@ import test from 'node:test';
 import * as assert from 'node:assert/strict';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import * as http from 'http';
 import * as https from 'https';
 import { HistoricalReplayEngine, LookaheadViolationError } from '../../src/replay/historicalReplayEngine';
@@ -43,11 +44,11 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
 
   // 3. Record counts válidos
   await t.test('3. record counts válidos', () => {
-    const expectedCounts: Record<string, { sourceRecordCount: number; obsMin: number }> = {
-      tesla: { sourceRecordCount: 2807, obsMin: 2807 },
-      ssi: { sourceRecordCount: 2891, obsMin: 2891 },
-      'mr-beast': { sourceRecordCount: 152, obsMin: 152 },
-      superpig: { sourceRecordCount: 154, obsMin: 20 }
+    const expectedCounts: Record<string, { sourceRecordCount: number; normalizedRecordCount: number }> = {
+      tesla: { sourceRecordCount: 2807, normalizedRecordCount: 2807 },
+      ssi: { sourceRecordCount: 2891, normalizedRecordCount: 2891 },
+      'mr-beast': { sourceRecordCount: 152, normalizedRecordCount: 152 },
+      superpig: { sourceRecordCount: 154, normalizedRecordCount: 22 }
     };
 
     for (const inc of INCIDENTS) {
@@ -55,7 +56,8 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
       const obsLines = fs.readFileSync(path.join(FIXTURES_DIR, inc, 'observations.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
       const conf = expectedCounts[inc];
       assert.strictEqual(manifest.sourceRecordCount, conf.sourceRecordCount, `sourceRecordCount mismatch in ${inc}`);
-      assert.ok(obsLines.length >= conf.obsMin, `observations count too low in ${inc}: ${obsLines.length} < ${conf.obsMin}`);
+      assert.strictEqual(manifest.normalizedRecordCount, conf.normalizedRecordCount, `normalizedRecordCount mismatch in ${inc}`);
+      assert.strictEqual(obsLines.length, conf.normalizedRecordCount, `observations line count mismatch in ${inc}`);
     }
   });
 
@@ -424,5 +426,152 @@ test('Historical Incident Fixtures & Replay Harness - 20 Mandatory Verifications
         `Replay run1 and run2 produced divergent results for incident ${inc}`
       );
     }
+  });
+
+  // 21. Correção 1 - Contagem SUPERPIG derivada diretamente do arquivo vs manifest
+  await t.test('21. contagem SUPERPIG derivada diretamente do arquivo vs manifest.normalizedRecordCount', () => {
+    const superpigObsPath = path.join(FIXTURES_DIR, 'superpig', 'observations.jsonl');
+    const superpigLines = fs.readFileSync(superpigObsPath, 'utf8').trim().split('\n').filter(Boolean);
+    const superpigManifest = JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, 'superpig', 'manifest.json'), 'utf8'));
+
+    // Derived directly from the normalized observations file
+    assert.strictEqual(superpigLines.length, 22, 'SUPERPIG observations.jsonl must contain exactly 22 lines');
+    assert.strictEqual(superpigManifest.normalizedRecordCount, 22, 'SUPERPIG manifest normalizedRecordCount must be 22');
+    assert.strictEqual(superpigManifest.sourceRecordCount, 154, 'SUPERPIG manifest sourceRecordCount must be 154');
+
+    // Total derived observations across all 4 incidents must equal exactly 5872
+    let totalDerivedObs = 0;
+    const perIncidentObs: Record<string, number> = {};
+    for (const inc of INCIDENTS) {
+      const lines = fs.readFileSync(path.join(FIXTURES_DIR, inc, 'observations.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
+      perIncidentObs[inc] = lines.length;
+      totalDerivedObs += lines.length;
+    }
+
+    assert.strictEqual(perIncidentObs['tesla'], 2807);
+    assert.strictEqual(perIncidentObs['ssi'], 2891);
+    assert.strictEqual(perIncidentObs['mr-beast'], 152);
+    assert.strictEqual(perIncidentObs['superpig'], 22);
+    assert.strictEqual(totalDerivedObs, 5872, 'Sum of derived observation lines must equal 5872');
+  });
+
+  // 22. Correção 2 - Timing grosseiro (COARSE) e bounds de incerteza de ~1s
+  await t.test('22. timing grosseiro (COARSE) com bounds de incerteza de ~1s devido à resolução do blockTime', () => {
+    const engine = new HistoricalReplayEngine();
+
+    for (const inc of ['tesla', 'ssi', 'mr-beast']) {
+      engine.loadFixture(path.join(FIXTURES_DIR, inc));
+      const metrics = engine.runReplay();
+
+      assert.strictEqual(metrics.latencyPrecision, 'COARSE', `Latency precision must be COARSE for ${inc}`);
+      assert.strictEqual(metrics.eventTimeResolutionMs, 1000, `eventTimeResolutionMs must be 1000 for ${inc}`);
+      assert.strictEqual(metrics.eventTimeSource, 'SOLANA_BLOCK_TIME', `eventTimeSource must be SOLANA_BLOCK_TIME for ${inc}`);
+      assert.strictEqual(typeof metrics.approxEventToObservationMs, 'number', `approxEventToObservationMs missing in ${inc}`);
+      assert.strictEqual(typeof metrics.eventToObservationLowerBoundMs, 'number', `eventToObservationLowerBoundMs missing in ${inc}`);
+      assert.strictEqual(typeof metrics.eventToObservationUpperBoundMs, 'number', `eventToObservationUpperBoundMs missing in ${inc}`);
+
+      const lower = metrics.eventToObservationLowerBoundMs as number;
+      const upper = metrics.eventToObservationUpperBoundMs as number;
+      assert.ok(upper >= lower, `upperBound (${upper}) must be >= lowerBound (${lower}) in ${inc}`);
+      assert.ok(upper - lower <= 1000, `Uncertainty interval must be <= 1000ms (~1s) in ${inc}`);
+
+      // Semantic rule: coarse latency cannot be used to claim subsecond advantage like 300ms against ~1s reference
+      assert.notStrictEqual(metrics.latencyPrecision, 'FINE');
+    }
+  });
+
+  // 23. Correção 3 - PRICE_GAP confirmado NÃO prova ausência de DETECTION_FAILURE
+  await t.test('23. PRICE_GAP confirmado NÃO prova ausência de DETECTION_FAILURE', () => {
+    for (const inc of ['tesla', 'ssi', 'mr-beast']) {
+      const exp = JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, inc, 'expected.json'), 'utf8'));
+
+      // PRICE_GAP is confirmed by pool collapse preceding quote
+      assert.strictEqual(exp.priceGapStatus, 'CONFIRMED', `PRICE_GAP must be CONFIRMED in ${inc}`);
+      // DETECTION_FAILURE is NOT_DEMONSTRATED (historical monitor reacted immediately, but earlier on-chain detection is unknown)
+      assert.strictEqual(exp.detectionFailureStatus, 'NOT_DEMONSTRATED', `DETECTION_FAILURE must be NOT_DEMONSTRATED in ${inc}`);
+      assert.notStrictEqual(exp.detectionFailureStatus, false, `Must NOT record DETECTION_FAILURE = false in ${inc}`);
+
+      // Segregation between current path performance and alternative future sensor
+      assert.strictEqual(exp.currentPathMissedAvailableData, false, `currentPathMissedAvailableData must be false in ${inc}`);
+      assert.strictEqual(exp.alternativeSensorCouldObserveEarlier, 'UNKNOWN', `alternativeSensorCouldObserveEarlier must be UNKNOWN in ${inc}`);
+    }
+  });
+
+  // 24. Correção 4 - Restrições de execução atômica (vantagem de detecção permitida, pre-crash fill proibido)
+  await t.test('24. restrições de execução atômica proíbem pre-crash fill retroativo', () => {
+    for (const inc of INCIDENTS) {
+      const exp = JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, inc, 'expected.json'), 'utf8'));
+      const constraints = exp.atomicExecutionConstraints;
+
+      assert.ok(constraints, `atomicExecutionConstraints missing in ${inc}`);
+      assert.strictEqual(constraints.allowsPreCrashFill, false, `allowsPreCrashFill must be FALSE in ${inc}`);
+      assert.strictEqual(constraints.atomicSwapConfirmedBeforeExit, true, `atomicSwapConfirmedBeforeExit must be TRUE in ${inc}`);
+      assert.strictEqual(constraints.detectionAdvantageMeasurable, true, `detectionAdvantageMeasurable must be TRUE in ${inc}`);
+      assert.strictEqual(constraints.retroactiveExecutionAllowed, false, `retroactiveExecutionAllowed must be FALSE in ${inc}`);
+    }
+  });
+
+  // 25. Correção 5 - Hash das fixtures normalizadas contra fixtures.lock.json
+  await t.test('25. SHA-256 das fixtures normalizadas confere exatamente com fixtures.lock.json', () => {
+    const lockPath = path.join(FIXTURES_DIR, 'fixtures.lock.json');
+    assert.ok(fs.existsSync(lockPath), 'fixtures.lock.json missing');
+
+    const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    assert.strictEqual(lock.version, '2026-10-04');
+    assert.ok(lock.fixtures, 'fixtures object missing in lock file');
+
+    for (const inc of INCIDENTS) {
+      const dir = path.join(FIXTURES_DIR, inc);
+      const incLock = lock.fixtures[inc];
+      assert.ok(incLock, `Lock missing fixture entry for ${inc}`);
+
+      const manifestSha = crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, 'manifest.json'))).digest('hex');
+      const obsSha = crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, 'observations.jsonl'))).digest('hex');
+      const txSha = crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, 'transactions.json'))).digest('hex');
+      const expSha = crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, 'expected.json'))).digest('hex');
+
+      assert.strictEqual(manifestSha, incLock.manifestSha256, `manifest.json hash mismatch in ${inc}`);
+      assert.strictEqual(obsSha, incLock.observationsSha256, `observations.jsonl hash mismatch in ${inc}`);
+      assert.strictEqual(txSha, incLock.transactionsSha256, `transactions.json hash mismatch in ${inc}`);
+      assert.strictEqual(expSha, incLock.expectedSha256, `expected.json hash mismatch in ${inc}`);
+    }
+
+    // Asserts lock file does NOT contain recursive self-hash
+    assert.strictEqual((lock as any).lockSha256, undefined, 'Lock must not include recursive self-hash');
+  });
+
+  // 26. Correção 6 - Build determinístico sem timestamps voláteis nos arquivos normalizados
+  await t.test('26. build determinístico sem timestamps voláteis (Date.now()) nos arquivos normalizados', () => {
+    for (const inc of INCIDENTS) {
+      const manifestStr = fs.readFileSync(path.join(FIXTURES_DIR, inc, 'manifest.json'), 'utf8');
+      const expectedStr = fs.readFileSync(path.join(FIXTURES_DIR, inc, 'expected.json'), 'utf8');
+
+      // Ensure no volatile generatedAt timestamps exist
+      assert.ok(!manifestStr.includes('"generatedAt"'), `manifest in ${inc} contains volatile generatedAt`);
+      assert.ok(!expectedStr.includes('"generatedAt"'), `expected in ${inc} contains volatile generatedAt`);
+
+      const manifest = JSON.parse(manifestStr);
+      assert.strictEqual(manifest.auditVersion, '2026-10-04');
+    }
+  });
+
+  // 27. Correção 7 - Erro SUPERPIG 6001 classificado como UNKNOWN na ausência de programId comprovado
+  await t.test('27. erro SUPERPIG 6001 classificado como UNKNOWN na ausência de programId comprovado', () => {
+    const superpigExp = JSON.parse(fs.readFileSync(path.join(FIXTURES_DIR, 'superpig', 'expected.json'), 'utf8'));
+
+    assert.strictEqual(superpigExp.simulationsRejectedCustomCode, 6001);
+    assert.strictEqual(superpigExp.simulationProgramIdProven, false);
+    assert.strictEqual(superpigExp.simulationClassification, 'UNKNOWN');
+
+    // Classification requires both programId AND customCode
+    const noProgramRes = classifySolanaProgramError(null, 6001);
+    assert.strictEqual(noProgramRes.classification, 'UNKNOWN');
+
+    const unprovenProgramRes = classifySolanaProgramError('UnknownProgram1111111111111111111111111111', 6001);
+    assert.strictEqual(unprovenProgramRes.classification, 'UNKNOWN');
+
+    // Only when proven Jupiter swap program is passed does it resolve to JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED
+    const provenJupRes = classifySolanaProgramError(JUPITER_SWAP_PROGRAM_ID, 6001);
+    assert.strictEqual(provenJupRes.classification, 'JUPITER_SLIPPAGE_TOLERANCE_EXCEEDED');
   });
 });

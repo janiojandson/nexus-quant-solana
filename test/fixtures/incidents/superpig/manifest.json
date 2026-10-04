@@ -31,6 +31,7 @@
   ],
   "sourceSha256": "a0c5d6aacfc8282b430969ee81a290c8c1a066f764b663c30ba8fd3ab893a58d",
   "sourceRecordCount": 154,
+  "normalizedRecordCount": 22,
   "auditVersion": "2026-10-04",
   "firstTimestamp": "2026-10-03T02:35:04.000Z",
   "lastTimestamp": "2026-10-03T02:35:52.876Z",
@@ -40,6 +41,7 @@
     "Sub-millisecond internal latency not captured in legacy logs",
     "Monotonic offsets and positionVersion null in legacy system",
     "OutAmount of last signed order not captured in legacy logs",
-    "Database trade_outcomes table recorded quote instead of on-chain fill"
+    "Database trade_outcomes table recorded quote instead of on-chain fill",
+    "Pre-flight simulation rejection error 6001 did not include verified programId in log line (classified UNKNOWN)"
   ]
 }

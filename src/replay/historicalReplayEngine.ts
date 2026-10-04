@@ -74,6 +74,14 @@ export class HistoricalReplayEngine {
       }
     }
 
+    if (typeof manifest.normalizedRecordCount === 'number') {
+      if (observations.length !== manifest.normalizedRecordCount) {
+        throw new Error(
+          `Normalized observation count mismatch: file has ${observations.length} lines, manifest expects ${manifest.normalizedRecordCount}`
+        );
+      }
+    }
+
     this._fixture = {
       manifest,
       observations,
@@ -304,16 +312,23 @@ export class HistoricalReplayEngine {
       fillVsSignalQuotePct = expected.fillVsSignalQuotePct;
     }
 
-    // 8. eventToObservationMs
-    // Difference between on-chain pool crash event time and first deteriorated observation
-    let eventToObservationMs: number | null | 'UNKNOWN' = 'UNKNOWN';
+    // 8. Event to Observation Latency (Coarse Estimation due to ~1s Solana blockTime resolution)
+    let approxEventToObservationMs: number | null | 'UNKNOWN' = 'UNKNOWN';
+    let eventToObservationLowerBoundMs: number | null | 'UNKNOWN' = 'UNKNOWN';
+    let eventToObservationUpperBoundMs: number | null | 'UNKNOWN' = 'UNKNOWN';
+    const eventTimeResolutionMs = 1000;
+    const eventTimeSource: 'SOLANA_BLOCK_TIME' | 'UNKNOWN' = 'SOLANA_BLOCK_TIME';
+    const latencyPrecision: 'COARSE' | 'FINE' | 'UNKNOWN' = 'COARSE';
+
     const poolCrashTx = transactions.find(t => t.transactionType === 'POOL_CRASH_SELL');
     const firstBadObs = observations.find(o => (o.pnlPct ?? 0) < 0 || o.decision === 'TRAILING_STOP' || o.decision === 'STOP_LOSS');
 
     if (poolCrashTx && firstBadObs) {
       const poolEventTimeMs = poolCrashTx.blockTime * 1000;
       const obsTimeMs = firstBadObs.timestampWallMs;
-      eventToObservationMs = Math.max(0, obsTimeMs - poolEventTimeMs);
+      approxEventToObservationMs = Math.max(0, obsTimeMs - poolEventTimeMs);
+      eventToObservationUpperBoundMs = approxEventToObservationMs;
+      eventToObservationLowerBoundMs = Math.max(0, obsTimeMs - (poolEventTimeMs + 1000));
     }
 
     // 9. decisionToExecutionMs
@@ -346,7 +361,13 @@ export class HistoricalReplayEngine {
       signalExecutableValue,
       fillValue,
       fillVsSignalQuotePct,
-      eventToObservationMs,
+      eventToObservationMs: approxEventToObservationMs,
+      approxEventToObservationMs,
+      eventToObservationLowerBoundMs,
+      eventToObservationUpperBoundMs,
+      eventTimeResolutionMs,
+      eventTimeSource,
+      latencyPrecision,
       decisionToExecutionMs,
       confirmedProceeds,
       remainingExposure

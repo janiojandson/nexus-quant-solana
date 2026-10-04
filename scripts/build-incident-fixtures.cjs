@@ -36,6 +36,13 @@ function verifyNoSecrets(str, label) {
   }
 }
 
+const COMMON_ATOMIC_CONSTRAINTS = {
+  allowsPreCrashFill: false,
+  atomicSwapConfirmedBeforeExit: true,
+  detectionAdvantageMeasurable: true,
+  retroactiveExecutionAllowed: false
+};
+
 // -------------------------------------------------------------
 // 1. Build Tesla
 // -------------------------------------------------------------
@@ -47,7 +54,6 @@ function buildTesla() {
   const crashLines = fs.readFileSync(path.join(auditDir, 'tesla-crash.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
   const partialLines = fs.readFileSync(path.join(auditDir, 'tesla-partial.jsonl'), 'utf8').trim().split('\n').filter(Boolean);
 
-  // Map crash events by ms
   const crashMsMap = new Map();
   crashLines.forEach(l => {
     const o = JSON.parse(l);
@@ -80,7 +86,6 @@ function buildTesla() {
     let reason = null;
     let executableValue = null;
 
-    // Check partial trigger
     const partialExtras = partialMsMap.get(wallMs) || [];
     partialExtras.forEach(ext => {
       if (ext.message.includes('PARTIAL_TAKE_PROFIT_50')) {
@@ -91,7 +96,6 @@ function buildTesla() {
       }
     });
 
-    // Check crash trigger
     const crashExtras = crashMsMap.get(wallMs) || [];
     crashExtras.forEach(ext => {
       if (ext.message.includes('TRAILING_STOP')) {
@@ -207,11 +211,16 @@ function buildTesla() {
       evidenceSource: 'chain-summary.json'
     }
   ];
-  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2) + '\n', 'utf8');
 
   const expected = {
     incidentId: 'TESLA',
     taxonomy: ['PRICE_GAP'],
+    priceGapStatus: 'CONFIRMED',
+    detectionFailureStatus: 'NOT_DEMONSTRATED',
+    currentPathMissedAvailableData: false,
+    alternativeSensorCouldObserveEarlier: 'UNKNOWN',
+    atomicExecutionConstraints: COMMON_ATOMIC_CONSTRAINTS,
     capitalSwapSol: 0.02,
     partialTaken: true,
     partialProceedsSol: 0.013533348,
@@ -234,7 +243,7 @@ function buildTesla() {
     partialOccurredBeforeCrash: true,
     finalFillConfirmed: true
   };
-  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2) + '\n', 'utf8');
 
   const sourceFiles = [
     { file: 'tesla-path.jsonl', bytes: 816337, sha256: sha256File(path.join(auditDir, 'tesla-path.jsonl')), recordCount: 2807 },
@@ -254,6 +263,7 @@ function buildTesla() {
     sourceFiles: sourceFiles,
     sourceSha256: sha256Buf(Buffer.from(JSON.stringify(sourceFiles))),
     sourceRecordCount: 2807,
+    normalizedRecordCount: observations.length,
     auditVersion: '2026-10-04',
     firstTimestamp: '2026-10-03T00:29:22.000Z',
     lastTimestamp: '2026-10-03T01:51:09.518Z',
@@ -265,7 +275,7 @@ function buildTesla() {
       'Dex liquidity numbers reflect third-party aggregation delay'
     ]
   };
-  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 }
 
 // -------------------------------------------------------------
@@ -436,11 +446,16 @@ function buildSSI() {
       evidenceSource: 'chain-summary.json'
     }
   ];
-  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2) + '\n', 'utf8');
 
   const expected = {
     incidentId: 'SSI',
     taxonomy: ['PRICE_GAP'],
+    priceGapStatus: 'CONFIRMED',
+    detectionFailureStatus: 'NOT_DEMONSTRATED',
+    currentPathMissedAvailableData: false,
+    alternativeSensorCouldObserveEarlier: 'UNKNOWN',
+    atomicExecutionConstraints: COMMON_ATOMIC_CONSTRAINTS,
     capitalSwapSol: 0.021826256,
     partialTaken: true,
     partialProceedsSol: 0.014854168,
@@ -462,7 +477,7 @@ function buildSSI() {
     partialOccurredBeforeCrash: true,
     finalFillConfirmed: true
   };
-  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2) + '\n', 'utf8');
 
   const sourceFiles = [
     { file: 'ssi-path.jsonl', bytes: 831715, sha256: sha256File(path.join(auditDir, 'ssi-path.jsonl')), recordCount: 2891 },
@@ -482,6 +497,7 @@ function buildSSI() {
     sourceFiles: sourceFiles,
     sourceSha256: sha256Buf(Buffer.from(JSON.stringify(sourceFiles))),
     sourceRecordCount: 2891,
+    normalizedRecordCount: observations.length,
     auditVersion: '2026-10-04',
     firstTimestamp: '2026-10-04T05:07:39.000Z',
     lastTimestamp: '2026-10-04T06:20:03.805Z',
@@ -493,7 +509,7 @@ function buildSSI() {
       'Dex liquidity numbers reflect third-party aggregation delay'
     ]
   };
-  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 }
 
 // -------------------------------------------------------------
@@ -650,11 +666,16 @@ function buildMrBeast() {
       evidenceSource: 'chain-summary.json'
     }
   ];
-  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2) + '\n', 'utf8');
 
   const expected = {
     incidentId: 'MR_BEAST',
     taxonomy: ['PRICE_GAP'],
+    priceGapStatus: 'CONFIRMED',
+    detectionFailureStatus: 'NOT_DEMONSTRATED',
+    currentPathMissedAvailableData: false,
+    alternativeSensorCouldObserveEarlier: 'UNKNOWN',
+    atomicExecutionConstraints: COMMON_ATOMIC_CONSTRAINTS,
     capitalSwapSol: 0.022731387,
     partialTaken: true,
     partialProceedsSol: 0.015402873,
@@ -678,7 +699,7 @@ function buildMrBeast() {
     partialOccurredBeforeCrash: true,
     finalFillConfirmed: true
   };
-  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2) + '\n', 'utf8');
 
   const sourceFiles = [
     { file: 'beast-path.jsonl', bytes: 41410, sha256: sha256File(path.join(auditDir, 'beast-path.jsonl')), recordCount: 152 },
@@ -697,6 +718,7 @@ function buildMrBeast() {
     sourceFiles: sourceFiles,
     sourceSha256: sha256Buf(Buffer.from(JSON.stringify(sourceFiles))),
     sourceRecordCount: 152,
+    normalizedRecordCount: observations.length,
     auditVersion: '2026-10-04',
     firstTimestamp: '2026-10-04T04:15:09.000Z',
     lastTimestamp: '2026-10-04T04:19:03.608Z',
@@ -708,7 +730,7 @@ function buildMrBeast() {
       'Dex liquidity numbers reflect third-party aggregation delay'
     ]
   };
-  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 }
 
 // -------------------------------------------------------------
@@ -726,7 +748,6 @@ function buildSuperpig() {
     const wallMs = Date.parse(o.timestamp);
     const msg = o.message;
 
-    // We only create an observation if it is a monitor/sensor/quote/decision/simulation event
     const isObs = msg.includes('SNIPER ATIVO') ||
                   msg.includes('ExitEngine') ||
                   msg.includes('ExitSensor') ||
@@ -750,8 +771,9 @@ function buildSuperpig() {
       decision = 'STOP_LOSS';
       reason = 'STOP_LOSS';
     } else if (msg.includes('SIMULAÇÃO PRÉ-VOO BARRADA')) {
+      // Custom 6001 simulation error - programId not proven in log line, so reason preserves raw log
       decision = 'SIMULATION_REJECTED';
-      reason = 'Custom:6001';
+      reason = '{"InstructionError":[3,{"Custom":6001}]}';
     } else if (msg.includes('CONFIRMATION_TIMEOUT')) {
       decision = 'CONFIRMATION_TIMEOUT';
       reason = 'CONFIRMATION_TIMEOUT';
@@ -833,7 +855,7 @@ function buildSuperpig() {
       evidenceSource: 'chain-summary.json'
     }
   ];
-  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'transactions.json'), JSON.stringify(transactions, null, 2) + '\n', 'utf8');
 
   const expected = {
     incidentId: 'SUPERPIG',
@@ -843,6 +865,11 @@ function buildSuperpig() {
       'EXECUTION_DELAY',
       'INSUFFICIENT_DEPTH'
     ],
+    priceGapStatus: 'NOT_APPLICABLE',
+    detectionFailureStatus: 'NOT_APPLICABLE',
+    currentPathMissedAvailableData: false,
+    alternativeSensorCouldObserveEarlier: 'UNKNOWN',
+    atomicExecutionConstraints: COMMON_ATOMIC_CONSTRAINTS,
     capitalSwapSol: 0.02,
     partialTaken: false,
     partialProceedsSol: 0.0,
@@ -855,6 +882,8 @@ function buildSuperpig() {
     firstObservationPnlPct: -15.96,
     simulationsRejectedCustomCode: 6001,
     simulationRejectedCount: 3,
+    simulationProgramIdProven: false,
+    simulationClassification: 'UNKNOWN',
     confirmationTimeoutOccurred: true,
     databaseRecordedExitSol: 0.010301,
     databaseRecordedPnlPct: -48.49,
@@ -864,7 +893,7 @@ function buildSuperpig() {
     accountingDivergencePctPoints: 36.282,
     finalExitTxSignature: '3bhQ9DBSfPYGf3phH4JPzVFe2xBGMQXfpYgaYP8hML5KNme6i2WKaCKbemcjC8ZZhuXqw8u7BLTiG4mjRwVkNVTu'
   };
-  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'expected.json'), JSON.stringify(expected, null, 2) + '\n', 'utf8');
 
   const sourceFiles = [
     { file: 'pig-crash.jsonl', bytes: 36759, sha256: sha256File(path.join(auditDir, 'pig-crash.jsonl')), recordCount: 154 },
@@ -881,6 +910,7 @@ function buildSuperpig() {
     sourceFiles: sourceFiles,
     sourceSha256: sha256Buf(Buffer.from(JSON.stringify(sourceFiles))),
     sourceRecordCount: 154,
+    normalizedRecordCount: observations.length,
     auditVersion: '2026-10-04',
     firstTimestamp: '2026-10-03T02:35:04.000Z',
     lastTimestamp: '2026-10-03T02:35:52.876Z',
@@ -890,25 +920,53 @@ function buildSuperpig() {
       'Sub-millisecond internal latency not captured in legacy logs',
       'Monotonic offsets and positionVersion null in legacy system',
       'OutAmount of last signed order not captured in legacy logs',
-      'Database trade_outcomes table recorded quote instead of on-chain fill'
+      'Database trade_outcomes table recorded quote instead of on-chain fill',
+      'Pre-flight simulation rejection error 6001 did not include verified programId in log line (classified UNKNOWN)'
     ]
   };
-  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  fs.writeFileSync(path.join(incidentDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+}
+
+// -------------------------------------------------------------
+// 5. Generate fixtures.lock.json
+// -------------------------------------------------------------
+function generateLockFile() {
+  const incidents = ['tesla', 'ssi', 'mr-beast', 'superpig'];
+  const lockData = {
+    version: '2026-10-04',
+    fixtures: {}
+  };
+
+  for (const inc of incidents) {
+    const dir = path.join(outBase, inc);
+    lockData.fixtures[inc] = {
+      manifestSha256: sha256File(path.join(dir, 'manifest.json')),
+      observationsSha256: sha256File(path.join(dir, 'observations.jsonl')),
+      transactionsSha256: sha256File(path.join(dir, 'transactions.json')),
+      expectedSha256: sha256File(path.join(dir, 'expected.json'))
+    };
+  }
+
+  const lockPath = path.join(outBase, 'fixtures.lock.json');
+  fs.writeFileSync(lockPath, JSON.stringify(lockData, null, 2) + '\n', 'utf8');
+  console.log(`Generated ${lockPath}`);
+  return lockData;
 }
 
 // -------------------------------------------------------------
 // Run Generator & Report Sizing
 // -------------------------------------------------------------
-console.log('Generating fixtures...');
+console.log('Generating hardened fixtures...');
 buildTesla();
 buildSSI();
 buildMrBeast();
 buildSuperpig();
-console.log('Fixtures generated successfully.');
+const lock = generateLockFile();
+console.log('Hardened fixtures generated successfully.');
 
 let totalBytes = 0;
 let largestFile = { name: '', size: 0 };
-let totalRecords = 0;
+let totalObsRecords = 0;
 
 ['tesla', 'ssi', 'mr-beast', 'superpig'].forEach(inc => {
   const dir = path.join(outBase, inc);
@@ -924,7 +982,7 @@ let totalRecords = 0;
     let records = '-';
     if (f.endsWith('.jsonl')) {
       records = fs.readFileSync(p, 'utf8').trim().split('\n').filter(Boolean).length;
-      totalRecords += records;
+      totalObsRecords += records;
     } else if (f.endsWith('.json')) {
       const data = JSON.parse(fs.readFileSync(p, 'utf8'));
       if (Array.isArray(data)) records = data.length;
@@ -933,7 +991,10 @@ let totalRecords = 0;
   });
 });
 
+const lockSize = fs.statSync(path.join(outBase, 'fixtures.lock.json')).size;
+totalBytes += lockSize;
+
 console.log('\n=== FIXTURE SIZING SUMMARY ===');
 console.log(`Total fixtures size: ${(totalBytes / 1024).toFixed(2)} KB (${(totalBytes / (1024 * 1024)).toFixed(3)} MB)`);
 console.log(`Largest file: ${largestFile.name} (${(largestFile.size / 1024).toFixed(2)} KB)`);
-console.log(`Total observation records: ${totalRecords}`);
+console.log(`Total derived observation records: ${totalObsRecords}`);

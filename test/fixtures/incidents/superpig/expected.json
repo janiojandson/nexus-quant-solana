@@ -6,6 +6,16 @@
     "EXECUTION_DELAY",
     "INSUFFICIENT_DEPTH"
   ],
+  "priceGapStatus": "NOT_APPLICABLE",
+  "detectionFailureStatus": "NOT_APPLICABLE",
+  "currentPathMissedAvailableData": false,
+  "alternativeSensorCouldObserveEarlier": "UNKNOWN",
+  "atomicExecutionConstraints": {
+    "allowsPreCrashFill": false,
+    "atomicSwapConfirmedBeforeExit": true,
+    "detectionAdvantageMeasurable": true,
+    "retroactiveExecutionAllowed": false
+  },
   "capitalSwapSol": 0.02,
   "partialTaken": false,
   "partialProceedsSol": 0,
@@ -18,6 +28,8 @@
   "firstObservationPnlPct": -15.96,
   "simulationsRejectedCustomCode": 6001,
   "simulationRejectedCount": 3,
+  "simulationProgramIdProven": false,
+  "simulationClassification": "UNKNOWN",
   "confirmationTimeoutOccurred": true,
   "databaseRecordedExitSol": 0.010301,
   "databaseRecordedPnlPct": -48.49,

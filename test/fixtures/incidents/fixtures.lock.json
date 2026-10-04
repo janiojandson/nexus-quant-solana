@@ -1,0 +1,29 @@
+{
+  "version": "2026-10-04",
+  "fixtures": {
+    "tesla": {
+      "manifestSha256": "f92e4ffa328df98c8f1d584e5d896f891186417c076707a1e8c56787cfc8ae3b",
+      "observationsSha256": "b86728cebe6f6dfdc1cd1dffd16a32a8b773bf0cbbe3af1c34f7f5a43df34ed3",
+      "transactionsSha256": "d142470ea016149fdcdd14606a7d67deb295c246dc465cc9b36a1651791ce4ac",
+      "expectedSha256": "909ae011f544a0647b4de047a359e54aa22dbe64cea6bbf13a01ad107e809890"
+    },
+    "ssi": {
+      "manifestSha256": "8fc31081aa2181d722f7db9cd40df49f46499f1d20a5eab7353c1965c59ebdeb",
+      "observationsSha256": "bcd6e83b672545b644b26662bcabf6932acebd4615e62acd34bafd9f41f02182",
+      "transactionsSha256": "2a6f52ef40c332f69582ac1f41fe2c5637f76bb9429c10210188decc1fb86769",
+      "expectedSha256": "b6b21d0f9274e830b0ec8f4c88df4f21ca8d4f83314eb52eeb6fbe0e1624ce70"
+    },
+    "mr-beast": {
+      "manifestSha256": "36b3d000af9468e601ac6d1b212ca0daee9d3e69d1a693062063097bbcc58d2e",
+      "observationsSha256": "585ae779ef43a015056897d05f2720e9a1e1dbbb25f5f2ff20166fa41ae0c48c",
+      "transactionsSha256": "e1556df10e5d051a449b4d2eadde6a3ef5d9ff077d2c8e6aee9f14819dbdf366",
+      "expectedSha256": "e1d3e6614476791593664c07563ca71a22ddd745997192d3ec5a6459c77f8e2a"
+    },
+    "superpig": {
+      "manifestSha256": "8cf94f2bcc7e37b99cfdc16dd8877c84c80c1db479bee07dbb3dc183ea390465",
+      "observationsSha256": "ce5e2ec0c9362e7d903dc35704afc34fefe19eaafd700c3b4455fa52fde7532a",
+      "transactionsSha256": "6d048c170a3abf4b10e70b0b31d0a06a100abb099a15b79cc2f14dc6d7214d13",
+      "expectedSha256": "5878379b47b9cf9079fe4375e229beaf3a7534089d17c3b38efb0b9e50d6e652"
+    }
+  }
+}

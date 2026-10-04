@@ -3,6 +3,16 @@
   "taxonomy": [
     "PRICE_GAP"
   ],
+  "priceGapStatus": "CONFIRMED",
+  "detectionFailureStatus": "NOT_DEMONSTRATED",
+  "currentPathMissedAvailableData": false,
+  "alternativeSensorCouldObserveEarlier": "UNKNOWN",
+  "atomicExecutionConstraints": {
+    "allowsPreCrashFill": false,
+    "atomicSwapConfirmedBeforeExit": true,
+    "detectionAdvantageMeasurable": true,
+    "retroactiveExecutionAllowed": false
+  },
   "capitalSwapSol": 0.022731387,
   "partialTaken": true,
   "partialProceedsSol": 0.015402873,

@@ -50,6 +50,7 @@ export interface IncidentManifest {
   sourceFiles: SourceFileMetadata[];
   sourceSha256: string;
   sourceRecordCount: number;
+  normalizedRecordCount: number;
   auditVersion: string;
   firstTimestamp: string;
   lastTimestamp: string;
@@ -58,9 +59,21 @@ export interface IncidentManifest {
   knownLimitations: string[];
 }
 
+export interface AtomicExecutionConstraints {
+  allowsPreCrashFill: boolean;
+  atomicSwapConfirmedBeforeExit: boolean;
+  detectionAdvantageMeasurable: boolean;
+  retroactiveExecutionAllowed: boolean;
+}
+
 export interface IncidentExpected {
   incidentId: string;
   taxonomy: string[];
+  priceGapStatus?: 'CONFIRMED' | 'NOT_APPLICABLE' | 'UNKNOWN';
+  detectionFailureStatus?: 'NOT_DEMONSTRATED' | 'DEMONSTRATED' | 'UNKNOWN';
+  currentPathMissedAvailableData?: boolean;
+  alternativeSensorCouldObserveEarlier?: 'UNKNOWN' | 'NOT_DEMONSTRATED' | 'CONFIRMED';
+  atomicExecutionConstraints?: AtomicExecutionConstraints;
   capitalSwapSol: number;
   partialTaken: boolean;
   partialProceedsSol: number;
@@ -88,6 +101,8 @@ export interface IncidentExpected {
   firstObservationPnlPct?: number;
   simulationsRejectedCustomCode?: number;
   simulationRejectedCount?: number;
+  simulationProgramIdProven?: boolean;
+  simulationClassification?: string;
   confirmationTimeoutOccurred?: boolean;
   databaseRecordedExitSol?: number;
   databaseRecordedPnlPct?: number;
@@ -122,9 +137,27 @@ export interface IncidentReplayMetrics {
   fillValue: number | null | 'UNKNOWN';
   fillVsSignalQuotePct: number | null | 'UNKNOWN';
   eventToObservationMs: number | null | 'UNKNOWN';
+  approxEventToObservationMs: number | null | 'UNKNOWN';
+  eventToObservationLowerBoundMs: number | null | 'UNKNOWN';
+  eventToObservationUpperBoundMs: number | null | 'UNKNOWN';
+  eventTimeResolutionMs: number;
+  eventTimeSource: 'SOLANA_BLOCK_TIME' | 'UNKNOWN';
+  latencyPrecision: 'COARSE' | 'FINE' | 'UNKNOWN';
   decisionToExecutionMs: number | null | 'UNKNOWN';
   confirmedProceeds: number | null | 'UNKNOWN';
   remainingExposure: number | null | 'UNKNOWN';
+}
+
+export interface IncidentFixtureLock {
+  manifestSha256: string;
+  observationsSha256: string;
+  transactionsSha256: string;
+  expectedSha256: string;
+}
+
+export interface FixturesLockFile {
+  version: string;
+  fixtures: Record<string, IncidentFixtureLock>;
 }
 
 export interface ReplayStepResult {
