@@ -67,6 +67,11 @@ import {
   setShadowPositionRepository,
   validateFeatureFlagMatrix
 } from './position/shadowPosition.js';
+import {
+  setFinancialReadiness,
+  getFinancialReadiness,
+  isFinancialReady
+} from './core/financialReadiness.js';
 
 
 dotenv.config();
@@ -534,6 +539,12 @@ async function executeExitOrder(
   exitSolValue: number,
   options?: ExitOrderOptions
 ): Promise<ExitOrderResult> {
+  if (!isFinancialReady()) {
+    return {
+      success: false,
+      error: `FINANCIAL_STATE_NOT_READY: Saída bloqueada no estado de prontidão '${getFinancialReadiness()}'`
+    };
+  }
   if (uncertainExitMints.has(mint) || financialExitSafetyGuard.hasUnresolvedDebt(mint)) {
     return {
       success: false,
@@ -1612,7 +1623,7 @@ server.listen(PORT, '0.0.0.0', () => {
  * Se o valor cotado for <= 80% do investido (-20%), executa Stop-Loss imediato sem delay.
  */
 async function runUltraFastExitMonitor() {
-  if (NEXUS_MAINTENANCE_MODE) return;
+  if (NEXUS_MAINTENANCE_MODE || !isFinancialReady()) return;
   if (isRunningFastExit) return;
   isRunningFastExit = true;
 
@@ -1861,7 +1872,7 @@ async function runUltraFastExitMonitor() {
  * Varredura DexScreener, Análise RugCheck + filtros determinísticos + Laya shadow e Execução Sniper
  */
 async function executeAutonomousCycle() {
-  if (NEXUS_MAINTENANCE_MODE) return;
+  if (NEXUS_MAINTENANCE_MODE || !isFinancialReady()) return;
   if (executionUncertainReason) {
     console.error(`🛑 [CIRCUIT BREAKER V2] Novas entradas suspensas: ${executionUncertainReason}`);
     return;
@@ -3084,38 +3095,59 @@ async function rehydratePositionsFromWalletOnBoot() {
 export async function rehydrateDurableExitDebtsOnBoot(): Promise<{ recoveredCount: number; lockedMints: string[] }> {
   const pool = postgresRepo.getPool();
   const lockedMints: string[] = [];
-  if (!pool) return { recoveredCount: 0, lockedMints };
+  const persistenceRequired = isShadowJournalEnabled() || Boolean(process.env.DATABASE_URL);
 
-  try {
-    const checkTableRes = await pool.query(
-      "SELECT to_regclass('public.exit_intents') as table_exists"
-    );
-    if (!checkTableRes.rows[0]?.table_exists) {
-      return { recoveredCount: 0, lockedMints };
+  if (!pool) {
+    if (persistenceRequired) {
+      throw new Error('Durable debt recovery failed: PostgreSQL pool is unavailable while persistence is required.');
     }
-
-    const debtRes = await pool.query(`
-      SELECT DISTINCT mint, id, status, reconciliation_debt, claimed_by
-      FROM exit_intents
-      WHERE status IN ('SUBMITTED', 'UNKNOWN')
-         OR reconciliation_debt = true
-    `);
-
-    if (debtRes.rows.length > 0) {
-      console.warn(`🚨 [BOOT: Durable Debt Recovery] Encontradas ${debtRes.rows.length} intenções não resolvidas com dívida de blockchain pendente!`);
-      for (const row of debtRes.rows) {
-        const mint = String(row.mint);
-        console.warn(`🔒 [BOOT: Debt Fencing Ativo] Token ${mint} bloqueado por intenção pendente ${row.id} (status=${row.status}, debt=${row.reconciliation_debt})`);
-        financialExitSafetyGuard.registerUnresolvedDebt(mint);
-        uncertainExitMints.add(mint);
-        lockedMints.push(mint);
-      }
-    } else {
-      console.log('✅ [BOOT: Durable Debt Recovery] Zero dívidas pendentes de saída em exit_intents.');
-    }
-  } catch (err: any) {
-    console.warn(`⚠️ [BOOT: Durable Debt Recovery] Falha ao verificar exit_intents no boot: ${err?.message || err}`);
+    return { recoveredCount: 0, lockedMints };
   }
+
+  const checkTableRes = await pool.query(
+    "SELECT to_regclass('public.exit_intents') as table_exists"
+  );
+  if (!checkTableRes.rows[0]?.table_exists) {
+    if (persistenceRequired) {
+      throw new Error('Durable debt recovery failed: public.exit_intents table does not exist.');
+    }
+    return { recoveredCount: 0, lockedMints };
+  }
+
+  // Finding P0-02 & Finding R-P0-01:
+  // Recover all blocking states:
+  // - SIGNED, SUBMITTED, UNKNOWN
+  // - CONFIRMED without APPLIED
+  // - any reconciliation_debt = true
+  // - PREPARED with non-empty signature or messageHash (label does not override evidence of signing)
+  const debtRes = await pool.query(`
+    SELECT DISTINCT ei.mint, ei.id, ei.status, ei.reconciliation_debt
+    FROM exit_intents ei
+    LEFT JOIN execution_attempts ea ON ea.intent_id = ei.id
+    WHERE ei.status IN ('SUBMITTED', 'UNKNOWN')
+       OR ei.reconciliation_debt = true
+       OR (ei.status = 'CONFIRMED' AND ei.status != 'APPLIED')
+       OR ea.state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN')
+       OR (ea.state = 'CONFIRMED' AND ei.status != 'APPLIED')
+       OR (ea.state = 'PREPARED' AND (
+            (ea.signature IS NOT NULL AND trim(ea.signature) != '') OR
+            (ea.message_hash IS NOT NULL AND trim(ea.message_hash) != '')
+          ))
+  `);
+
+  if (debtRes.rows.length > 0) {
+    console.warn(`🚨 [BOOT: Durable Debt Recovery] Encontradas ${debtRes.rows.length} intenções não resolvidas com dívida de blockchain pendente!`);
+    for (const row of debtRes.rows) {
+      const mint = String(row.mint);
+      console.warn(`🔒 [BOOT: Debt Fencing Ativo] Token ${mint} bloqueado por intenção pendente ${row.id} (status=${row.status}, debt=${row.reconciliation_debt})`);
+      financialExitSafetyGuard.registerUnresolvedDebt(mint);
+      uncertainExitMints.add(mint);
+      lockedMints.push(mint);
+    }
+  } else {
+    console.log('✅ [BOOT: Durable Debt Recovery] Zero dívidas pendentes de saída em exit_intents.');
+  }
+
   return { recoveredCount: lockedMints.length, lockedMints };
 }
 
@@ -3161,7 +3193,15 @@ async function rehydrateQuarantineFromDbOnBoot() {
 }
 
 async function main() {
-  const flagMatrix = validateFeatureFlagMatrix();
+  setFinancialReadiness('BOOTING', 'Validating feature flags and configuration');
+  let flagMatrix: any;
+  try {
+    flagMatrix = validateFeatureFlagMatrix();
+  } catch (err: any) {
+    setFinancialReadiness('FAILED_SAFE', `Feature flag validation error: ${err?.message || err}`);
+    throw err;
+  }
+
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');
   console.log(`🧭 [V2 Feature Matrix] Code: ${flagMatrix.code} | ${flagMatrix.description}`);
@@ -3182,63 +3222,91 @@ async function main() {
     console.warn(`⚠️ [ALERTA DE CHAVE] Chave pública derivada (${wallet.getPublicKey()}) diverge da carteira oficial configurada (${OFFICIAL_PHANTOM_WALLET})!`);
   }
 
-  // 0. Inicialização do Decision Journal & Agendamento do Cron Noturno (03:00 UTC)
-  await journal.initSchema();
-  startCalibrationCron(pgPool);
-  runMaintenance(pgPool).catch(() => {});
+  try {
+    // 0. Inicialização do Decision Journal & Agendamento do Cron Noturno (03:00 UTC)
+    if (isShadowJournalEnabled() || process.env.DATABASE_URL) {
+      if (!pgPool) {
+        throw new Error('PostgreSQL pool unavailable while persistence is required');
+      }
+      await journal.initSchema();
+      const tableCheck = await pgPool.query(`
+        SELECT count(*)::int as count FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+          AND table_name IN ('exit_intents', 'execution_attempts', 'fill_ledger');
+      `);
+      if (Number(tableCheck.rows[0]?.count) < 3) {
+        throw new Error(`Expected durable tables (exit_intents, execution_attempts, fill_ledger) not found in schema`);
+      }
+    } else {
+      await journal.initSchema();
+    }
 
-  // Observatório Pump.fun: estritamente READ-ONLY. Não assina transações e não
-  // altera a decisão de BUY/SELL nesta fase; apenas antecipa descoberta e mede timing.
-  await pumpObservatory.start();
-  latestState.pumpObservatory = pumpObservatory.snapshot();
-  if (PUMP_OBSERVATORY_ENABLED) {
-    console.log(
-      `🧪 [Pump Observatory] ${latestState.pumpObservatory.running ? 'STREAM ATIVO' : 'STREAM INDISPONÍVEL'} ` +
-      `| refresh=${PUMP_OBSERVATORY_REFRESH_MS}ms batch=${PUMP_OBSERVATORY_BATCH_SIZE} | READ-ONLY`
-    );
-    pumpDexTimingRuntime.start();
-    console.log(
-      `🧪 [Pump→Dex Timing] ativo | interval=${PUMP_DEX_TIMING_INTERVAL_MS}ms ` +
-      `batch=${PUMP_DEX_TIMING_BATCH_SIZE} maxAge=${PUMP_DEX_TIMING_MAX_AGE_MS}ms`
-    );
-    if (PUMP_STRATEGY_LAB_ENABLED) {
-      try {
-        await pumpStrategyLabRuntime.restore();
+    startCalibrationCron(pgPool);
+    runMaintenance(pgPool).catch(() => {});
+
+    // Observatório Pump.fun: estritamente READ-ONLY. Não assina transações e não
+    // altera a decisão de BUY/SELL nesta fase; apenas antecipa descoberta e mede timing.
+    await pumpObservatory.start();
+    latestState.pumpObservatory = pumpObservatory.snapshot();
+    if (PUMP_OBSERVATORY_ENABLED) {
+      console.log(
+        `🧪 [Pump Observatory] ${latestState.pumpObservatory.running ? 'STREAM ATIVO' : 'STREAM INDISPONÍVEL'} ` +
+        `| refresh=${PUMP_OBSERVATORY_REFRESH_MS}ms batch=${PUMP_OBSERVATORY_BATCH_SIZE} | READ-ONLY`
+      );
+      pumpDexTimingRuntime.start();
+      console.log(
+        `🧪 [Pump→Dex Timing] ativo | interval=${PUMP_DEX_TIMING_INTERVAL_MS}ms ` +
+        `batch=${PUMP_DEX_TIMING_BATCH_SIZE} maxAge=${PUMP_DEX_TIMING_MAX_AGE_MS}ms`
+      );
+      if (PUMP_STRATEGY_LAB_ENABLED) {
+        try {
+          await pumpStrategyLabRuntime.restore();
+          console.log(
+            `📐 [Pump Strategy Lab] estado recuperado | samples=${pumpStrategyLabRuntime.snapshot().totalSamples}`
+          );
+        } catch (err: any) {
+          console.warn(
+            `⚠️ [Pump Strategy Lab] recuperação indisponível; iniciando coleta nova: ${err?.message || err}`
+          );
+        }
+        pumpStrategyLabRuntime.start();
         console.log(
-          `📐 [Pump Strategy Lab] estado recuperado | samples=${pumpStrategyLabRuntime.snapshot().totalSamples}`
-        );
-      } catch (err: any) {
-        console.warn(
-          `⚠️ [Pump Strategy Lab] recuperação indisponível; iniciando coleta nova: ${err?.message || err}`
+          `📐 [Pump Strategy Lab] SHADOW ativo | interval=${PUMP_STRATEGY_LAB_INTERVAL_MS}ms ` +
+          `| entryModel=escada dinâmica da banca (fallback ${PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS} lamports) ` +
+          `| slippageCap=750bps | priority=P6`
         );
       }
-      pumpStrategyLabRuntime.start();
-      console.log(
-        `📐 [Pump Strategy Lab] SHADOW ativo | interval=${PUMP_STRATEGY_LAB_INTERVAL_MS}ms ` +
-        `| entryModel=escada dinâmica da banca (fallback ${PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS} lamports) ` +
-        `| slippageCap=750bps | priority=P6`
-      );
+      pumpStateSyncTimer = setInterval(() => {
+        latestState.pumpObservatory = pumpObservatory.snapshot();
+        latestState.pumpStrategyLab = pumpStrategyLabRuntime.snapshot();
+      }, 2_500);
+      pumpStateSyncTimer.unref?.();
+    } else {
+      console.log('🧪 [Pump Observatory] desabilitado por configuração.');
     }
-    pumpStateSyncTimer = setInterval(() => {
-      latestState.pumpObservatory = pumpObservatory.snapshot();
-      latestState.pumpStrategyLab = pumpStrategyLabRuntime.snapshot();
-    }, 2_500);
-    pumpStateSyncTimer.unref?.();
-  } else {
-    console.log('🧪 [Pump Observatory] desabilitado por configuração.');
+    setInterval(() => {
+      runMaintenance(pgPool).catch(() => {});
+    }, 24 * 60 * 60 * 1000);
+
+    // 1. Transição para RECOVERING_FINANCIAL_STATE
+    setFinancialReadiness('RECOVERING_FINANCIAL_STATE', 'Rehydrating quarantine, durable debts, and positions');
+
+    // 1.1 Reidratação da Quarentena do Banco (Fim da Amnésia pós-Deploy)
+    await rehydrateQuarantineFromDbOnBoot();
+
+    // 1.2 Reidratação de Dívidas Duráveis de Saída (P0-02 Fencing de Reinício)
+    await rehydrateDurableExitDebtsOnBoot();
+
+    // 1.3 Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
+    await rehydratePositionsFromWalletOnBoot();
+
+    // 2. Transição para READY: todos os débitos recuperados e guards armados
+    setFinancialReadiness('READY', 'Durable state recovered, safety guards armed');
+  } catch (err: any) {
+    setFinancialReadiness('FAILED_SAFE', `Startup recovery failure: ${err?.message || err}`);
+    console.error('🛑 [CRITICAL BOOT FENCE: FAILED_SAFE] Financial mutations blocked:', err);
+    return;
   }
-  setInterval(() => {
-    runMaintenance(pgPool).catch(() => {});
-  }, 24 * 60 * 60 * 1000);
-
-  // 1. Reidratação da Quarentena do Banco (Fim da Amnésia pós-Deploy)
-  await rehydrateQuarantineFromDbOnBoot();
-
-  // 1.5. Reidratação de Dívidas Duráveis de Saída (P0-02 Fencing de Reinício)
-  await rehydrateDurableExitDebtsOnBoot();
-
-  // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
-  await rehydratePositionsFromWalletOnBoot();
 
   if (NEXUS_MAINTENANCE_MODE) {
     console.warn(

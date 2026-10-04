@@ -6,6 +6,12 @@ import type { DecisionLogger } from '../database/decisionJournal.js';
 import { handleJournalRoutes } from './journalRoutes.js';
 import type { SolanaAdminAuthService } from '../auth/adminAuthService.js';
 import { getAdminAuthToken, handleAdminAuthRoutes } from '../auth/adminAuthRoutes.js';
+import {
+  getFinancialReadiness,
+  getFinancialReadinessStatus,
+  isFinancialReady,
+  isFinancialMutationEndpoint
+} from '../core/financialReadiness.js';
 
 export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
 
@@ -139,6 +145,23 @@ export async function handleApiRoutes(
     if (handledAuth) return true;
   }
 
+  // BOOT FENCE (Finding R-P0-01):
+  // Block any financial effect if the system is not in READY state.
+  if (isFinancialMutationEndpoint(pathname, method)) {
+    if (!isFinancialReady()) {
+      const status = getFinancialReadinessStatus();
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: false,
+        error: 'FINANCIAL_STATE_NOT_READY',
+        code: 'FINANCIAL_STATE_NOT_READY',
+        readiness: status.state,
+        reason: status.reason || 'Financial state recovery in progress'
+      }));
+      return true;
+    }
+  }
+
   if (isProtectedMutation(pathname, method)) {
     const adminToken = ctx.adminToken ?? process.env.NEXUS_ADMIN_TOKEN;
     if (!authorizeMutation(req, res, adminToken, ctx.authService)) {
@@ -161,6 +184,7 @@ export async function handleApiRoutes(
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ONLINE',
+      financialReadiness: getFinancialReadiness(),
       agent: ctx.latestState.agent,
       wallet: ctx.latestState.wallet,
       balanceSol: ctx.latestState.balanceSol,
