@@ -784,6 +784,61 @@ export class SolanaWalletService {
     };
   }
 
+  /**
+   * Requirement 37 / P1-09: Synchronous on-chain custody balance observation.
+   * Reads the current atomic balance of the canonical ATA for mintAddress,
+   * measuring call latency for observability.
+   */
+  public async getObservedTokenBalanceAtomic(
+    mintAddress: string,
+    context?: { traceId?: string; tradeId?: TradeId; positionId?: PositionId }
+  ): Promise<{ balanceAtomic: bigint; latencyMs: number } | null> {
+    const start = Date.now();
+    try {
+      const { getAssociatedTokenAddress, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token');
+      const mint = new PublicKey(mintAddress);
+      const owner = this.keypair.publicKey;
+
+      let tokenProgramId = TOKEN_PROGRAM_ID;
+      try {
+        const mintInfo = await this.measureRpcCall(
+          'getAccountInfo',
+          () => this.connection.getAccountInfo(mint),
+          { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+        );
+        if (mintInfo && mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+          tokenProgramId = TOKEN_2022_PROGRAM_ID;
+        }
+      } catch {
+        // Fallback to standard token program
+      }
+
+      const ata = await getAssociatedTokenAddress(mint, owner, false, tokenProgramId);
+
+      const balanceRes = await this.measureRpcCall(
+        'getTokenAccountBalance',
+        () => this.connection.getTokenAccountBalance(ata),
+        { commitment: 'confirmed', traceId: context?.traceId, tradeId: context?.tradeId, positionId: context?.positionId }
+      );
+      const latencyMs = Date.now() - start;
+
+      if (balanceRes?.value?.amount !== undefined) {
+        return {
+          balanceAtomic: BigInt(balanceRes.value.amount),
+          latencyMs
+        };
+      }
+      return null;
+    } catch (err: any) {
+      const latencyMs = Date.now() - start;
+      if (err?.message?.includes('could not find account')) {
+        return { balanceAtomic: 0n, latencyMs };
+      }
+      console.warn(`⚠️ [Wallet:getObservedTokenBalanceAtomic] Failed to read ATA balance for ${mintAddress}: ${err?.message}`);
+      return null;
+    }
+  }
+
   public async closeTokenAccount(
     mintAddress: string,
     context?: { traceId?: string; tradeId?: TradeId; positionId?: PositionId }

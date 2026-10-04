@@ -381,11 +381,10 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       }
     }
 
-    // General worker scan: skip anything with debt, non-reclaimable status, or active on-chain attempts
+    // General worker scan
     for (const intent of this.intents.values()) {
       if (this.lockedIntents.has(intent.id)) continue;
-      if (intent.reconciliationDebt) continue;
-      if (['UNKNOWN', 'SUBMITTED', 'SIGNED', 'CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'].includes(intent.status)) {
+      if (['CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'].includes(intent.status)) {
         continue;
       }
 
@@ -393,16 +392,34 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       const isLeaseExpired =
         intent.leaseExpiresAtWallMs !== null &&
         intent.leaseExpiresAtWallMs !== undefined &&
-        Number(intent.leaseExpiresAtWallMs) < now &&
-        ['CLAIMED', 'PREPARED'].includes(intent.status);
+        Number(intent.leaseExpiresAtWallMs) < now;
 
       if (!isCreated && !isLeaseExpired) continue;
 
-      const attempts = await this.getAttemptsForIntent(intent.id);
-      const hasActive = attempts.some(a =>
-        a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
-      );
-      if (hasActive) continue;
+      if (isLeaseExpired) {
+        if (['UNKNOWN', 'SUBMITTED', 'SIGNED'].includes(intent.status) || intent.reconciliationDebt) {
+          const blockingState = ['UNKNOWN', 'SUBMITTED', 'SIGNED'].includes(intent.status)
+            ? intent.status
+            : 'RECONCILIATION_DEBT';
+          throw new LeaseRecoveryBlockedError(
+            `Lease recovery blocked for intent ${intent.id}: intent is in non-reclaimable state '${intent.status}' or has active reconciliation debt. Must reconcile before re-claim.`,
+            intent.id,
+            blockingState
+          );
+        }
+
+        const attempts = await this.getAttemptsForIntent(intent.id);
+        const blockingAttempt = attempts.find(a =>
+          a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
+        );
+        if (blockingAttempt) {
+          throw new LeaseRecoveryBlockedError(
+            `Lease recovery blocked for intent ${intent.id}: attempt ${blockingAttempt.attemptId} is in active on-chain state '${blockingAttempt.state}'. Must reconcile before re-claim.`,
+            intent.id,
+            blockingAttempt.state
+          );
+        }
+      }
 
       this.lockedIntents.add(intent.id);
       try {

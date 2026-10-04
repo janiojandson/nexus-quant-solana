@@ -918,7 +918,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
 
     // Estado antes da recuperação: Intent ainda está em SUBMITTED / CONFIRMED com reconciliation_debt = true
     const intentBefore = await repo.getIntentById(intent.id);
-    assert.strictEqual(intentBefore?.status, 'APPLIED'); // recordFill automaticamente atualiza para APPLIED
+    assert.strictEqual(intentBefore?.status, 'SUBMITTED'); // recordFill does not update to APPLIED per Finding 30
 
     // Se simularmos crash no intent voltando status para CONFIRMED e reconciliation_debt = true:
     harness.intents.get(intent.id).status = 'CONFIRMED';

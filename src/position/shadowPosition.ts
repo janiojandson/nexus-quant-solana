@@ -341,3 +341,23 @@ export async function reconstructIncidentPositionLifecycle(
     failedAttemptsCount
   };
 }
+
+/**
+ * Requirement 36 / Finding P1-08, P1-09, T3-P1-02:
+ * Validates that migration/schema for V2 positions exists in the database.
+ * If tables are missing, callers must fail closed / transition to FAILED_SAFE.
+ */
+export async function assertV2PositionSchema(pool: any): Promise<void> {
+  if (!pool || typeof pool.query !== 'function') {
+    throw new Error('Database pool unavailable while V2 position schema validation is required');
+  }
+  const res = await pool.query(`
+    SELECT count(*)::int as count FROM information_schema.tables 
+    WHERE table_schema = 'public' 
+      AND table_name IN ('nexus_positions_v2', 'nexus_position_mutations_v2');
+  `);
+  const count = Number(res?.rows?.[0]?.count ?? 0);
+  if (count < 2) {
+    throw new Error(`Expected durable tables (nexus_positions_v2, nexus_position_mutations_v2) not found in schema (found ${count})`);
+  }
+}

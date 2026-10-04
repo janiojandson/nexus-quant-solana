@@ -362,15 +362,10 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         return this.mapRowToIntent(upRes.rows[0]);
       }
 
-      // General worker pool claim: skip anything with debt, non-reclaimable status, or active attempts
+      // General worker pool claim: select candidate for claim
       const selectSql = `
         SELECT * FROM exit_intents
         WHERE (status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status IN ('CLAIMED', 'PREPARED')))
-          AND reconciliation_debt = false
-          AND NOT EXISTS (
-            SELECT 1 FROM execution_attempts ea
-            WHERE ea.intent_id = exit_intents.id AND ea.state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN', 'SENT')
-          )
         ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1;
@@ -382,6 +377,35 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
 
       const cand = candRes.rows[0];
+
+      // Finding P1-03 & Requirement 21/22:
+      // An expired lease with active attempts or reconciliation_debt MUST NOT be re-claimed; it throws LeaseRecoveryBlockedError.
+      if (cand.status !== 'CREATED') {
+        const attRes = await client.query(
+          `SELECT attempt_id, state FROM execution_attempts
+           WHERE intent_id = $1 AND state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN', 'SENT')
+           LIMIT 1;`,
+          [cand.id]
+        );
+        if (attRes.rows.length > 0) {
+          const blockingState = attRes.rows[0].state;
+          await client.query('ROLLBACK');
+          throw new LeaseRecoveryBlockedError(
+            `Lease recovery blocked for intent ${cand.id}: cannot re-claim expired lease while attempt ${attRes.rows[0].attempt_id} is in state '${blockingState}'. Must reconcile before re-claim.`,
+            cand.id,
+            blockingState
+          );
+        }
+
+        if (cand.reconciliation_debt) {
+          await client.query('ROLLBACK');
+          throw new LeaseRecoveryBlockedError(
+            `Lease recovery blocked for intent ${cand.id}: cannot re-claim expired lease with active reconciliation debt. Must reconcile before re-claim.`,
+            cand.id,
+            'RECONCILIATION_DEBT'
+          );
+        }
+      }
       const leaseExpiresAt = now + input.leaseDurationMs;
       const updateSql = `
         UPDATE exit_intents

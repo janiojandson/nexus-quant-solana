@@ -76,6 +76,8 @@ import {
 import {
   setShadowPositionRepository,
   getShadowPositionRepository,
+  isPositionShadowEnabled,
+  assertV2PositionSchema,
   validateFeatureFlagMatrix
 } from './position/shadowPosition.js';
 import {
@@ -821,32 +823,53 @@ async function executeExitOrderUnlocked(
   let reservationReceipt: DispatchReservationReceipt | null = null;
   if (isPositionVersionGateEnabled()) {
     const shadowPosRepo = getShadowPositionRepository();
-    if (shadowPosRepo) {
-      const v2Pos = await shadowPosRepo.getActivePositionByWalletMint(OFFICIAL_PHANTOM_WALLET, pos.mint);
-      if (v2Pos) {
-        const boundQuote = bindExecutionQuote({
-          snapshot: takePositionSnapshot(v2Pos),
-          requestedAmountAtomic: BigInt(exitAmountAtomic),
-          quoteSource: 'JUPITER',
-          outAmountLamports: BigInt(Math.max(0, Math.round(exitSolValue * 1e9))),
-          slippageBps: initialSlippageBps
-        });
-
-        const gateDecision = await revalidateCustodyAndEvaluateGate({
-          positionRepo: shadowPosRepo,
-          positionId: v2Pos.positionId,
-          boundQuote,
-          intentPolicy: isPartial ? 'PARTIAL_50' : 'FULL_REMAINDER',
-          intendedAmountAtomic: BigInt(exitAmountAtomic)
-        });
-
-        if (!gateDecision.allowed) {
-          console.error(`🛑 [VersionGate] Exit blocked: ${gateDecision.code} - ${gateDecision.reason}`);
-          return { success: false, error: `VERSION_GATE_REJECTED: ${gateDecision.reason}` };
-        }
-        reservationReceipt = gateDecision.receipt;
-      }
+    if (!shadowPosRepo) {
+      console.error(`🛑 [VersionGate FAIL CLOSED] Shadow position repository unavailable while gate enabled.`);
+      return { success: false, error: 'V2_POSITION_NOT_READY: shadow position repository unavailable' };
     }
+    const v2Pos = await shadowPosRepo.getActivePositionByWalletMint(OFFICIAL_PHANTOM_WALLET, pos.mint);
+    if (!v2Pos) {
+      console.error(`🛑 [VersionGate FAIL CLOSED] Active V2 position missing for mint ${pos.mint} while version gate is enabled.`);
+      return { success: false, error: 'V2_POSITION_NOT_READY: active V2 position missing' };
+    }
+
+    // Requirement 37 / P1-09: Synchronous on-chain custody observation before quote binding
+    const custodyObs = await wallet.getObservedTokenBalanceAtomic(pos.mint, {
+      positionId: v2Pos.positionId,
+      traceId: (pos as any).traceId
+    });
+    const observedAtomic = custodyObs ? custodyObs.balanceAtomic : undefined;
+    if (custodyObs) {
+      console.log(`⏱️ [VersionGate:CustodySync] Observed balance ${custodyObs.balanceAtomic} for ${pos.mint} in ${custodyObs.latencyMs}ms`);
+    }
+
+    const boundQuote = bindExecutionQuote({
+      snapshot: takePositionSnapshot(v2Pos),
+      requestedAmountAtomic: BigInt(exitAmountAtomic),
+      quoteSource: 'JUPITER',
+      outAmountLamports: BigInt(Math.max(0, Math.round(exitSolValue * 1e9))),
+      slippageBps: initialSlippageBps
+    });
+
+    const gateDecision = await revalidateCustodyAndEvaluateGate({
+      positionRepo: shadowPosRepo,
+      positionId: v2Pos.positionId,
+      boundQuote,
+      intentPolicy: isPartial ? 'PARTIAL_50' : 'FULL_REMAINDER',
+      intendedAmountAtomic: BigInt(exitAmountAtomic),
+      observedAtaBalanceAtomic: observedAtomic,
+      evidence: observedAtomic !== undefined ? {
+        source: 'ON_CHAIN_SYNC_BALANCE',
+        observedAtWallMs: Date.now(),
+        reason: 'PRE_SEND_CUSTODY_REVALIDATION'
+      } : undefined
+    });
+
+    if (!gateDecision.allowed) {
+      console.error(`🛑 [VersionGate] Exit blocked: ${gateDecision.code} - ${gateDecision.reason}`);
+      return { success: false, error: `VERSION_GATE_REJECTED: ${gateDecision.reason}` };
+    }
+    reservationReceipt = gateDecision.receipt;
   }
 
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
@@ -3315,6 +3338,33 @@ async function rehydratePositionsFromWalletOnBoot() {
         partialTaken: recovery.partialTaken
       });
 
+      // Requirement 35 / Finding P1-08: Explicit V2 position rehydration on startup
+      if (isPositionShadowEnabled()) {
+        const shadowRepo = getShadowPositionRepository();
+        if (shadowRepo) {
+          try {
+            const existingV2 = await shadowRepo.getActivePositionByWalletMint(OFFICIAL_PHANTOM_WALLET, spl.mint);
+            if (!existingV2) {
+              await shadowRepo.createPosition({
+                positionId: recovery.traceId || `pos_${spl.mint.slice(0, 8)}_${Date.now()}`,
+                tradeId: recovery.traceId || `trade_${spl.mint.slice(0, 8)}_${Date.now()}`,
+                walletId: OFFICIAL_PHANTOM_WALLET,
+                mint: spl.mint,
+                tokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
+                status: 'OPEN',
+                tokenAmountAtomic: BigInt(managedAtomic),
+                initialAmountAtomic: BigInt(recovery.initialTokenAmountAtomic),
+                initialPrincipalLamports: BigInt(Math.max(0, Math.round((recovery.entrySizeSol || 0) * 1e9))),
+                source: 'BOOT_REHYDRATION'
+              });
+              console.log(`🛡️ [BOOT: V2 Position Hydrated] Created V2 position for ${spl.mint} with balance ${managedAtomic}`);
+            }
+          } catch (v2Err: any) {
+            console.warn(`⚠️ [BOOT: V2 Position Rehydration Warning] Failed to sync V2 position for ${spl.mint}:`, v2Err?.message || v2Err);
+          }
+        }
+      }
+
       console.log(
         `🛡️ [BOOT: Posição Restaurada do Ledger] ${recovery.symbol} (${spl.mint}) | ` +
         `atomic=${managedAtomic}/${recovery.initialTokenAmountAtomic} | custo restante=${remainingEntrySol.toFixed(6)} SOL | ` +
@@ -3514,6 +3564,17 @@ async function main() {
       }
     } else {
       await journal.initSchema();
+    }
+
+    // Requirement 36 / Finding P1-08, P1-09, T3-P1-02:
+    // When POSITION_SHADOW or VERSION_GATE depend on nexus_positions_v2,
+    // startup must validate that migration/schema exists. Missing schema -> FAILED_SAFE.
+    if (isPositionShadowEnabled() || isPositionVersionGateEnabled()) {
+      if (!pgPool) {
+        throw new Error('PostgreSQL pool unavailable while Position Shadow or Version Gate is enabled');
+      }
+      await assertV2PositionSchema(pgPool);
+      console.log('🛡️ [BOOT: V2 Position Schema Gate] nexus_positions_v2 and nexus_position_mutations_v2 verified in catalog');
     }
 
     startCalibrationCron(pgPool);

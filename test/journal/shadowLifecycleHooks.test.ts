@@ -169,8 +169,8 @@ describe('Nexus V2.1B — Shadow Lifecycle Hooks in Execution Flow (C3)', () => 
     assert.strictEqual(fills.length, 1);
     assert.strictEqual(fills[0].grossProceedsLamports, '250000000');
     const intentAfterFill = await repo.getIntentById(ctx!.intentId);
-    assert.strictEqual(intentAfterFill?.status, 'APPLIED');
-    assert.strictEqual(intentAfterFill?.reconciliationDebt, false);
+    assert.strictEqual(intentAfterFill?.status, 'CONFIRMED');
+    assert.strictEqual(intentAfterFill?.reconciliationDebt, true);
 
     // 8. LEGACY POSITION UPDATE
     await shadowOnLegacyPositionUpdate({
