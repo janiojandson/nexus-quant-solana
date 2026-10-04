@@ -190,8 +190,8 @@ export const VALID_INTENT_TRANSITIONS: ReadonlyMap<ExitIntentStatus, ReadonlySet
   ['CLAIMED', new Set<ExitIntentStatus>(['PREPARED', 'SUBMITTED', 'CONFIRMED', 'APPLIED', 'SUPERSEDED', 'CANCELLED', 'FAILED_DEFINITIVE', 'UNKNOWN'])],
   ['PREPARED', new Set<ExitIntentStatus>(['SUBMITTED', 'CONFIRMED', 'APPLIED', 'SUPERSEDED', 'CANCELLED', 'FAILED_DEFINITIVE', 'UNKNOWN'])],
   ['SUBMITTED', new Set<ExitIntentStatus>(['CONFIRMED', 'APPLIED', 'UNKNOWN', 'FAILED_DEFINITIVE'])],
-  ['UNKNOWN', new Set<ExitIntentStatus>(['SUBMITTED', 'CONFIRMED', 'APPLIED', 'FAILED_DEFINITIVE'])],
-  ['CONFIRMED', new Set<ExitIntentStatus>(['SUBMITTED', 'APPLIED'])],
+  ['UNKNOWN', new Set<ExitIntentStatus>(['CONFIRMED', 'APPLIED', 'FAILED_DEFINITIVE'])],
+  ['CONFIRMED', new Set<ExitIntentStatus>(['APPLIED'])],
   ['APPLIED', new Set<ExitIntentStatus>()],
   ['SUPERSEDED', new Set<ExitIntentStatus>()],
   ['CANCELLED', new Set<ExitIntentStatus>()],
@@ -206,6 +206,53 @@ export function assertValidIntentTransition(from: ExitIntentStatus, to: ExitInte
   }
 }
 
+/**
+ * Finding P1-03 & 9.1: Explicit matrix of allowed intent states for prepareAttempt.
+ * Intents in terminal states (APPLIED, FAILED_DEFINITIVE, SUPERSEDED, CANCELLED)
+ * or active chain states (SUBMITTED, CONFIRMED, UNKNOWN) cannot prepare new attempts.
+ */
+export const ALLOWED_INTENT_STATUSES_FOR_PREPARE_ATTEMPT: ReadonlySet<ExitIntentStatus> = new Set([
+  'CREATED',
+  'CLAIMED',
+  'PREPARED'
+]);
+
+export function assertCanPrepareAttemptForIntent(intentStatus: ExitIntentStatus): void {
+  if (!ALLOWED_INTENT_STATUSES_FOR_PREPARE_ATTEMPT.has(intentStatus)) {
+    throw new IllegalStateTransitionError(
+      'ExitIntent',
+      intentStatus,
+      'PREPARE_ATTEMPT_REJECTED: Intent must be in CREATED, CLAIMED, or PREPARED to prepare a new attempt'
+    );
+  }
+}
+
+/**
+ * Finding P1-04 & 9.2: Strict audit context for system/administrative mutations.
+ * Prevents arbitrary backdoor status overrides.
+ */
+export interface SystemMutationContext {
+  readonly actor: string;
+  readonly reason: string;
+  readonly expectedCurrentState?: string;
+  readonly expectedEpoch?: bigint | number;
+}
+
+export function assertValidSystemMutationContext(context: SystemMutationContext, currentActualState?: string): void {
+  if (!context || !context.actor || context.actor.trim() === '') {
+    throw new Error('System mutation rejected: actor is required.');
+  }
+  if (!context.reason || context.reason.trim() === '') {
+    throw new Error('System mutation rejected: reason is required.');
+  }
+  if (context.expectedCurrentState && currentActualState && context.expectedCurrentState !== currentActualState) {
+    throw new Error(
+      `System mutation rejected: expectedCurrentState '${context.expectedCurrentState}' does not match actual state '${currentActualState}'.`
+    );
+  }
+}
+
+
 export const VALID_ATTEMPT_TRANSITIONS: ReadonlyMap<ExecutionAttemptState, ReadonlySet<ExecutionAttemptState>> = new Map([
   ['INITIALIZED', new Set<ExecutionAttemptState>(['ORDER_READY', 'SIGNED', 'SIMULATED', 'SUBMITTED', 'SENT', 'FAILED', 'FAILED_DEFINITIVE'])],
   ['ORDER_READY', new Set<ExecutionAttemptState>(['SIGNED', 'SIMULATED', 'SUBMITTED', 'SENT', 'FAILED', 'FAILED_DEFINITIVE'])],
@@ -214,7 +261,8 @@ export const VALID_ATTEMPT_TRANSITIONS: ReadonlyMap<ExecutionAttemptState, Reado
   ['SUBMITTED', new Set<ExecutionAttemptState>(['PROVIDER_SUCCESS', 'CONFIRMED', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
   ['SENT', new Set<ExecutionAttemptState>(['PROVIDER_SUCCESS', 'CONFIRMED', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
   ['PROVIDER_SUCCESS', new Set<ExecutionAttemptState>(['CONFIRMED', 'UNKNOWN', 'FAILED', 'FAILED_DEFINITIVE'])],
-  ['UNKNOWN', new Set<ExecutionAttemptState>(['CONFIRMED', 'FAILED', 'FAILED_DEFINITIVE'])],
+  ['UNKNOWN', new Set<ExecutionAttemptState>(['CONFIRMED', 'FAILED_DEFINITIVE'])],
+
   ['CONFIRMED', new Set<ExecutionAttemptState>()],
   ['FAILED_DEFINITIVE', new Set<ExecutionAttemptState>()],
   ['FAILED', new Set<ExecutionAttemptState>()]

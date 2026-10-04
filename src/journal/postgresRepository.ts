@@ -47,8 +47,12 @@ import {
   IllegalStateTransitionError,
   assertValidIntentTransition,
   assertValidAttemptTransition,
-  hasPotentiallyLiveChainAttempt
+  hasPotentiallyLiveChainAttempt,
+  assertCanPrepareAttemptForIntent,
+  SystemMutationContext,
+  assertValidSystemMutationContext
 } from './types';
+
 
 export interface PostgresJournalRepositoryConfig {
   pool: Pool;
@@ -360,6 +364,10 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
+      // Finding P1-03 & 9.1: Enforce prepareAttempt eligibility matrix
+      assertCanPrepareAttemptForIntent(intentRow.status);
+
+
       if (expectedEpoch === undefined || expectedEpoch === null) {
         throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
       }
@@ -443,10 +451,78 @@ export class PostgresJournalRepository implements IExitJournalRepository {
   public async systemUpdateAttemptState(
     attemptId: string,
     state: ExecutionAttemptState,
+    context: SystemMutationContext,
     updates?: Partial<ExecutionAttempt>
   ): Promise<ExecutionAttempt> {
-    return this.internalUpdateAttemptState(attemptId, state, updates);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const attRes = await client.query('SELECT * FROM execution_attempts WHERE attempt_id = $1 FOR UPDATE', [attemptId]);
+      if (attRes.rows.length === 0) {
+        throw new Error(`ExecutionAttempt not found: ${attemptId}`);
+      }
+      const attRow = attRes.rows[0];
+
+      // Finding 9.2: Validate system mutation context
+      assertValidSystemMutationContext(context, attRow.state);
+
+      // Enforce valid attempt transition
+      assertValidAttemptTransition(attRow.state, state);
+
+      const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [attRow.intent_id]);
+      if (intentRes.rows.length > 0) {
+        const intentRow = intentRes.rows[0];
+        if (context.expectedEpoch !== undefined && context.expectedEpoch !== null && BigInt(intentRow.claim_epoch) !== BigInt(context.expectedEpoch)) {
+          throw new StaleEpochError(
+            `Stale claim epoch for intent ${intentRow.id}: expected ${context.expectedEpoch}, actual ${intentRow.claim_epoch}`,
+            intentRow.id,
+            BigInt(context.expectedEpoch),
+            BigInt(intentRow.claim_epoch)
+          );
+        }
+      }
+
+      const updateAttSql = `
+        UPDATE execution_attempts
+        SET state = $1,
+            signature = COALESCE($2, signature),
+            message_hash = COALESCE($3, message_hash),
+            failure_reason = COALESCE($4, failure_reason),
+            error_classification = COALESCE($5, error_classification),
+            last_valid_block_height = COALESCE($6, last_valid_block_height),
+            prepared_at = CASE WHEN $7::bigint IS NOT NULL THEN to_timestamp($7::bigint / 1000.0) ELSE prepared_at END,
+            submitted_at = CASE WHEN $8::bigint IS NOT NULL THEN to_timestamp($8::bigint / 1000.0) ELSE submitted_at END,
+            provider_receipt_at = CASE WHEN $9::bigint IS NOT NULL THEN to_timestamp($9::bigint / 1000.0) ELSE provider_receipt_at END,
+            confirmed_at = CASE WHEN $10::bigint IS NOT NULL THEN to_timestamp($10::bigint / 1000.0) ELSE confirmed_at END
+        WHERE attempt_id = $11
+        RETURNING *;
+      `;
+
+      const upAttRes = await client.query(updateAttSql, [
+        state,
+        updates?.signature || null,
+        updates?.messageHash || null,
+        updates?.failureReason || null,
+        updates?.errorClassification || null,
+        updates?.lastValidBlockHeight != null ? BigInt(updates.lastValidBlockHeight) : null,
+        updates?.preparedAtWallMs || null,
+        updates?.submittedAtWallMs || null,
+        updates?.providerReceiptAtWallMs || null,
+        updates?.confirmedAtWallMs || null,
+        attemptId
+      ]);
+
+      await client.query('COMMIT');
+      return this.mapRowToAttempt(upAttRes.rows[0]);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   }
+
 
   private async internalUpdateAttemptState(
     attemptId: string,
@@ -830,7 +906,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
   public async releaseTerminalIntent(
     intentId: string,
     terminalStatus: ExitIntentStatus,
-    expectedEpoch?: bigint | number
+    contextOrEpoch?: bigint | number | SystemMutationContext
   ): Promise<ExitIntent> {
     if (!isIntentTerminal(terminalStatus)) {
       throw new Error(`Cannot release intent ${intentId} with non-terminal status: ${terminalStatus}`);
@@ -843,6 +919,15 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         throw new Error(`ExitIntent not found: ${intentId}`);
       }
       const row = intentRes.rows[0];
+
+      let expectedEpoch: bigint | number | undefined;
+      if (typeof contextOrEpoch === 'object' && contextOrEpoch !== null) {
+        assertValidSystemMutationContext(contextOrEpoch, row.status);
+        expectedEpoch = contextOrEpoch.expectedEpoch;
+      } else {
+        expectedEpoch = contextOrEpoch;
+      }
+
       if (expectedEpoch !== undefined && BigInt(row.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
@@ -851,6 +936,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
           BigInt(row.claim_epoch)
         );
       }
+
       if (terminalStatus === 'SUPERSEDED' || terminalStatus === 'CANCELLED') {
         const live = await this.hasPotentiallyLiveChainAttempt(intentId);
         if (live) {

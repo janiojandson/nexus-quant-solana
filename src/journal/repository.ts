@@ -26,8 +26,10 @@ import {
   WallMs,
   nowWallMs,
   nowMonotonicNs,
-  computeEconomicDedupeKey
+  computeEconomicDedupeKey,
+  SystemMutationContext
 } from './types';
+
 
 // ==========================================
 // 1. REPOSITORY ERRORS
@@ -132,19 +134,21 @@ export interface IExitJournalRepository {
   systemUpdateAttemptState?(
     attemptId: string,
     state: ExecutionAttemptState,
+    context: SystemMutationContext,
     updates?: Partial<ExecutionAttempt>
   ): Promise<ExecutionAttempt>;
   hasPotentiallyLiveChainAttempt?(intentId: string): Promise<boolean>;
   getIntent?(id: string): Promise<ExitIntent | null>;
   claimNextIntent?(input: ClaimIntentInput): Promise<ExitIntent | null>;
-  renewLease?(intentId: string, workerId: string, durationMs: number, expectedEpoch?: bigint | number): Promise<ExitIntent>;
+  renewLease?(intentId: string, workerId: string, durationMs: number, contextOrEpoch?: bigint | number | SystemMutationContext): Promise<ExitIntent>;
   recordSeverityEvent?(intentId: string, newSeverity: ExitIntentSeverity, reason: ExitIntentReason, observationId?: string, expectedEpoch?: bigint | number): Promise<IntentSeverityEvent>;
   createAttempt?(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt>;
-  markReconciliationDebt?(intentId: string, debt: boolean, expectedEpoch?: bigint | number): Promise<ExitIntent>;
+  markReconciliationDebt?(intentId: string, debt: boolean, contextOrEpoch?: bigint | number | SystemMutationContext): Promise<ExitIntent>;
   applyFillIdempotently?(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }>;
-  releaseTerminalIntent?(intentId: string, terminalStatus: ExitIntentStatus, expectedEpoch?: bigint | number): Promise<ExitIntent>;
+  releaseTerminalIntent?(intentId: string, terminalStatus: ExitIntentStatus, contextOrEpoch?: bigint | number | SystemMutationContext): Promise<ExitIntent>;
   getUnreconciledIntents?(): Promise<ExitIntent[]>;
 }
+
 
 // ==========================================
 // 4. IN-MEMORY CONTRACT-TESTING IMPLEMENTATION
@@ -159,8 +163,11 @@ import {
   IllegalStateTransitionError,
   assertValidIntentTransition,
   assertValidAttemptTransition,
-  hasPotentiallyLiveChainAttempt
+  hasPotentiallyLiveChainAttempt,
+  assertCanPrepareAttemptForIntent,
+  assertValidSystemMutationContext
 } from './types';
+
 
 export class InMemoryJournalRepository implements IExitJournalRepository {
   private intents = new Map<string, ExitIntent>(); // id -> intent
@@ -375,6 +382,10 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       throw new Error(`ExitIntent not found for attempt: ${input.intentId}`);
     }
 
+    // Finding P1-03 & 9.1: Enforce prepareAttempt eligibility matrix
+    assertCanPrepareAttemptForIntent(intent.status);
+
+
     if (expectedEpoch === undefined || expectedEpoch === null) {
       throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
     }
@@ -445,10 +456,17 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
   public async systemUpdateAttemptState(
     attemptId: string,
     state: ExecutionAttemptState,
+    context: SystemMutationContext,
     updates?: Partial<ExecutionAttempt>
   ): Promise<ExecutionAttempt> {
-    return this.internalUpdateAttemptState(attemptId, state, updates);
+    const attempt = this.attempts.get(attemptId);
+    if (!attempt) {
+      throw new Error(`ExecutionAttempt not found: ${attemptId}`);
+    }
+    assertValidSystemMutationContext(context, attempt.state);
+    return this.internalUpdateAttemptState(attemptId, state, updates, context.expectedEpoch);
   }
+
 
   private async internalUpdateAttemptState(
     attemptId: string,
@@ -660,7 +678,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
   public async releaseTerminalIntent(
     intentId: string,
     terminalStatus: ExitIntentStatus,
-    expectedEpoch?: bigint | number
+    contextOrEpoch?: bigint | number | SystemMutationContext
   ): Promise<ExitIntent> {
     if (!isIntentTerminal(terminalStatus)) {
       throw new Error(`Cannot release intent ${intentId} with non-terminal status: ${terminalStatus}`);
@@ -669,6 +687,15 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     if (!intent) {
       throw new Error(`ExitIntent not found: ${intentId}`);
     }
+
+    let expectedEpoch: bigint | number | undefined;
+    if (typeof contextOrEpoch === 'object' && contextOrEpoch !== null) {
+      assertValidSystemMutationContext(contextOrEpoch, intent.status);
+      expectedEpoch = contextOrEpoch.expectedEpoch;
+    } else {
+      expectedEpoch = contextOrEpoch;
+    }
+
     if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
