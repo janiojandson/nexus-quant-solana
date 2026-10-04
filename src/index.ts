@@ -42,6 +42,12 @@ import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
 import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
 import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
+import { isShadowJournalEnabled } from './journal/shadowJournal.js';
+import {
+  shadowOnExitDecision,
+  shadowOnFillConfirmed,
+  shadowOnLegacyPositionUpdate
+} from './journal/shadowHooks.js';
 
 
 dotenv.config();
@@ -595,6 +601,20 @@ async function executeExitOrderUnlocked(
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
   console.log(`⚡ [Jupiter Swap V2] Saída com slippage ${initialSlippageBps}bps e landing gerenciado...`);
 
+  if (isShadowJournalEnabled()) {
+    await shadowOnExitDecision({
+      walletId: OFFICIAL_PHANTOM_WALLET,
+      mint: pos.mint,
+      requestedAmountAtomic: String(exitAmountAtomic),
+      reason: exitReason,
+      pnlPct,
+      exitSolValue,
+      traceId: pos.traceId,
+      tradeId: (pos as any).tradeId,
+      positionId: (pos as any).positionId
+    });
+  }
+
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
   const exitAttemptStartedAt = Date.now();
   let exitSwap: RoutedExitAttempt = await jupiterEngine.executeSwap({
@@ -798,6 +818,15 @@ async function executeExitOrderUnlocked(
     return { success: false, txSignature: '', error: failReason };
   }
 
+  if (isShadowJournalEnabled()) {
+    await shadowOnFillConfirmed({
+      mint: pos.mint,
+      signature: exitSwap.txSignature,
+      grossProceedsLamports: exitSwap.outAmount,
+      actualAmountAtomic: exitAmountAtomic
+    });
+  }
+
   const tokenAmountBefore = pos.tokenAmount;
   const soldRatio = Math.min(1, Math.max(0, exitAmountAtomic / tokenAmountBefore));
   const costBasisSoldSol = (pos.entrySol || 0.015) * soldRatio;
@@ -850,6 +879,16 @@ async function executeExitOrderUnlocked(
     }
   } else {
     console.log(`🛡️ [Custódia Parcial] Conta ATA de ${pos.symbol} mantida aberta para os 50% restantes (Super Runner Mode).`);
+  }
+
+  if (isShadowJournalEnabled()) {
+    await shadowOnLegacyPositionUpdate({
+      mint: pos.mint,
+      isPartial,
+      committed: true,
+      realizedPnlSol,
+      ataClosed
+    });
   }
 
   // 4. Quarentena Inteligente por Motivo de Saída

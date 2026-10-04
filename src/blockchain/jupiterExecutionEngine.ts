@@ -12,6 +12,15 @@ import {
   type TelemetrySpan
 } from '../types/telemetry.js';
 import { globalTelemetryBuffer } from '../telemetry/telemetryBuffer.js';
+import bs58 from 'bs58';
+import { isShadowJournalEnabled } from '../journal/shadowJournal.js';
+import {
+  shadowOnJupiterOrder,
+  shadowOnLocalSign,
+  shadowOnSimulationResult,
+  shadowOnSubmit,
+  shadowOnProviderReceipt
+} from '../journal/shadowHooks.js';
 
 const MAX_SLIPPAGE_BPS = 750;
 
@@ -594,7 +603,23 @@ export class JupiterExecutionEngine {
 
     try {
       const { order, orderHttpMs } = await this.getOrder(req);
+      if (isShadowJournalEnabled()) {
+        await shadowOnJupiterOrder({
+          mint: req.inputMint,
+          requestId: order.requestId,
+          route: order.router,
+          lastValidBlockHeight: order.lastValidBlockHeight
+        });
+      }
+
       const { transaction, signedTransaction, localSignMs } = this.signOrder(order, req);
+      if (isShadowJournalEnabled()) {
+        const sigBase58 = transaction.signatures[0] ? bs58.encode(transaction.signatures[0]) : '';
+        await shadowOnLocalSign({
+          mint: req.inputMint,
+          signature: sigBase58
+        });
+      }
 
       let unitsConsumed: number | undefined;
       let simulationMs: number | undefined;
@@ -603,6 +628,15 @@ export class JupiterExecutionEngine {
         const simulation = await this.simulateSignedTransaction(transaction, req.traceId);
         unitsConsumed = simulation.unitsConsumed;
         simulationMs = simulation.simulationMs;
+
+        if (isShadowJournalEnabled()) {
+          await shadowOnSimulationResult({
+            mint: req.inputMint,
+            success: simulation.success,
+            unitsConsumed: simulation.unitsConsumed,
+            error: simulation.error
+          });
+        }
 
         if (!simulation.success) {
           console.warn(
@@ -640,7 +674,25 @@ export class JupiterExecutionEngine {
           : {})
       };
 
+      if (isShadowJournalEnabled()) {
+        await shadowOnSubmit({
+          mint: req.inputMint,
+          lastValidBlockHeight: order.lastValidBlockHeight
+        });
+      }
+
       const executed = await this.postExecute(payload, req.trafficPriority ?? 4, req.traceId);
+
+      if (isShadowJournalEnabled()) {
+        await shadowOnProviderReceipt({
+          mint: req.inputMint,
+          status: executed.response
+            ? (executed.response.status === 'Success' && Number(executed.response.code) === 0 ? 'SUCCESS' : 'FAILED')
+            : 'SUBMITTED_UNCONFIRMED',
+          signature: executed.response?.signature ? String(executed.response.signature) : undefined,
+          error: executed.uncertainError || (executed.response && executed.response.status !== 'Success' ? executed.response.error : undefined)
+        });
+      }
 
       if (!executed.response) {
         return {
