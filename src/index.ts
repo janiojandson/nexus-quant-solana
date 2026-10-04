@@ -24,7 +24,13 @@ import { PositionExitEngine, type PositionTracking } from './execution/positionE
 import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
 import { ExitPathHealth } from './execution/exitPathHealth.js';
 import { buildWatchdogExitPlan } from './execution/watchdogExitPolicy.js';
-import { ExitRouter, type RoutedExitAttempt } from './execution/exitRouter.js';
+import {
+  ExitRouter,
+  type RoutedExitAttempt,
+  reconcileExecutionAmounts,
+  type ExecutionAmountMismatch,
+  type ExecutionConfirmationStage
+} from './execution/exitRouter.js';
 import { PumpSellExecutor } from './pump/pumpSellExecutor.js';
 import { renderDashboardHtml, DashboardState } from './dashboard/dashboardRenderer.js';
 import { handleApiRoutes } from './server/routes.js';
@@ -793,10 +799,50 @@ async function executeExitOrderUnlocked(
     );
   }
 
-  // 2. Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
-  // foi de fato confirmado. Sem esta trava, uma saída falha fechava a ATA
-  // (prendendo os tokens), gravava PnLperformed fictício e notificava "Saída Executada".
-  const exitConfirmed = exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS';
+  // 2. Separação explícita de estágios de confirmação (P0-06):
+  // PROVIDER_RECEIPT vs CHAIN_CONFIRMED vs ECONOMICALLY_RECONCILED.
+  // Um mero HTTP 200 / Success do provedor não basta para autorizar mutação financeira.
+  if (exitSwap.status === 'SUCCESS' && !exitSwap.confirmationStage) {
+    if (IS_DRY_RUN || exitSwap.txSignature?.startsWith('dry_run_')) {
+      exitSwap.confirmationStage = 'CHAIN_CONFIRMED';
+    } else {
+      exitSwap.confirmationStage = 'PROVIDER_RECEIPT';
+    }
+  }
+
+  if (!IS_DRY_RUN && exitSwap.status === 'SUCCESS' && exitSwap.confirmationStage === 'PROVIDER_RECEIPT') {
+    if (exitSwap.txSignature && !exitSwap.txSignature.startsWith('dry_run_')) {
+      const sigStatus = await wallet.getSignatureStatus(exitSwap.txSignature);
+      if (sigStatus?.err) {
+        console.error(`🛑 [Transaction On-Chain Failed] ${pos.symbol} tx=${exitSwap.txSignature}:`, sigStatus.err);
+        exitSwap.status = 'FAILED';
+        exitSwap.error = `Transação on-chain falhou: ${JSON.stringify(sigStatus.err)}`;
+      } else if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
+        exitSwap.confirmationStage = 'CHAIN_CONFIRMED';
+      } else {
+        // Tenta reconciliar via delta token da wallet
+        const reconciled = await reconcileUncertainV2Execution(pos.mint, exitAttemptStartedAt, 'OUT', 2);
+        if (reconciled) {
+          exitSwap.confirmationStage = 'ECONOMICALLY_RECONCILED';
+          const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
+          if (soldAtomic > 0) {
+            exitSwap.inAmount = soldAtomic;
+          }
+        } else {
+          console.warn(`⚠️ [Confirmation Inconclusive] ${pos.symbol}: receipt do provedor sem confirmação de landing; registrando UNKNOWN/dívida.`);
+          exitSwap.status = 'SUBMITTED_UNCONFIRMED';
+          exitSwap.error = 'Receipt do provedor recebido, mas confirmação de landing na blockchain inconclusiva.';
+          uncertainExitMints.add(pos.mint);
+          financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
+        }
+      }
+    }
+  }
+
+  // Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
+  // foi comprovadamente confirmado na blockchain ou reconciliado economicamente.
+  const exitConfirmed = (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') &&
+    (exitSwap.confirmationStage === 'CHAIN_CONFIRMED' || exitSwap.confirmationStage === 'ECONOMICALLY_RECONCILED' || IS_DRY_RUN);
 
   if (!exitConfirmed) {
     const failReason = exitSwap.error || `Swap de saída não confirmado (status: ${exitSwap.status})`;
@@ -827,17 +873,43 @@ async function executeExitOrderUnlocked(
     return { success: false, txSignature: '', error: failReason };
   }
 
+  // 3. Reconciliação do Montante Real de Fill vs Montante Solicitado (P0-07):
+  // É terminantemente proibido reduzir a posição usando apenas exitAmountAtomic solicitado
+  // quando a execução reporta montante diferente.
+  const requestedAmountAtomic = exitAmountAtomic;
+  const executedInAmountAtomic = Number.isSafeInteger(exitSwap.inAmount) && exitSwap.inAmount > 0
+    ? exitSwap.inAmount
+    : requestedAmountAtomic;
+  const actualDebitAtomic = executedInAmountAtomic;
+
+  if (requestedAmountAtomic !== executedInAmountAtomic) {
+    const mismatchDelta = Math.abs(requestedAmountAtomic - executedInAmountAtomic);
+    console.warn(
+      `⚠️ [ExecutionAmountMismatch] ${pos.symbol}: Solicitado=${requestedAmountAtomic} != Executado=${executedInAmountAtomic} ` +
+      `| delta=${mismatchDelta} atomic. Mutando posição estritamente pelo debit real.`
+    );
+    exitSwap.amountMismatch = {
+      requestedAmountAtomic,
+      executedAmountAtomic: executedInAmountAtomic,
+      deltaAtomic: mismatchDelta
+    };
+    latestState.recentAudits[0] = {
+      ...latestState.recentAudits[0],
+      amountMismatch: exitSwap.amountMismatch
+    } as any;
+  }
+
   if (isShadowJournalEnabled()) {
     await shadowOnFillConfirmed({
       mint: pos.mint,
       signature: exitSwap.txSignature,
       grossProceedsLamports: exitSwap.outAmount,
-      actualAmountAtomic: exitAmountAtomic
+      actualAmountAtomic: actualDebitAtomic
     });
   }
 
   const tokenAmountBefore = pos.tokenAmount;
-  const soldRatio = Math.min(1, Math.max(0, exitAmountAtomic / tokenAmountBefore));
+  const soldRatio = Math.min(1, Math.max(0, actualDebitAtomic / tokenAmountBefore));
   const costBasisSoldSol = (pos.entrySol || 0.015) * soldRatio;
   const actualExitSolValue = exitSwap.outAmount > 0
     ? exitSwap.outAmount / 1e9
@@ -855,19 +927,20 @@ async function executeExitOrderUnlocked(
     `| custo-base=${costBasisSoldSol.toFixed(9)} SOL | PnL=${(realizedPnlPct * 100).toFixed(2)}%`
   );
 
-  if (isPartial) {
-    const committed = positionEngine.commitPartialExit(pos.mint, exitAmountAtomic, impliedFullPositionSolValue);
+  const isFullDebit = actualDebitAtomic >= tokenAmountBefore;
+  if (isPartial || !isFullDebit) {
+    const committed = positionEngine.commitPartialExit(pos.mint, actualDebitAtomic, impliedFullPositionSolValue);
     if (!committed) {
-      console.error(`❌ [CONSISTÊNCIA] Swap parcial confirmou, mas o estado local não conseguiu aplicar a redução de ${exitAmountAtomic} unidades em ${pos.symbol}.`);
+      console.error(`❌ [CONSISTÊNCIA] Swap confirmou, mas o estado local não conseguiu aplicar a redução de ${actualDebitAtomic} unidades em ${pos.symbol}.`);
     }
+  } else {
+    positionEngine.removePosition(pos.mint);
   }
 
-  // 3. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido).
-  // Falha ao fechar a ATA NÃO reabre a posição: se o swap foi confirmado, o risco financeiro já foi encerrado.
-  // O rent fica pendente para o sweep automático, e não é creditado ficticiamente no ledger.
+  // 4. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais confirmadas (100% debitado).
   let ataClosed = false;
   let rentRecoveredActualSol = 0;
-  if (shouldCloseAta) {
+  if (shouldCloseAta && isFullDebit) {
     try {
       const closeResult = await wallet.closeTokenAccount(pos.mint);
       ataClosed = closeResult.success;
@@ -886,6 +959,8 @@ async function executeExitOrderUnlocked(
         err?.message || err
       );
     }
+  } else if (!isFullDebit) {
+    console.log(`🛡️ [Custódia Parcial] Conta ATA de ${pos.symbol} mantida aberta para o saldo remanescente (${tokenAmountBefore - actualDebitAtomic} atomic).`);
   } else {
     console.log(`🛡️ [Custódia Parcial] Conta ATA de ${pos.symbol} mantida aberta para os 50% restantes (Super Runner Mode).`);
   }

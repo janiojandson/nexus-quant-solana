@@ -435,6 +435,36 @@ export class SolanaWalletService {
     }
   }
 
+  public async getSignatureStatus(
+    signature: string,
+    context?: { traceId?: string }
+  ): Promise<{
+    confirmationStatus: 'processed' | 'confirmed' | 'finalized' | null;
+    err: any | null;
+  } | null> {
+    if (!signature || signature.startsWith('dry_run_')) {
+      return { confirmationStatus: 'confirmed', err: null };
+    }
+    if (typeof this.connection?.getSignatureStatus !== 'function') {
+      return { confirmationStatus: 'confirmed', err: null };
+    }
+    try {
+      const response = await this.measureRpcCall(
+        'getSignatureStatus',
+        () => this.connection.getSignatureStatus(signature, { searchTransactionHistory: true }),
+        { commitment: 'confirmed', traceId: context?.traceId }
+      );
+      if (!response?.value) return null;
+      return {
+        confirmationStatus: response.value.confirmationStatus || null,
+        err: response.value.err || null
+      };
+    } catch (err: any) {
+      console.warn(`⚠️ [Wallet] Falha ao consultar status da assinatura ${signature}: ${err?.message || err}`);
+      return null;
+    }
+  }
+
   /**
    * Lê da própria transação confirmada quanto deste mint entrou efetivamente
    * na carteira. Isso evita tratar o outAmount da quote Jupiter como saldo real:

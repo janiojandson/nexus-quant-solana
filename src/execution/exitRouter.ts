@@ -4,12 +4,28 @@ export type RoutedExitStatus =
   | 'FAILED'
   | 'SUBMITTED_UNCONFIRMED';
 
+export type ExecutionConfirmationStage =
+  | 'PROVIDER_RECEIPT'
+  | 'CHAIN_CONFIRMED'
+  | 'ECONOMICALLY_RECONCILED';
+
+export interface ExecutionAmountMismatch {
+  requestedAmountAtomic: number;
+  executedAmountAtomic: number;
+  deltaAtomic: number;
+}
+
 export interface RoutedExitAttempt {
   status: RoutedExitStatus;
   txSignature: string;
   inAmount: number;
   outAmount: number;
   error?: string;
+  confirmationStage?: ExecutionConfirmationStage;
+  requestedAmountAtomic?: number;
+  executedInAmountAtomic?: number;
+  actualDebitAtomic?: number;
+  amountMismatch?: ExecutionAmountMismatch;
 }
 
 export type ExitRoutePath = 'JUPITER' | 'PUMP_DIRECT';
@@ -25,6 +41,35 @@ export interface ExitRouterResult {
 
 export interface ExitRouterOptions {
   pumpFallbackEnabled: boolean;
+}
+
+/**
+ * Reconciles requested exit amount with the actual debit reported by the execution engine.
+ * Emits an ExecutionAmountMismatch structure if the executed amount diverged.
+ */
+export function reconcileExecutionAmounts(
+  requestedAmountAtomic: number,
+  executedInAmountAtomic: number
+): {
+  actualDebitAtomic: number;
+  amountMismatch?: ExecutionAmountMismatch;
+} {
+  const safeExecuted = Number.isSafeInteger(executedInAmountAtomic) && executedInAmountAtomic > 0
+    ? executedInAmountAtomic
+    : requestedAmountAtomic;
+
+  if (requestedAmountAtomic !== safeExecuted) {
+    return {
+      actualDebitAtomic: safeExecuted,
+      amountMismatch: {
+        requestedAmountAtomic,
+        executedAmountAtomic: safeExecuted,
+        deltaAtomic: Math.abs(requestedAmountAtomic - safeExecuted)
+      }
+    };
+  }
+
+  return { actualDebitAtomic: safeExecuted };
 }
 
 export class ExitRouter {
