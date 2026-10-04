@@ -26,13 +26,20 @@ CREATE TABLE IF NOT EXISTS exit_intents (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'CREATED',
-    superseded_by VARCHAR(64) NULL
+    superseded_by VARCHAR(64) NULL,
+    reconciliation_debt BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_exit_intents_trade ON exit_intents(trade_id);
 CREATE INDEX IF NOT EXISTS idx_exit_intents_position ON exit_intents(position_id);
 CREATE INDEX IF NOT EXISTS idx_exit_intents_status ON exit_intents(status);
 CREATE INDEX IF NOT EXISTS idx_exit_intents_claimable ON exit_intents(status, lease_expires_at);
+
+-- Partial Unique Index: Prevents two economically active intents on the same wallet + mint
+-- Terminal states that release exclusivity: APPLIED, CANCELLED, SUPERSEDED, FAILED_DEFINITIVE
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_intent_wallet_mint
+ON exit_intents(wallet_id, mint)
+WHERE status NOT IN ('APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE');
 
 -- 2. Table: execution_attempts
 CREATE TABLE IF NOT EXISTS execution_attempts (

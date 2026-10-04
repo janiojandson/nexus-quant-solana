@@ -113,8 +113,60 @@ export interface ExitIntent {
   status: ExitIntentStatus;
   supersededBy?: ExitIntentId;
 
+  // Reconciliation Debt: true when an active on-chain attempt is unresolved
+  reconciliationDebt: boolean;
+
   readonly createdAtWallMs: WallMs;
   readonly expiresAtWallMs: WallMs;
+}
+
+export const TERMINAL_INTENT_STATUSES: ReadonlySet<ExitIntentStatus> = new Set([
+  'APPLIED',
+  'CANCELLED',
+  'SUPERSEDED',
+  'FAILED_DEFINITIVE'
+]);
+
+export const ECONOMICALLY_ACTIVE_INTENT_STATUSES: ReadonlySet<ExitIntentStatus> = new Set([
+  'CREATED',
+  'CLAIMED',
+  'PREPARED',
+  'SUBMITTED',
+  'CONFIRMED',
+  'UNKNOWN'
+]);
+
+export function isIntentEconomicallyActive(status: ExitIntentStatus): boolean {
+  return ECONOMICALLY_ACTIVE_INTENT_STATUSES.has(status);
+}
+
+export function isIntentTerminal(status: ExitIntentStatus): boolean {
+  return TERMINAL_INTENT_STATUSES.has(status);
+}
+
+export class StaleEpochError extends Error {
+  constructor(
+    message: string,
+    public readonly intentId: string,
+    public readonly expectedEpoch: number,
+    public readonly actualEpoch: number
+  ) {
+    super(message);
+    this.name = 'StaleEpochError';
+  }
+}
+
+export class ActiveIntentExclusionError extends Error {
+  constructor(
+    message: string,
+    public readonly walletId: string,
+    public readonly mint: string,
+    public readonly activeIntentId: string,
+    public readonly activeStatus: ExitIntentStatus
+  ) {
+    super(message);
+    this.name = 'ActiveIntentExclusionError';
+  }
 }
 
 // ==========================================

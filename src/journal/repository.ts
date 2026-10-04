@@ -108,18 +108,20 @@ export interface IExitJournalRepository {
     intentId: string,
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
-    observationId?: string
+    observationId?: string,
+    expectedEpoch?: number
   ): Promise<IntentSeverityEvent>;
   claimIntent(input: ClaimIntentInput): Promise<ExitIntent | null>;
-  prepareAttempt(input: PrepareAttemptInput): Promise<ExecutionAttempt>;
+  prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt>;
   getAttemptById(attemptId: string): Promise<ExecutionAttempt | null>;
   getAttemptsForIntent(intentId: string): Promise<ExecutionAttempt[]>;
   updateAttemptState(
     attemptId: string,
     state: ExecutionAttemptState,
-    updates?: Partial<ExecutionAttempt>
+    updates?: Partial<ExecutionAttempt>,
+    expectedEpoch?: number
   ): Promise<ExecutionAttempt>;
-  recordFill(fill: FillRecord): Promise<{ fill: FillRecord; created: boolean }>;
+  recordFill(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }>;
   getFillsForTrade(tradeId: string): Promise<FillRecord[]>;
   getFillsForPosition(positionId: string): Promise<FillRecord[]>;
   recordReconciliationEvent(
@@ -130,6 +132,13 @@ export interface IExitJournalRepository {
 // ==========================================
 // 4. IN-MEMORY ACID-COMPLIANT IMPLEMENTATION
 // ==========================================
+
+import {
+  isIntentEconomicallyActive,
+  isIntentTerminal,
+  StaleEpochError,
+  ActiveIntentExclusionError
+} from './types';
 
 export class InMemoryExitJournalRepository implements IExitJournalRepository {
   private intents = new Map<string, ExitIntent>(); // id -> intent
@@ -174,6 +183,21 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
       }
     }
 
+    // Active Intent Exclusion: check if any economically active intent exists on the same wallet + mint
+    for (const existing of this.intents.values()) {
+      if (existing.walletId === input.walletId && existing.mint === input.mint) {
+        if (isIntentEconomicallyActive(existing.status) || existing.reconciliationDebt) {
+          throw new ActiveIntentExclusionError(
+            `Active intent ${existing.id} already exists for wallet ${input.walletId} and mint ${input.mint} in status '${existing.status}' (reconciliationDebt=${existing.reconciliationDebt}). Competing intent rejected.`,
+            input.walletId,
+            input.mint,
+            existing.id,
+            existing.status
+          );
+        }
+      }
+    }
+
     const now = (input.nowMs ?? nowWallMs()) as WallMs;
     const ttlMs = input.expiresInMs ?? 60_000;
     const expiresAt = (Number(now) + ttlMs) as WallMs;
@@ -201,6 +225,7 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
       claimedAtWallMs: null,
       leaseExpiresAtWallMs: null,
       status: 'CREATED',
+      reconciliationDebt: false,
       createdAtWallMs: now,
       expiresAtWallMs: expiresAt
     };
@@ -224,11 +249,21 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
     intentId: string,
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
-    observationId?: string
+    observationId?: string,
+    expectedEpoch?: number
   ): Promise<IntentSeverityEvent> {
     const intent = this.intents.get(intentId);
     if (!intent) {
       throw new Error(`ExitIntent not found: ${intentId}`);
+    }
+
+    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      throw new StaleEpochError(
+        `Stale claim epoch for intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+        intent.id,
+        expectedEpoch,
+        intent.claimEpoch
+      );
     }
 
     const event: IntentSeverityEvent = {
@@ -260,28 +295,28 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
 
       const isCreated = intent.status === 'CREATED';
       const isLeaseExpired =
-        (intent.status === 'CLAIMED' || intent.status === 'PREPARED') &&
         intent.leaseExpiresAtWallMs !== null &&
         intent.leaseExpiresAtWallMs !== undefined &&
-        Number(intent.leaseExpiresAtWallMs) < now;
+        Number(intent.leaseExpiresAtWallMs) < now &&
+        !isIntentTerminal(intent.status);
 
       if (!isCreated && !isLeaseExpired) {
         continue;
       }
 
       // CRITICAL LEASE RECOVERY RULE:
-      // If an existing attempt reached SIGNED, SUBMITTED, or UNKNOWN,
-      // it CANNOT be reassigned without prior reconciliation!
+      // If an existing attempt reached SIGNED, SUBMITTED, UNKNOWN, or SENT,
+      // or if reconciliationDebt is true, it CANNOT be blindly reassigned without prior reconciliation!
       if (isLeaseExpired) {
         const attempts = await this.getAttemptsForIntent(intent.id);
         const blockingAttempt = attempts.find(a =>
           a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
         );
-        if (blockingAttempt) {
+        if (blockingAttempt || intent.reconciliationDebt) {
           throw new LeaseRecoveryBlockedError(
-            `Lease recovery blocked for intent ${intent.id}: attempt ${blockingAttempt.attemptId} is in active on-chain state '${blockingAttempt.state}'. Must reconcile before re-claim.`,
+            `Lease recovery blocked for intent ${intent.id}: attempt ${blockingAttempt?.attemptId ?? 'active'} is in active on-chain state '${blockingAttempt?.state ?? 'RECONCILIATION_DEBT'}'. Must reconcile before re-claim.`,
             intent.id,
-            blockingAttempt.state
+            blockingAttempt?.state ?? 'RECONCILIATION_DEBT'
           );
         }
       }
@@ -303,10 +338,19 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
     return null;
   }
 
-  public async prepareAttempt(input: PrepareAttemptInput): Promise<ExecutionAttempt> {
+  public async prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
     const intent = this.intents.get(input.intentId);
     if (!intent) {
       throw new Error(`ExitIntent not found for attempt: ${input.intentId}`);
+    }
+
+    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      throw new StaleEpochError(
+        `Stale claim epoch for intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+        intent.id,
+        expectedEpoch,
+        intent.claimEpoch
+      );
     }
 
     const now = (input.nowMs ?? nowWallMs()) as WallMs;
@@ -352,11 +396,24 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
   public async updateAttemptState(
     attemptId: string,
     state: ExecutionAttemptState,
-    updates?: Partial<ExecutionAttempt>
+    updates?: Partial<ExecutionAttempt>,
+    expectedEpoch?: number
   ): Promise<ExecutionAttempt> {
     const attempt = this.attempts.get(attemptId);
     if (!attempt) {
       throw new Error(`ExecutionAttempt not found: ${attemptId}`);
+    }
+
+    const intent = this.intents.get(attempt.intentId);
+    if (intent) {
+      if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+        throw new StaleEpochError(
+          `Stale claim epoch for intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+          intent.id,
+          expectedEpoch,
+          intent.claimEpoch
+        );
+      }
     }
 
     attempt.state = state;
@@ -372,24 +429,35 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
       if (updates.confirmedAtWallMs !== undefined) attempt.confirmedAtWallMs = updates.confirmedAtWallMs;
     }
 
-    // Update parent intent state accordingly
-    const intent = this.intents.get(attempt.intentId);
+    // Update parent intent state and reconciliation debt accordingly
     if (intent) {
       if (state === 'SUBMITTED' || state === 'SENT') {
         intent.status = 'SUBMITTED';
+        intent.reconciliationDebt = true;
+      } else if (state === 'SIGNED') {
+        intent.reconciliationDebt = true;
+      } else if (state === 'UNKNOWN') {
+        intent.status = 'UNKNOWN';
+        intent.reconciliationDebt = true;
       } else if (state === 'CONFIRMED') {
         intent.status = 'CONFIRMED';
       } else if (state === 'FAILED_DEFINITIVE') {
         intent.status = 'FAILED_DEFINITIVE';
-      } else if (state === 'UNKNOWN') {
-        intent.status = 'UNKNOWN';
+        // Clear reconciliation debt if no other active attempt is pending
+        const otherAttempts = await this.getAttemptsForIntent(intent.id);
+        const hasOtherActive = otherAttempts.some(a =>
+          a.attemptId !== attemptId && (a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN')
+        );
+        if (!hasOtherActive) {
+          intent.reconciliationDebt = false;
+        }
       }
     }
 
     return { ...attempt };
   }
 
-  public async recordFill(fill: FillRecord): Promise<{ fill: FillRecord; created: boolean }> {
+  public async recordFill(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }> {
     // Unique on-chain identity: (signature, chainLegIndex, instructionIndex, innerInstructionIndex)
     const onChainKey = `${fill.signature}:${fill.chainLegIndex}:${fill.instructionIndex}:${fill.innerInstructionIndex}`;
 
@@ -402,6 +470,18 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
       }
     }
 
+    const intent = this.intents.get(fill.intentId);
+    if (intent) {
+      if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+        throw new StaleEpochError(
+          `Stale claim epoch for fill on intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
+          intent.id,
+          expectedEpoch,
+          intent.claimEpoch
+        );
+      }
+    }
+
     // Append-only rule: fill id must not already exist
     if (this.fills.has(fill.id)) {
       throw new AppendOnlyViolationError(`Fill ID already exists: ${fill.id}. Cannot overwrite existing fill.`);
@@ -410,10 +490,10 @@ export class InMemoryExitJournalRepository implements IExitJournalRepository {
     this.fills.set(fill.id, { ...fill });
     this.fillsByOnChainIdentity.set(onChainKey, fill.id);
 
-    // Update parent intent status to APPLIED
-    const intent = this.intents.get(fill.intentId);
+    // Update parent intent status to APPLIED and clear reconciliation debt
     if (intent) {
       intent.status = 'APPLIED';
+      intent.reconciliationDebt = false;
     }
 
     return { fill: { ...fill }, created: true };
