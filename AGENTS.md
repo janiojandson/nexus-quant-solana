@@ -64,6 +64,6 @@ Loop Contínuo (a cada 30 segundos)
 
 ## 🛡️ 5. REGRAS OBRIGATÓRIAS (NEXUS SAFE-DEV)
 
-1. **SLIPPAGE MÁXIMO:** 500 bps (5%). Qualquer rota com slippage superior é descartada para evitar front-running e sandwich attacks.
+1. **SLIPPAGE MÁXIMO:** 750 bps (7,5%). Qualquer rota com slippage superior é descartada para evitar front-running e sandwich attacks.
 2. **ALOCAÇÃO MÁXIMA POR TRADE:** Máximo de 10% do saldo total por operação.
 3. **RESERVA DE GÁS INTOCÁVEL:** Nunca alocar mais do que o saldo menos 0.005 SOL para garantir taxa de rede.

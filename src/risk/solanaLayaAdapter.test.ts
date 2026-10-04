@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { SolanaLayaAdapter, shouldBlockSolanaEntryFromLaya } from './solanaLayaAdapter.js';
+import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode, shouldBlockSolanaEntryFromLaya } from './solanaLayaAdapter.js';
 
 const FACTS = {
   mint: 'MintNative111111111111111111111111111111111',
@@ -208,10 +208,14 @@ test('SolanaLayaAdapter usa proxy privado sem bearer do cliente', async () => {
   }
 });
 
-test('política tática Solana trata ABSTAIN como defer e WAIT como bloqueio', () => {
+test('política Laya Solana permanece advisory e normaliza ACTIVE para SHADOW', () => {
   assert.strictEqual(shouldBlockSolanaEntryFromLaya('BUY'), false);
   assert.strictEqual(shouldBlockSolanaEntryFromLaya('ABSTAIN'), false);
-  assert.strictEqual(shouldBlockSolanaEntryFromLaya('WAIT'), true);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya('WAIT'), false);
+  assert.strictEqual(normalizeSolanaLayaTacticalMode('OFF'), 'OFF');
+  assert.strictEqual(normalizeSolanaLayaTacticalMode('SHADOW'), 'SHADOW');
+  assert.strictEqual(normalizeSolanaLayaTacticalMode('ACTIVE'), 'SHADOW');
+  assert.strictEqual(normalizeSolanaLayaTacticalMode('invalid'), 'SHADOW');
 });
 
 test('SolanaLayaAdapter health usa proxy privado sem bearer e reporta checkpoint', async () => {
