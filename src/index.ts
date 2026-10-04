@@ -67,8 +67,16 @@ import {
 } from './journal/shadowHooks.js';
 import {
   setShadowPositionRepository,
+  getShadowPositionRepository,
   validateFeatureFlagMatrix
 } from './position/shadowPosition.js';
+import {
+  isPositionVersionGateEnabled,
+  revalidateCustodyAndEvaluateGate,
+  type DispatchReservationReceipt
+} from './position/versionGate.js';
+import { bindExecutionQuote, type BoundExecutionQuote } from './position/quoteBinding.js';
+import { takePositionSnapshot } from './position/types.js';
 import {
   setFinancialReadiness,
   getFinancialReadiness,
@@ -742,6 +750,38 @@ async function executeExitOrderUnlocked(
     });
   }
 
+  // Pre-Send Version Gate & Dispatch Reservation (flags = 111)
+  let reservationReceipt: DispatchReservationReceipt | null = null;
+  if (isPositionVersionGateEnabled()) {
+    const shadowPosRepo = getShadowPositionRepository();
+    if (shadowPosRepo) {
+      const v2Pos = await shadowPosRepo.getActivePositionByWalletMint(OFFICIAL_PHANTOM_WALLET, pos.mint);
+      if (v2Pos) {
+        const boundQuote = bindExecutionQuote({
+          snapshot: takePositionSnapshot(v2Pos),
+          requestedAmountAtomic: BigInt(exitAmountAtomic),
+          quoteSource: 'JUPITER',
+          outAmountLamports: BigInt(Math.max(0, Math.round(exitSolValue * 1e9))),
+          slippageBps: initialSlippageBps
+        });
+
+        const gateDecision = await revalidateCustodyAndEvaluateGate({
+          positionRepo: shadowPosRepo,
+          positionId: v2Pos.positionId,
+          boundQuote,
+          intentPolicy: isPartial ? 'PARTIAL_50' : 'FULL_REMAINDER',
+          intendedAmountAtomic: BigInt(exitAmountAtomic)
+        });
+
+        if (!gateDecision.allowed) {
+          console.error(`🛑 [VersionGate] Exit blocked: ${gateDecision.code} - ${gateDecision.reason}`);
+          return { success: false, error: `VERSION_GATE_REJECTED: ${gateDecision.reason}` };
+        }
+        reservationReceipt = gateDecision.receipt;
+      }
+    }
+  }
+
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
   const exitAttemptStartedAt = Date.now();
   let exitSwap: RoutedExitAttempt = await jupiterEngine.executeSwap({
@@ -961,6 +1001,10 @@ async function executeExitOrderUnlocked(
       }
     }
   }
+
+  // Release pre-send dispatch reservation once on-chain attempt is settled
+  reservationReceipt?.release();
+  reservationReceipt = null;
 
   // Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
   // foi comprovadamente confirmado na blockchain ou reconciliado economicamente.

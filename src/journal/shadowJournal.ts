@@ -27,9 +27,10 @@ import {
   applyFillToAccounting,
   PositionAccountingSnapshot
 } from './accounting';
+import { parseStrictBooleanEnv } from '../core/strictEnv.js';
 
 export function isShadowJournalEnabled(): boolean {
-  return process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED === 'true';
+  return parseStrictBooleanEnv('NEXUS_V2_JOURNAL_SHADOW_ENABLED', process.env.NEXUS_V2_JOURNAL_SHADOW_ENABLED);
 }
 
 export function syntheticReplayId(

@@ -18,9 +18,10 @@ import { PositionVersion } from '../types/telemetry.js';
 import { DurablePosition, PositionStatus } from './types.js';
 import { IPositionRepository } from './repository.js';
 import { isShadowJournalEnabled } from '../journal/shadowJournal.js';
+import { parseStrictBooleanEnv } from '../core/strictEnv.js';
 
 export function isPositionShadowEnabled(): boolean {
-  return process.env.NEXUS_V2_POSITION_SHADOW_ENABLED === 'true';
+  return parseStrictBooleanEnv('NEXUS_V2_POSITION_SHADOW_ENABLED', process.env.NEXUS_V2_POSITION_SHADOW_ENABLED);
 }
 
 let activeShadowPositionRepository: IPositionRepository | null = null;
@@ -68,7 +69,7 @@ export interface FeatureFlagMatrix {
 export function validateFeatureFlagMatrix(): FeatureFlagMatrix {
   const j = isShadowJournalEnabled();
   const p = isPositionShadowEnabled();
-  const g = process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED === 'true';
+  const g = parseStrictBooleanEnv('NEXUS_V2_POSITION_VERSION_GATE_ENABLED', process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED);
 
   const code = `${j ? '1' : '0'}${p ? '1' : '0'}${g ? '1' : '0'}`;
 

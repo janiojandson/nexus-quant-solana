@@ -18,8 +18,10 @@ import { validateFeatureFlagMatrix } from './shadowPosition.js';
 import { IPositionRepository } from './repository.js';
 import { reconcilePositionCustody } from './custody.js';
 
+import { parseStrictBooleanEnv } from '../core/strictEnv.js';
+
 export function isPositionVersionGateEnabled(): boolean {
-  if (process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED !== 'true') {
+  if (!parseStrictBooleanEnv('NEXUS_V2_POSITION_VERSION_GATE_ENABLED', process.env.NEXUS_V2_POSITION_VERSION_GATE_ENABLED)) {
     return false;
   }
   const matrix = validateFeatureFlagMatrix();
@@ -145,11 +147,16 @@ export interface ActiveDispatchReservation {
   readonly reservedAtWallMs: number;
   readonly intentId?: string;
   readonly timeoutMs: number;
+  hasDurableDebt?: boolean;
 }
 
 /**
- * Requirement (P0-01 TOCTOU):
+ * Requirement (P0-01 TOCTOU & Finding 13/15):
  * Manages dispatch reservations between pre-send gate evaluation and irreversible broadcast.
+ *
+ * Expiration Rule:
+ * Expiration of timeoutMs does NOT release exposure if durable debt exists
+ * (hasPotentiallyLiveChainAttempt or reconciliation_debt = true).
  *
  * TOCTOU Mitigation Notice:
  * In-process TOCTOU between gate evaluation and broadcast is mitigated by DispatchReservationManager.
@@ -159,9 +166,21 @@ export interface ActiveDispatchReservation {
 export class DispatchReservationManager {
   private activeReservations = new Map<string, ActiveDispatchReservation>();
   private defaultTimeoutMs: number;
+  private durableDebtChecker?: (intentId: string) => boolean;
 
   constructor(defaultTimeoutMs: number = 15_000) {
     this.defaultTimeoutMs = defaultTimeoutMs;
+  }
+
+  public setDurableDebtChecker(checker: (intentId: string) => boolean): void {
+    this.durableDebtChecker = checker;
+  }
+
+  public markDurableDebt(positionId: string, hasDebt: boolean): void {
+    const res = this.activeReservations.get(positionId);
+    if (res) {
+      res.hasDurableDebt = hasDebt;
+    }
   }
 
   public reserve(params: {
@@ -169,21 +188,31 @@ export class DispatchReservationManager {
     expectedVersion: PositionVersion;
     intentId?: string;
     timeoutMs?: number;
+    hasDurableDebt?: boolean;
   }): DispatchReservationReceipt {
     const now = Date.now();
     const timeoutMs = params.timeoutMs ?? this.defaultTimeoutMs;
     const existing = this.activeReservations.get(params.positionId);
 
     if (existing) {
-      if (now - existing.reservedAtWallMs < existing.timeoutMs) {
+      const isExpired = now - existing.reservedAtWallMs >= existing.timeoutMs;
+      const debtActive = Boolean(
+        existing.hasDurableDebt ||
+        params.hasDurableDebt ||
+        (existing.intentId && this.durableDebtChecker && this.durableDebtChecker(existing.intentId))
+      );
+
+      if (!isExpired || debtActive) {
         throw new DispatchReservationConflictError(
           params.positionId,
           existing.expectedVersion,
           existing.intentId,
-          `Concurrent dispatch reservation active for position ${params.positionId} (intent=${existing.intentId || 'none'}, version=${existing.expectedVersion}). Irreversible broadcast blocked to prevent TOCTOU race.`
+          debtActive
+            ? `Dispatch reservation for position ${params.positionId} cannot expire because intent ${existing.intentId || 'unknown'} has active durable debt or in-flight chain attempt.`
+            : `Concurrent dispatch reservation active for position ${params.positionId} (intent=${existing.intentId || 'none'}, version=${existing.expectedVersion}). Irreversible broadcast blocked to prevent TOCTOU race.`
         );
       }
-      // Expired reservation - remove it
+      // Expired reservation without durable debt - remove it
       this.activeReservations.delete(params.positionId);
     }
 
@@ -194,7 +223,8 @@ export class DispatchReservationManager {
       expectedVersion: params.expectedVersion,
       reservedAtWallMs: now,
       intentId: params.intentId,
-      timeoutMs
+      timeoutMs,
+      hasDurableDebt: params.hasDurableDebt
     };
 
     this.activeReservations.set(params.positionId, reservation);
@@ -217,7 +247,12 @@ export class DispatchReservationManager {
   public getActiveReservation(positionId: string): ActiveDispatchReservation | null {
     const res = this.activeReservations.get(positionId);
     if (!res) return null;
-    if (Date.now() - res.reservedAtWallMs >= res.timeoutMs) {
+    const isExpired = Date.now() - res.reservedAtWallMs >= res.timeoutMs;
+    const debtActive = Boolean(
+      res.hasDurableDebt ||
+      (res.intentId && this.durableDebtChecker && this.durableDebtChecker(res.intentId))
+    );
+    if (isExpired && !debtActive) {
       this.activeReservations.delete(positionId);
       return null;
     }
