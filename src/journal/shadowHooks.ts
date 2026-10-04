@@ -340,7 +340,7 @@ export async function shadowOnProviderReceipt(input: OnProviderReceiptInput): Pr
 
     let targetState: ExecutionAttemptState = 'UNKNOWN';
     if (input.status === 'SUCCESS' || input.status === 'DRY_RUN_SUCCESS') {
-      targetState = 'CONFIRMED';
+      targetState = 'PROVIDER_SUCCESS';
     } else if (input.status === 'FAILED') {
       targetState = 'FAILED_DEFINITIVE';
     } else if (input.status === 'SUBMITTED_UNCONFIRMED') {
@@ -362,6 +362,11 @@ export async function shadowOnFillConfirmed(input: OnFillConfirmedInput): Promis
     const repo = activeShadowRepository!;
     const ctx = activeShadowContexts.get(input.mint);
     if (!ctx || !ctx.currentAttemptId) return;
+
+    // Transition attempt from PROVIDER_SUCCESS / SUBMITTED to CONFIRMED (Finding R-P1-02)
+    await repo.updateAttemptState(ctx.currentAttemptId, 'CONFIRMED', {
+      confirmedAtWallMs: nowWallMs()
+    }, ctx.claimEpoch);
 
     const fillId = `SHADOW_GENERATED:fill_${input.signature.slice(0, 16)}_${Date.now()}`;
 

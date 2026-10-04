@@ -52,8 +52,10 @@ import { isShadowJournalEnabled } from './journal/shadowJournal.js';
 import {
   financialExitSafetyGuard,
   safeBigIntToNumber,
-  parseAtomicAmountBigInt
+  parseAtomicAmountBigInt,
+  type CustodyLockIdentity
 } from './execution/financialExitSafetyGuard.js';
+
 import type { SwapExecutionResponse } from './blockchain/jupiterExecutionEngine.js';
 import { PostgresJournalRepository } from './journal/postgresRepository.js';
 import { PostgresPositionRepository } from './position/postgresPositionRepository.js';
@@ -190,10 +192,10 @@ const gatekeeper = new MemeRiskGatekeeper({
 const solanaLayaAdapter = new SolanaLayaAdapter();
 const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
-/** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
-const exitOrderInFlight = new Set<string>();
+/** Finding P0-05: Exclusão in-process unificada em financialExitSafetyGuard (sem múltiplos universos de lock). */
 /** Mints cujo /execute V2 ficou inconclusivo: bloqueia nova ordem até reinício/reconciliação. */
 const uncertainExitMints = new Set<string>();
+
 /** Circuit breaker em memória: impede novas entradas após uma execução V2 inconclusiva. */
 let executionUncertainReason: string | null = null;
 
@@ -260,6 +262,52 @@ async function reconcileExactSignatureWithRetries(
   }
   return null;
 }
+
+/**
+ * Finding P0-03, P0-04, P0-06, R-P1-02:
+ * Provider receipt != Confirmação econômica.
+ * Valida centralizadamente se a assinatura da transação pousou on-chain com sucesso
+ * ou se é confirmada por reconciliação exata de assinatura, antes de qualquer efeito financeiro
+ * (remover posição, fechar ATA, decrementar estoque, incrementar contagem de liquidação).
+ */
+async function verifySwapLandingConfirmation(
+  mint: string,
+  txSignature: string | undefined,
+  isDryRun: boolean = IS_DRY_RUN
+): Promise<{ confirmed: boolean; error?: string }> {
+  if (isDryRun || Boolean(txSignature?.startsWith('dry_run_'))) {
+    return { confirmed: true };
+  }
+  if (!txSignature || txSignature.trim() === '') {
+    return { confirmed: false, error: 'NO_SIGNATURE_FOR_CONFIRMATION' };
+  }
+
+  try {
+    const sigStatus = await wallet.getSignatureStatus(txSignature);
+    if (sigStatus?.err) {
+      return { confirmed: false, error: `Transação on-chain falhou: ${JSON.stringify(sigStatus.err)}` };
+    }
+    if (sigStatus && (sigStatus.confirmationStatus === 'confirmed' || sigStatus.confirmationStatus === 'finalized')) {
+      return { confirmed: true };
+    }
+
+    // Tenta reconciliar estritamente pela assinatura exata da tentativa (Finding R-P0-03)
+    const exact = await wallet.reconcileExactTransaction({
+      signature: txSignature,
+      mintAddress: mint,
+      expectedOwner: OFFICIAL_PHANTOM_WALLET,
+      direction: 'OUT'
+    });
+    if (exact && exact.success && BigInt(exact.deltaAtomic) < 0n) {
+      return { confirmed: true };
+    }
+  } catch (err: any) {
+    console.warn(`⚠️ [ConfirmationCheck] Erro ao validar assinatura ${txSignature}: ${err?.message || err}`);
+  }
+
+  return { confirmed: false, error: 'CONFIRMATION_INCONCLUSIVE' };
+}
+
 
 
 const reproduction = new ReproductionEngine();
@@ -562,16 +610,45 @@ async function executeExitOrder(
       error: `V2_EXECUTION_UNCERTAIN:${mint}: nova saída bloqueada até reconciliação/restart seguro`
     };
   }
-  if (exitOrderInFlight.has(mint)) {
-    return { success: false, error: `EXIT_ALREADY_IN_FLIGHT:${mint}` };
+
+  const pos = positionEngine.getPosition(mint);
+  if (!pos) {
+    return { success: false, error: 'Posição não encontrada no Gestor' };
   }
-  exitOrderInFlight.add(mint);
+
+  const tokenAmountToSell = options?.exitTokenAmount || pos.tokenAmount;
+  let atomicAmountBigInt = 1n;
+  try {
+    if (typeof tokenAmountToSell === 'number' && Number.isFinite(tokenAmountToSell) && tokenAmountToSell > 0) {
+      atomicAmountBigInt = BigInt(Math.trunc(tokenAmountToSell));
+      if (atomicAmountBigInt <= 0n) atomicAmountBigInt = 1n;
+    }
+  } catch {
+    atomicAmountBigInt = 1n;
+  }
+
+  const custodyIdentity: CustodyLockIdentity = {
+    wallet: OFFICIAL_PHANTOM_WALLET,
+    mint,
+    tokenProgram: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+  };
+
+
+  const lockRes = financialExitSafetyGuard.acquireExitLock(custodyIdentity, atomicAmountBigInt);
+  if (!lockRes.allowed) {
+    return {
+      success: false,
+      error: lockRes.reason || `EXIT_ALREADY_IN_FLIGHT:${mint}`
+    };
+  }
+
   try {
     return await executeExitOrderUnlocked(mint, exitReason, pnlPct, exitSolValue, options);
   } finally {
-    exitOrderInFlight.delete(mint);
+    financialExitSafetyGuard.releaseExitLock(custodyIdentity);
   }
 }
+
 
 async function executeExitOrderUnlocked(
   mint: string,
@@ -919,14 +996,23 @@ async function executeExitOrderUnlocked(
     return { success: false, txSignature: '', error: failReason };
   }
 
-  // 3. Reconciliação do Montante Real de Fill vs Montante Solicitado (P0-07):
-  // É terminantemente proibido reduzir a posição usando apenas exitAmountAtomic solicitado
-  // quando a execução reporta montante diferente.
   const requestedAmountAtomic = exitAmountAtomic;
-  const executedInAmountAtomic = Number.isSafeInteger(exitSwap.inAmount) && exitSwap.inAmount > 0
-    ? exitSwap.inAmount
-    : requestedAmountAtomic;
+  let executedInAmountAtomic: number;
+  if (Number.isSafeInteger(exitSwap.inAmount) && exitSwap.inAmount > 0) {
+    executedInAmountAtomic = exitSwap.inAmount;
+  } else if (IS_DRY_RUN || exitSwap.txSignature?.startsWith('dry_run_')) {
+    executedInAmountAtomic = requestedAmountAtomic;
+  } else {
+    // Finding P0-07 & 5.2: Fallback proibido. Se actualDebit não é conhecido on-chain,
+    // não aplicar posição como se fosse conhecido. Bloqueia em UNKNOWN/dívida.
+    uncertainExitMints.add(pos.mint);
+    financialExitSafetyGuard.registerUnresolvedDebt(pos.mint);
+    const err = `EXECUTED_AMOUNT_UNKNOWN: inAmount inválido (${exitSwap.inAmount}) sem comprovação econômica`;
+    console.error(`🛑 [ExecutionAmountUnknown] ${pos.symbol}: ${err}. Posição preservada; venda bloqueada até reconciliação.`);
+    return { success: false, txSignature: exitSwap.txSignature || '', error: err };
+  }
   const actualDebitAtomic = executedInAmountAtomic;
+
 
   if (requestedAmountAtomic !== executedInAmountAtomic) {
     const mismatchDelta = Math.abs(requestedAmountAtomic - executedInAmountAtomic);
@@ -1114,8 +1200,8 @@ async function executeExitOrderUnlocked(
       : 'PARTIAL_CLOSED'
   });
 
-  // Se for liquidação total, remove do Gestor de Posições
-  if (shouldCloseAta) {
+  // Se for liquidação total (sem saldo residual), remove do Gestor de Posições
+  if (shouldCloseAta && isFullDebit) {
     positionEngine.removePosition(pos.mint);
   }
 
@@ -1329,8 +1415,17 @@ const server = http.createServer(async (req, res) => {
           };
         }
 
-        if (exitSwap.status === 'DRY_RUN_SUCCESS') {
-          return { success: true, status: 'CONFIRMED', simulated: true, txSignature: exitSwap.txSignature };
+        // Finding P0-03, P0-06, R-P1-02: Provider receipt != Confirmação.
+        const confirmation = await verifySwapLandingConfirmation(mint, exitSwap.txSignature);
+        if (!confirmation.confirmed) {
+          uncertainExitMints.add(mint);
+          financialExitSafetyGuard.registerUnresolvedDebt(mint);
+          return {
+            success: false,
+            status: confirmation.error?.includes('on-chain falhou') ? 'FAILED_DEFINITIVE' : 'PENDING_RECONCILIATION',
+            txSignature: exitSwap.txSignature,
+            error: confirmation.error || 'Receipt do provedor recebido, mas confirmação de landing na blockchain inconclusiva. Posição e ATA preservadas.'
+          };
         }
 
         positionEngine.removePosition(mint);
@@ -1453,9 +1548,23 @@ const server = http.createServer(async (req, res) => {
           };
         }
 
+        // Finding P0-03, P0-06, R-P1-02: Provider receipt != Confirmação.
+        const confirmation = await verifySwapLandingConfirmation(mint, swapRes.txSignature);
+        if (!confirmation.confirmed) {
+          uncertainExitMints.add(mint);
+          financialExitSafetyGuard.registerUnresolvedDebt(mint);
+          return {
+            success: false,
+            status: confirmation.error?.includes('on-chain falhou') ? 'FAILED_DEFINITIVE' : 'PENDING_RECONCILIATION',
+            txid: swapRes.txSignature,
+            error: confirmation.error || 'Receipt do provedor recebido, mas confirmação de landing na blockchain inconclusiva. Posição e ATA preservadas.'
+          };
+        }
+
         // Posição só é removida após confirmação comprovada
         positionEngine.removePosition(mint);
         antiSpamMemory.recordVeto(mint, 'Pânico Manual Individual On-Chain', 24 * 60 * 60 * 1000);
+
 
         let rentRecovered = false;
         try {
@@ -1567,20 +1676,34 @@ const server = http.createServer(async (req, res) => {
               error: swapRes.error || 'Swap de pânico falhou na execução.'
             });
           } else {
-            // Confirmado: só agora remove posição e fecha ATA
-            positionEngine.removePosition(spl.mint);
-            try {
-              await rentRecovery.closeTokenAccount(spl.mint);
-            } catch (closeErr: any) {
-              console.warn(`⚠️ [PANIC ALL] Falha ao fechar ATA de ${spl.mint}:`, closeErr?.message);
+            // Finding P0-03, P0-06, R-P1-02: Provider receipt != Confirmação.
+            const confirmation = await verifySwapLandingConfirmation(spl.mint, swapRes.txSignature);
+            if (!confirmation.confirmed) {
+              uncertainExitMints.add(spl.mint);
+              financialExitSafetyGuard.registerUnresolvedDebt(spl.mint);
+              results.push({
+                mint: spl.mint,
+                status: confirmation.error?.includes('on-chain falhou') ? 'FAILED_DEFINITIVE' : 'PENDING_RECONCILIATION',
+                success: false,
+                txSignature: swapRes.txSignature,
+                error: confirmation.error || 'Receipt do provedor recebido mas confirmação de landing inconclusiva.'
+              });
+            } else {
+              // Confirmado: só agora remove posição e fecha ATA
+              positionEngine.removePosition(spl.mint);
+              try {
+                await rentRecovery.closeTokenAccount(spl.mint);
+              } catch (closeErr: any) {
+                console.warn(`⚠️ [PANIC ALL] Falha ao fechar ATA de ${spl.mint}:`, closeErr?.message);
+              }
+              liquidationsCount++;
+              results.push({
+                mint: spl.mint,
+                status: 'CONFIRMED',
+                success: true,
+                txSignature: swapRes.txSignature
+              });
             }
-            liquidationsCount++;
-            results.push({
-              mint: spl.mint,
-              status: 'CONFIRMED',
-              success: true,
-              txSignature: swapRes.txSignature
-            });
           }
         } catch (err: any) {
           console.warn(`⚠️ [PANIC ALL] Erro ao liquidar ${spl.mint}:`, err?.message || err);

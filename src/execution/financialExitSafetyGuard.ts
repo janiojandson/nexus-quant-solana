@@ -26,8 +26,26 @@ export interface ExitSafetyValidationResult {
     | 'POSITION_NOT_FOUND';
 }
 
+export interface CustodyLockIdentity {
+  wallet?: string;
+  mint: string;
+  tokenProgram?: string;
+  tokenAccount?: string;
+}
+
+export type ExitLockTarget = string | CustodyLockIdentity;
+
+function resolveLockKeys(target: ExitLockTarget): { mint: string; custodyKey: string } {
+  if (typeof target === 'string') {
+    return { mint: target, custodyKey: target };
+  }
+  const mint = target.mint;
+  const custodyKey = `${target.wallet || 'default'}:${target.mint}${target.tokenAccount ? `:${target.tokenAccount}` : ''}`;
+  return { mint, custodyKey };
+}
+
 export class FinancialExitSafetyGuard {
-  private inFlightMints = new Set<string>();
+  private inFlightLocks = new Set<string>();
   private persistentUnresolvedMints = new Set<string>();
 
   /**
@@ -66,15 +84,17 @@ export class FinancialExitSafetyGuard {
   }
 
   /**
-   * Acquires execution lock for a mint.
-   * Throws or returns validation failure if collision or debt exists.
+   * Acquires execution lock for a mint or full custody identity (wallet + mint + tokenAccount).
+   * Enforces strict single in-process exclusion across scanner, watchdog, manual, panic, and liquidate-all.
    */
-  public acquireExitLock(mint: string, amountAtomic: bigint): ExitSafetyValidationResult {
-    if (this.inFlightMints.has(mint)) {
+  public acquireExitLock(target: ExitLockTarget, amountAtomic: bigint): ExitSafetyValidationResult {
+    const { mint, custodyKey } = resolveLockKeys(target);
+
+    if (this.inFlightLocks.has(mint) || this.inFlightLocks.has(custodyKey)) {
       return {
         allowed: false,
         code: 'IN_FLIGHT_COLLISION',
-        reason: `EXIT_ALREADY_IN_FLIGHT: A sell transaction is already in flight for mint ${mint}.`
+        reason: `EXIT_ALREADY_IN_FLIGHT: A sell transaction is already in flight for mint ${mint} (key=${custodyKey}).`
       };
     }
 
@@ -94,26 +114,31 @@ export class FinancialExitSafetyGuard {
       };
     }
 
-    this.inFlightMints.add(mint);
+    this.inFlightLocks.add(mint);
+    this.inFlightLocks.add(custodyKey);
     return { allowed: true };
   }
 
   /**
-   * Releases execution lock for a mint.
+   * Releases execution lock for a mint or custody identity.
    */
-  public releaseExitLock(mint: string): void {
-    this.inFlightMints.delete(mint);
+  public releaseExitLock(target: ExitLockTarget): void {
+    const { mint, custodyKey } = resolveLockKeys(target);
+    this.inFlightLocks.delete(mint);
+    this.inFlightLocks.delete(custodyKey);
   }
 
   /**
    * Safely checks whether a sell can proceed without acquiring lock.
    */
-  public validateExit(mint: string, amountAtomic: bigint): ExitSafetyValidationResult {
-    if (this.inFlightMints.has(mint)) {
+  public validateExit(target: ExitLockTarget, amountAtomic: bigint): ExitSafetyValidationResult {
+    const { mint, custodyKey } = resolveLockKeys(target);
+
+    if (this.inFlightLocks.has(mint) || this.inFlightLocks.has(custodyKey)) {
       return {
         allowed: false,
         code: 'IN_FLIGHT_COLLISION',
-        reason: `EXIT_ALREADY_IN_FLIGHT: A sell transaction is already in flight for mint ${mint}.`
+        reason: `EXIT_ALREADY_IN_FLIGHT: A sell transaction is already in flight for mint ${mint} (key=${custodyKey}).`
       };
     }
 
