@@ -50,7 +50,8 @@ import {
   hasPotentiallyLiveChainAttempt,
   assertCanPrepareAttemptForIntent,
   SystemMutationContext,
-  assertValidSystemMutationContext
+  assertValidSystemMutationContext,
+  SystemAuditEvent
 } from './types';
 
 
@@ -276,49 +277,111 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     try {
       await client.query('BEGIN');
 
-      // Real SELECT ... FOR UPDATE SKIP LOCKED
-      const whereClause = input.intentId
-        ? `(id = $2) AND (status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE')))`
-        : `status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status NOT IN ('CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'))`;
+      if (input.intentId) {
+        // Explicit intent claim
+        const candRes = await client.query(
+          `SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE SKIP LOCKED;`,
+          [input.intentId]
+        );
+        if (candRes.rows.length === 0) {
+          await client.query('COMMIT');
+          return null;
+        }
+        const cand = candRes.rows[0];
 
-      const selectSql = `
-        SELECT * FROM exit_intents
-        WHERE ${whereClause}
-        ORDER BY created_at ASC
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1;
-      `;
-      const queryParams = input.intentId ? [now, input.intentId] : [now];
-      const candRes = await client.query(selectSql, queryParams);
-      if (candRes.rows.length === 0) {
-        await client.query('COMMIT');
-        return null;
-      }
+        // Terminal states cannot be claimed
+        if (['APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'].includes(cand.status)) {
+          await client.query('COMMIT');
+          return null;
+        }
 
-      const cand = candRes.rows[0];
-      const isLeaseExpired = cand.status !== 'CREATED';
+        // UNKNOWN, SUBMITTED, SIGNED, CONFIRMED, or reconciliation_debt CANNOT be reclaimed for resend!
+        if (['UNKNOWN', 'SUBMITTED', 'SIGNED', 'CONFIRMED'].includes(cand.status) || cand.reconciliation_debt) {
+          await client.query('ROLLBACK');
+          const blockingState = ['UNKNOWN', 'SUBMITTED', 'SIGNED', 'CONFIRMED'].includes(cand.status)
+            ? cand.status
+            : 'RECONCILIATION_DEBT';
+          throw new LeaseRecoveryBlockedError(
+            `Lease recovery blocked for intent ${cand.id}: intent is in non-reclaimable state '${cand.status}' or has active reconciliation debt. Must reconcile before re-claim.`,
+            cand.id,
+            blockingState
+          );
+        }
 
-      // CRITICAL LEASE RECOVERY RULE:
-      // If an existing attempt reached SIGNED, SUBMITTED, UNKNOWN, or SENT,
-      // or if reconciliation_debt is true, it CANNOT be blindly reassigned without prior reconciliation!
-      if (isLeaseExpired) {
+        // Check if any existing attempt reached on-chain / active state
         const attRes = await client.query(
           `SELECT attempt_id, state FROM execution_attempts
            WHERE intent_id = $1 AND state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN', 'SENT')
            LIMIT 1;`,
           [cand.id]
         );
-        if (attRes.rows.length > 0 || cand.reconciliation_debt) {
-          const blockingState = attRes.rows[0]?.state || 'RECONCILIATION_DEBT';
+        if (attRes.rows.length > 0) {
+          const blockingState = attRes.rows[0].state;
           await client.query('ROLLBACK');
           throw new LeaseRecoveryBlockedError(
-            `Lease recovery blocked for intent ${cand.id}: attempt ${attRes.rows[0]?.attempt_id ?? 'active'} is in active on-chain state '${blockingState}'. Must reconcile before re-claim.`,
+            `Lease recovery blocked for intent ${cand.id}: attempt ${attRes.rows[0].attempt_id} is in active on-chain state '${blockingState}'. Must reconcile before re-claim.`,
             cand.id,
             blockingState
           );
         }
+
+        // If not CREATED, must have expired lease to be reclaimable
+        if (cand.status !== 'CREATED') {
+          const expTime = cand.lease_expires_at ? new Date(cand.lease_expires_at).getTime() : 0;
+          if (expTime >= now) {
+            await client.query('COMMIT');
+            return null; // Lease not yet expired
+          }
+        }
+
+        const leaseExpiresAt = now + input.leaseDurationMs;
+        const updateSql = `
+          UPDATE exit_intents
+          SET claimed_by = $1,
+              claim_epoch = claim_epoch + 1,
+              claimed_at = to_timestamp($2 / 1000.0),
+              lease_expires_at = to_timestamp($3 / 1000.0),
+              status = 'CLAIMED'
+          WHERE id = $4 AND claim_epoch = $5
+          RETURNING *;
+        `;
+        const upRes = await client.query(updateSql, [
+          input.workerId,
+          now,
+          leaseExpiresAt,
+          cand.id,
+          cand.claim_epoch
+        ]);
+
+        if (upRes.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return null;
+        }
+
+        await client.query('COMMIT');
+        return this.mapRowToIntent(upRes.rows[0]);
       }
 
+      // General worker pool claim: skip anything with debt, non-reclaimable status, or active attempts
+      const selectSql = `
+        SELECT * FROM exit_intents
+        WHERE (status = 'CREATED' OR (lease_expires_at < to_timestamp($1 / 1000.0) AND status IN ('CLAIMED', 'PREPARED')))
+          AND reconciliation_debt = false
+          AND NOT EXISTS (
+            SELECT 1 FROM execution_attempts ea
+            WHERE ea.intent_id = exit_intents.id AND ea.state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN', 'SENT')
+          )
+        ORDER BY created_at ASC
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1;
+      `;
+      const candRes = await client.query(selectSql, [now]);
+      if (candRes.rows.length === 0) {
+        await client.query('COMMIT');
+        return null;
+      }
+
+      const cand = candRes.rows[0];
       const leaseExpiresAt = now + input.leaseDurationMs;
       const updateSql = `
         UPDATE exit_intents
@@ -364,9 +427,33 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      // Finding P1-03 & 9.1: Enforce prepareAttempt eligibility matrix
+      // Finding P1-03 & 9.1 & 23: Enforce prepareAttempt eligibility matrix
       assertCanPrepareAttemptForIntent(intentRow.status);
 
+      if (intentRow.reconciliation_debt) {
+        await client.query('ROLLBACK');
+        throw new IllegalStateTransitionError(
+          'ExitIntent',
+          intentRow.status,
+          `PREPARE_ATTEMPT_REJECTED: Intent ${intentRow.id} has active reconciliation debt. Prior execution must be reconciled first.`
+        );
+      }
+
+      const attCheck = await client.query(
+        `SELECT attempt_id, state FROM execution_attempts
+         WHERE intent_id = $1 AND state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN', 'SENT')
+         LIMIT 1;`,
+        [intentRow.id]
+      );
+      if (attCheck.rows.length > 0) {
+        const blockingState = attCheck.rows[0].state;
+        await client.query('ROLLBACK');
+        throw new IllegalStateTransitionError(
+          'ExitIntent',
+          intentRow.status,
+          `PREPARE_ATTEMPT_REJECTED: Intent ${intentRow.id} already has a potentially live on-chain attempt ${attCheck.rows[0].attempt_id} in state '${blockingState}'. Must reconcile before preparing a new attempt.`
+        );
+      }
 
       if (expectedEpoch === undefined || expectedEpoch === null) {
         throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
@@ -464,8 +551,8 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const attRow = attRes.rows[0];
 
-      // Finding 9.2: Validate system mutation context
-      assertValidSystemMutationContext(context, attRow.state);
+      // Finding 9.2 & 24: Validate system mutation context
+      assertValidSystemMutationContext(context, attRow.state, { isFinancial: true });
 
       // Enforce valid attempt transition
       assertValidAttemptTransition(attRow.state, state);
@@ -473,15 +560,34 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [attRow.intent_id]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (context.expectedEpoch !== undefined && context.expectedEpoch !== null && BigInt(intentRow.claim_epoch) !== BigInt(context.expectedEpoch)) {
+        const expEpoch = (context as any).expectedEpoch;
+        if (expEpoch !== undefined && expEpoch !== null && BigInt(intentRow.claim_epoch) !== BigInt(expEpoch)) {
           throw new StaleEpochError(
-            `Stale claim epoch for intent ${intentRow.id}: expected ${context.expectedEpoch}, actual ${intentRow.claim_epoch}`,
+            `Stale claim epoch for intent ${intentRow.id}: expected ${expEpoch}, actual ${intentRow.claim_epoch}`,
             intentRow.id,
-            BigInt(context.expectedEpoch),
+            BigInt(expEpoch),
             BigInt(intentRow.claim_epoch)
           );
         }
       }
+
+      // Record system audit event append-only
+      const eventId = `sys-audit-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      await client.query(
+        `INSERT INTO system_audit_events (event_id, actor, reason, mutation_class, entity_type, entity_id, before_state, after_state, correlation_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
+        [
+          eventId,
+          context.actor,
+          context.reason,
+          (context as any).mutationClass || 'FINANCIAL_STATE_MUTATION',
+          'ExecutionAttempt',
+          attemptId,
+          attRow.state,
+          state,
+          (context as any).correlationId || null
+        ]
+      );
 
       const updateAttSql = `
         UPDATE execution_attempts
@@ -924,8 +1030,8 @@ export class PostgresJournalRepository implements IExitJournalRepository {
 
       let expectedEpoch: bigint | number | undefined;
       if (typeof contextOrEpoch === 'object' && contextOrEpoch !== null) {
-        assertValidSystemMutationContext(contextOrEpoch, row.status);
-        expectedEpoch = contextOrEpoch.expectedEpoch;
+        assertValidSystemMutationContext(contextOrEpoch, row.status, { isFinancial: true });
+        expectedEpoch = (contextOrEpoch as any).expectedEpoch;
       } else {
         expectedEpoch = contextOrEpoch;
       }
@@ -956,11 +1062,57 @@ export class PostgresJournalRepository implements IExitJournalRepository {
          WHERE id = $2 RETURNING *`,
         [terminalStatus, intentId]
       );
+
+      if (typeof contextOrEpoch === 'object' && contextOrEpoch !== null) {
+        const eventId = `sys-audit-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+        await client.query(
+          `INSERT INTO system_audit_events (event_id, actor, reason, mutation_class, entity_type, entity_id, before_state, after_state, correlation_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
+          [
+            eventId,
+            contextOrEpoch.actor,
+            contextOrEpoch.reason,
+            (contextOrEpoch as any).mutationClass || 'FINANCIAL_STATE_MUTATION',
+            'ExitIntent',
+            intentId,
+            row.status,
+            terminalStatus,
+            (contextOrEpoch as any).correlationId || null
+          ]
+        );
+      }
+
       await client.query('COMMIT');
       return this.mapRowToIntent(up.rows[0]);
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async getSystemAuditEvents(entityId?: string): Promise<SystemAuditEvent[]> {
+    const client = await this.pool.connect();
+    try {
+      const sql = entityId
+        ? `SELECT * FROM system_audit_events WHERE entity_id = $1 ORDER BY created_at ASC;`
+        : `SELECT * FROM system_audit_events ORDER BY created_at ASC;`;
+      const params = entityId ? [entityId] : [];
+      const res = await client.query(sql, params);
+      return res.rows.map(r => ({
+        id: r.id,
+        eventId: r.event_id,
+        actor: r.actor,
+        reason: r.reason,
+        mutationClass: r.mutation_class,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        beforeState: r.before_state,
+        afterState: r.after_state,
+        correlationId: r.correlation_id || undefined,
+        createdAtWallMs: new Date(r.created_at).getTime() as WallMs
+      }));
     } finally {
       client.release();
     }

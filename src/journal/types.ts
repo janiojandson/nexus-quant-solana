@@ -207,16 +207,14 @@ export function assertValidIntentTransition(from: ExitIntentStatus, to: ExitInte
 }
 
 /**
- * Finding P1-03 & 9.1: Explicit matrix of allowed intent states for prepareAttempt.
+ * Finding P1-03 & 9.1 & 23: Explicit matrix of allowed intent states for prepareAttempt.
  * Intents in terminal states (APPLIED, FAILED_DEFINITIVE, SUPERSEDED, CANCELLED)
  * or active chain states (SUBMITTED, CONFIRMED, UNKNOWN) cannot prepare new attempts.
  */
 export const ALLOWED_INTENT_STATUSES_FOR_PREPARE_ATTEMPT: ReadonlySet<ExitIntentStatus> = new Set([
   'CREATED',
   'CLAIMED',
-  'PREPARED',
-  'CONFIRMED',
-  'UNKNOWN'
+  'PREPARED'
 ]);
 
 export function assertCanPrepareAttemptForIntent(intentStatus: ExitIntentStatus): void {
@@ -230,26 +228,87 @@ export function assertCanPrepareAttemptForIntent(intentStatus: ExitIntentStatus)
 }
 
 /**
- * Finding P1-04 & 9.2: Strict audit context for system/administrative mutations.
- * Prevents arbitrary backdoor status overrides.
+ * Finding P1-04 & 24 & 25: Strict audit context for system/administrative mutations.
+ * Distinguishes OBSERVATIONAL_SYSTEM_EVENT from FINANCIAL_STATE_MUTATION.
  */
-export interface SystemMutationContext {
+export type SystemMutationClass = 'OBSERVATIONAL_SYSTEM_EVENT' | 'FINANCIAL_STATE_MUTATION';
+
+export interface ObservationalSystemEventContext {
+  readonly mutationClass: 'OBSERVATIONAL_SYSTEM_EVENT';
   readonly actor: string;
   readonly reason: string;
+  readonly correlationId?: string;
   readonly expectedCurrentState?: string;
   readonly expectedEpoch?: bigint | number;
 }
 
-export function assertValidSystemMutationContext(context: SystemMutationContext, currentActualState?: string): void {
+export interface FinancialStateMutationContext {
+  readonly mutationClass?: 'FINANCIAL_STATE_MUTATION';
+  readonly actor: string;
+  readonly reason: string;
+  readonly expectedCurrentState: string;
+  readonly expectedEpoch: bigint | number;
+  readonly transactionContext: {
+    readonly wallet: string;
+    readonly mint: string;
+    readonly intentId?: string;
+    readonly attemptId?: string;
+  };
+  readonly correlationId?: string;
+}
+
+export type SystemMutationContext = ObservationalSystemEventContext | FinancialStateMutationContext;
+
+export interface SystemAuditEvent {
+  readonly id?: number | string;
+  readonly eventId: string;
+  readonly actor: string;
+  readonly reason: string;
+  readonly mutationClass: SystemMutationClass;
+  readonly entityType: 'ExitIntent' | 'ExecutionAttempt' | 'Position';
+  readonly entityId: string;
+  readonly beforeState: string;
+  readonly afterState: string;
+  readonly correlationId?: string;
+  readonly createdAtWallMs: WallMs;
+}
+
+export function assertValidSystemMutationContext(
+  context: SystemMutationContext,
+  currentActualState?: string,
+  options?: { isFinancial?: boolean }
+): void {
   if (!context || !context.actor || context.actor.trim() === '') {
     throw new Error('System mutation rejected: actor is required.');
   }
   if (!context.reason || context.reason.trim() === '') {
     throw new Error('System mutation rejected: reason is required.');
   }
-  if (context.expectedCurrentState && currentActualState && context.expectedCurrentState !== currentActualState) {
+
+  const isFinancial = (context as any).mutationClass === 'FINANCIAL_STATE_MUTATION' ||
+    (context as any).mutationClass === undefined ||
+    options?.isFinancial === true;
+
+  if (isFinancial && (context as any).mutationClass !== 'OBSERVATIONAL_SYSTEM_EVENT') {
+    const finCtx = context as FinancialStateMutationContext;
+    if (!finCtx.expectedCurrentState || finCtx.expectedCurrentState.trim() === '') {
+      throw new Error('Financial system mutation rejected: expectedCurrentState is mandatory.');
+    }
+    if (finCtx.expectedEpoch === undefined || finCtx.expectedEpoch === null) {
+      throw new EpochRequiredError('Financial system mutation rejected: expectedEpoch is mandatory.');
+    }
+    if (!finCtx.transactionContext || !finCtx.transactionContext.wallet || !finCtx.transactionContext.mint) {
+      throw new Error('Financial system mutation rejected: transactionContext with wallet and mint is mandatory.');
+    }
+  }
+
+  if (context.mutationClass === 'OBSERVATIONAL_SYSTEM_EVENT' && options?.isFinancial) {
+    throw new Error('System mutation rejected: cannot apply OBSERVATIONAL_SYSTEM_EVENT to state mutation; must be FINANCIAL_STATE_MUTATION.');
+  }
+
+  if ((context as any).expectedCurrentState && currentActualState && (context as any).expectedCurrentState !== currentActualState) {
     throw new Error(
-      `System mutation rejected: expectedCurrentState '${context.expectedCurrentState}' does not match actual state '${currentActualState}'.`
+      `System mutation rejected: expectedCurrentState '${(context as any).expectedCurrentState}' does not match actual state '${currentActualState}'.`
     );
   }
 }

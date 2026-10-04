@@ -27,7 +27,8 @@ import {
   nowWallMs,
   nowMonotonicNs,
   computeEconomicDedupeKey,
-  SystemMutationContext
+  SystemMutationContext,
+  SystemAuditEvent
 } from './types';
 
 
@@ -147,6 +148,7 @@ export interface IExitJournalRepository {
   applyFillIdempotently?(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }>;
   releaseTerminalIntent?(intentId: string, terminalStatus: ExitIntentStatus, contextOrEpoch?: bigint | number | SystemMutationContext): Promise<ExitIntent>;
   getUnreconciledIntents?(): Promise<ExitIntent[]>;
+  getSystemAuditEvents?(entityId?: string): Promise<SystemAuditEvent[]> | SystemAuditEvent[];
 }
 
 
@@ -177,9 +179,17 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
   private fills = new Map<string, FillRecord>(); // id -> fill
   private fillsByOnChainIdentity = new Map<string, string>(); // signature:leg:ix:inner -> fillId
   private reconciliationEvents: ExecutionReconciliationEvent[] = [];
+  private systemAuditEvents: SystemAuditEvent[] = [];
 
   // Concurrency mutex simulation
   private lockedIntents = new Set<string>();
+
+  public getSystemAuditEvents(entityId?: string): SystemAuditEvent[] {
+    if (entityId) {
+      return this.systemAuditEvents.filter(e => e.entityId === entityId);
+    }
+    return [...this.systemAuditEvents];
+  }
 
   public async createOrGetIntent(input: CreateIntentInput): Promise<{ intent: ExitIntent; created: boolean }> {
     const dedupeKey = computeEconomicDedupeKey({
@@ -320,13 +330,62 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
   public async claimIntent(input: ClaimIntentInput): Promise<ExitIntent | null> {
     const now = input.nowMs ?? nowWallMs();
 
-    // Simulates SELECT ... FOR UPDATE SKIP LOCKED
-    for (const intent of this.intents.values()) {
-      if (this.lockedIntents.has(intent.id)) {
-        continue; // Locked by another worker in flight
+    if (input.intentId) {
+      const intent = this.intents.get(input.intentId);
+      if (!intent) return null;
+      if (this.lockedIntents.has(intent.id)) return null;
+
+      if (isIntentTerminal(intent.status)) return null;
+
+      // UNKNOWN, SUBMITTED, SIGNED, CONFIRMED, or reconciliationDebt CANNOT be reclaimed for new execution
+      if (['UNKNOWN', 'SUBMITTED', 'SIGNED', 'CONFIRMED'].includes(intent.status) || intent.reconciliationDebt) {
+        const blockingState = ['UNKNOWN', 'SUBMITTED', 'SIGNED', 'CONFIRMED'].includes(intent.status)
+          ? intent.status
+          : 'RECONCILIATION_DEBT';
+        throw new LeaseRecoveryBlockedError(
+          `Lease recovery blocked for intent ${intent.id}: intent is in non-reclaimable state '${intent.status}' or has active reconciliation debt. Must reconcile before re-claim.`,
+          intent.id,
+          blockingState
+        );
       }
 
-      if (input.intentId && intent.id !== input.intentId) {
+      const attempts = await this.getAttemptsForIntent(intent.id);
+      const blockingAttempt = attempts.find(a =>
+        a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
+      );
+      if (blockingAttempt) {
+        throw new LeaseRecoveryBlockedError(
+          `Lease recovery blocked for intent ${intent.id}: attempt ${blockingAttempt.attemptId} is in active on-chain state '${blockingAttempt.state}'. Must reconcile before re-claim.`,
+          intent.id,
+          blockingAttempt.state
+        );
+      }
+
+      if (intent.status !== 'CREATED') {
+        const expTime = intent.leaseExpiresAtWallMs ? Number(intent.leaseExpiresAtWallMs) : 0;
+        if (expTime >= now) {
+          return null; // Lease not yet expired
+        }
+      }
+
+      this.lockedIntents.add(intent.id);
+      try {
+        intent.claimedBy = input.workerId;
+        intent.claimEpoch += 1n;
+        intent.claimedAtWallMs = now as WallMs;
+        intent.leaseExpiresAtWallMs = (now + input.leaseDurationMs) as WallMs;
+        intent.status = 'CLAIMED';
+        return { ...intent };
+      } finally {
+        this.lockedIntents.delete(intent.id);
+      }
+    }
+
+    // General worker scan: skip anything with debt, non-reclaimable status, or active on-chain attempts
+    for (const intent of this.intents.values()) {
+      if (this.lockedIntents.has(intent.id)) continue;
+      if (intent.reconciliationDebt) continue;
+      if (['UNKNOWN', 'SUBMITTED', 'SIGNED', 'CONFIRMED', 'APPLIED', 'CANCELLED', 'SUPERSEDED', 'FAILED_DEFINITIVE'].includes(intent.status)) {
         continue;
       }
 
@@ -335,31 +394,16 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
         intent.leaseExpiresAtWallMs !== null &&
         intent.leaseExpiresAtWallMs !== undefined &&
         Number(intent.leaseExpiresAtWallMs) < now &&
-        !isIntentTerminal(intent.status) &&
-        intent.status !== 'CONFIRMED';
+        ['CLAIMED', 'PREPARED'].includes(intent.status);
 
-      if (!isCreated && !isLeaseExpired) {
-        continue;
-      }
+      if (!isCreated && !isLeaseExpired) continue;
 
-      // CRITICAL LEASE RECOVERY RULE:
-      // If an existing attempt reached SIGNED, SUBMITTED, UNKNOWN, or SENT,
-      // or if reconciliationDebt is true, it CANNOT be blindly reassigned without prior reconciliation!
-      if (isLeaseExpired) {
-        const attempts = await this.getAttemptsForIntent(intent.id);
-        const blockingAttempt = attempts.find(a =>
-          a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
-        );
-        if (blockingAttempt || intent.reconciliationDebt) {
-          throw new LeaseRecoveryBlockedError(
-            `Lease recovery blocked for intent ${intent.id}: attempt ${blockingAttempt?.attemptId ?? 'active'} is in active on-chain state '${blockingAttempt?.state ?? 'RECONCILIATION_DEBT'}'. Must reconcile before re-claim.`,
-            intent.id,
-            blockingAttempt?.state ?? 'RECONCILIATION_DEBT'
-          );
-        }
-      }
+      const attempts = await this.getAttemptsForIntent(intent.id);
+      const hasActive = attempts.some(a =>
+        a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
+      );
+      if (hasActive) continue;
 
-      // Lock and claim
       this.lockedIntents.add(intent.id);
       try {
         intent.claimedBy = input.workerId;
@@ -382,9 +426,28 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       throw new Error(`ExitIntent not found for attempt: ${input.intentId}`);
     }
 
-    // Finding P1-03 & 9.1: Enforce prepareAttempt eligibility matrix
+    // Finding P1-03 & 9.1 & 23: Enforce prepareAttempt eligibility matrix
     assertCanPrepareAttemptForIntent(intent.status);
 
+    if (intent.reconciliationDebt) {
+      throw new IllegalStateTransitionError(
+        'ExitIntent',
+        intent.status,
+        `PREPARE_ATTEMPT_REJECTED: Intent ${intent.id} has active reconciliation debt. Prior execution must be reconciled first.`
+      );
+    }
+
+    const existingAttempts = await this.getAttemptsForIntent(intent.id);
+    const blockingAttempt = existingAttempts.find(a =>
+      a.state === 'SIGNED' || a.state === 'SUBMITTED' || a.state === 'UNKNOWN' || a.state === 'SENT'
+    );
+    if (blockingAttempt) {
+      throw new IllegalStateTransitionError(
+        'ExitIntent',
+        intent.status,
+        `PREPARE_ATTEMPT_REJECTED: Intent ${intent.id} already has a potentially live on-chain attempt ${blockingAttempt.attemptId} in state '${blockingAttempt.state}'. Must reconcile before preparing a new attempt.`
+      );
+    }
 
     if (expectedEpoch === undefined || expectedEpoch === null) {
       throw new EpochRequiredError('expectedEpoch is mandatory for worker-owned mutations to enforce fencing');
@@ -463,8 +526,22 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     if (!attempt) {
       throw new Error(`ExecutionAttempt not found: ${attemptId}`);
     }
-    assertValidSystemMutationContext(context, attempt.state);
-    return this.internalUpdateAttemptState(attemptId, state, updates, context.expectedEpoch);
+    assertValidSystemMutationContext(context, attempt.state, { isFinancial: true });
+    const beforeState = attempt.state;
+    const res = await this.internalUpdateAttemptState(attemptId, state, updates, (context as any).expectedEpoch);
+    this.systemAuditEvents.push({
+      eventId: `sys-audit-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      actor: context.actor,
+      reason: context.reason,
+      mutationClass: (context as any).mutationClass || 'FINANCIAL_STATE_MUTATION',
+      entityType: 'ExecutionAttempt',
+      entityId: attemptId,
+      beforeState,
+      afterState: state,
+      correlationId: (context as any).correlationId,
+      createdAtWallMs: nowWallMs()
+    });
+    return res;
   }
 
 
@@ -692,8 +769,8 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
 
     let expectedEpoch: bigint | number | undefined;
     if (typeof contextOrEpoch === 'object' && contextOrEpoch !== null) {
-      assertValidSystemMutationContext(contextOrEpoch, intent.status);
-      expectedEpoch = contextOrEpoch.expectedEpoch;
+      assertValidSystemMutationContext(contextOrEpoch, intent.status, { isFinancial: true });
+      expectedEpoch = (contextOrEpoch as any).expectedEpoch;
     } else {
       expectedEpoch = contextOrEpoch;
     }
@@ -716,11 +793,28 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
         );
       }
     }
+    const beforeState = intent.status;
     assertValidIntentTransition(intent.status, terminalStatus);
     intent.status = terminalStatus;
     intent.reconciliationDebt = false;
     intent.claimedBy = undefined;
     intent.leaseExpiresAtWallMs = undefined;
+
+    if (typeof contextOrEpoch === 'object' && contextOrEpoch !== null) {
+      this.systemAuditEvents.push({
+        eventId: `sys-audit-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+        actor: contextOrEpoch.actor,
+        reason: contextOrEpoch.reason,
+        mutationClass: (contextOrEpoch as any).mutationClass || 'FINANCIAL_STATE_MUTATION',
+        entityType: 'ExitIntent',
+        entityId: intentId,
+        beforeState,
+        afterState: terminalStatus,
+        correlationId: (contextOrEpoch as any).correlationId,
+        createdAtWallMs: nowWallMs()
+      });
+    }
+
     return { ...intent };
   }
 
