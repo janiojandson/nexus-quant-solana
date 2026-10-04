@@ -5,6 +5,7 @@ import type { PumpStrategyCohort } from './pumpCohorts.js';
 import {
   createShadowTrade,
   recordShadowExitMark,
+  type PumpShadowExitMark,
   type PumpShadowTrade,
   type PumpShadowVenue
 } from './pumpShadowTrade.js';
@@ -37,6 +38,23 @@ export interface PumpStrategyLabStore {
   appendMarketSample(record: any): Promise<void>;
   appendShadowTrade(record: any): Promise<void>;
   upsertStrategySummary(record: any): Promise<void>;
+  loadRecoveryState?(sinceMs: number): Promise<{
+    observations: Array<{ mint: string; signature: string; payload: Record<string, unknown> }>;
+    shadowTrades: Array<{
+      mint: string;
+      cohort: string;
+      venue: string;
+      entryAtMs: number;
+      payload: Record<string, unknown>;
+    }>;
+    marketSamples: Array<{
+      mint: string;
+      sampledAtMs: number;
+      cohort?: string;
+      venue?: string;
+      payload: Record<string, unknown>;
+    }>;
+  }>;
 }
 
 export interface PumpStrategyHorizon {
@@ -141,6 +159,67 @@ export class PumpStrategyLabRuntime {
     this.now = options.now ?? Date.now;
     this.canRunResearch = options.canRunResearch ?? (() => true);
     this.timing = new PumpJupiterTimingTracker(provider, { now: this.now });
+  }
+
+  async restore(): Promise<void> {
+    if (!this.enabled || !this.store?.loadRecoveryState) return;
+    const cutoff = this.now() - 30 * 60_000;
+    const recovered = await this.store.loadRecoveryState(cutoff);
+
+    for (const observation of recovered.observations) {
+      this.persistedObservations.add(`${observation.signature}:${observation.mint}`);
+    }
+
+    for (const record of recovered.shadowTrades) {
+      const payload = record.payload || {};
+      const entryWindow = payload.entryWindow as PumpEntryWindow;
+      const rawTrade = payload.trade as PumpShadowTrade | undefined;
+      const tokenAmountAtomic = Number(payload.tokenAmountAtomic);
+      if (!entryWindow || !rawTrade || !Number.isFinite(tokenAmountAtomic) || tokenAmountAtomic <= 0) {
+        continue;
+      }
+      const trade: PumpShadowTrade = {
+        ...rawTrade,
+        exitMarks: []
+      };
+      const entryAgeMs = Number(payload.entryAgeMs || 0);
+      const eventTimestampMs = Number.isFinite(entryAgeMs)
+        ? record.entryAtMs - Math.max(0, entryAgeMs)
+        : record.entryAtMs;
+      const key = `${record.mint}:${entryWindow}`;
+      this.shadows.set(key, {
+        mint: record.mint,
+        entryWindow,
+        eventTimestampMs,
+        tokenAmountAtomic,
+        trade,
+        markedHorizons: new Set()
+      });
+
+      const tracked = this.trackedMints.get(record.mint) ?? {
+        eventTimestampMs,
+        complete: false,
+        attemptedWindows: new Set<PumpEntryWindow>()
+      };
+      tracked.attemptedWindows.add(entryWindow);
+      this.trackedMints.set(record.mint, tracked);
+    }
+
+    for (const sample of recovered.marketSamples) {
+      const payload = sample.payload || {};
+      const entryWindow = payload.entryWindow as PumpEntryWindow;
+      const mark = payload.mark as PumpShadowExitMark | undefined;
+      if (!entryWindow || !mark?.horizon) continue;
+      const state = this.shadows.get(`${sample.mint}:${entryWindow}`);
+      if (!state) continue;
+      const duplicate = state.trade.exitMarks.some(existing =>
+        existing.horizon === mark.horizon && existing.observedAtMs === mark.observedAtMs
+      );
+      if (!duplicate) state.trade.exitMarks.push({ ...mark });
+      state.markedHorizons.add(mark.horizon);
+    }
+
+    await this.refreshSummary();
   }
 
   start(): void {

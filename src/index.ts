@@ -2774,6 +2774,16 @@ async function main() {
       `batch=${PUMP_DEX_TIMING_BATCH_SIZE} maxAge=${PUMP_DEX_TIMING_MAX_AGE_MS}ms`
     );
     if (PUMP_STRATEGY_LAB_ENABLED) {
+      try {
+        await pumpStrategyLabRuntime.restore();
+        console.log(
+          `📐 [Pump Strategy Lab] estado recuperado | samples=${pumpStrategyLabRuntime.snapshot().totalSamples}`
+        );
+      } catch (err: any) {
+        console.warn(
+          `⚠️ [Pump Strategy Lab] recuperação indisponível; iniciando coleta nova: ${err?.message || err}`
+        );
+      }
       pumpStrategyLabRuntime.start();
       console.log(
         `📐 [Pump Strategy Lab] SHADOW ativo | interval=${PUMP_STRATEGY_LAB_INTERVAL_MS}ms ` +
