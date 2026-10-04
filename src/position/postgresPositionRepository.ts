@@ -261,19 +261,19 @@ export class PostgresPositionRepository implements IPositionRepository {
         UPDATE nexus_positions_v2
         SET
           position_version = position_version + 1,
-          token_amount_atomic = $1,
-          status = COALESCE($2, status),
-          confirmed_proceeds_lamports = confirmed_proceeds_lamports + $3,
+          token_amount_atomic = $1::numeric,
+          status = COALESCE($2::varchar, status),
+          confirmed_proceeds_lamports = confirmed_proceeds_lamports + $3::numeric,
           updated_at = NOW(),
           closed_at = CASE
-            WHEN $2 IN ('CLOSED', 'TERMINATED') OR ($1 = 0 AND closed_at IS NULL) THEN NOW()
+            WHEN $2::varchar IN ('CLOSED', 'TERMINATED') OR ($1::numeric = 0 AND closed_at IS NULL) THEN NOW()
             ELSE closed_at
           END,
-          last_fill_id = COALESCE($4, last_fill_id),
-          last_chain_signature = COALESCE($5, last_chain_signature),
-          reconciliation_required = COALESCE($6, reconciliation_required)
-        WHERE position_id = $7
-          AND position_version = $8
+          last_fill_id = COALESCE($4::varchar, last_fill_id),
+          last_chain_signature = COALESCE($5::varchar, last_chain_signature),
+          reconciliation_required = COALESCE($6::boolean, reconciliation_required)
+        WHERE position_id = $7::varchar
+          AND position_version = $8::bigint
         RETURNING *;
       `;
 
@@ -401,15 +401,15 @@ export class PostgresPositionRepository implements IPositionRepository {
         UPDATE nexus_positions_v2
         SET
           position_version = position_version + 1,
-          token_amount_atomic = $1,
-          status = $2,
-          confirmed_proceeds_lamports = confirmed_proceeds_lamports + $3,
+          token_amount_atomic = $1::numeric,
+          status = $2::varchar,
+          confirmed_proceeds_lamports = confirmed_proceeds_lamports + $3::numeric,
           updated_at = NOW(),
-          closed_at = CASE WHEN $2 = 'CLOSED' AND closed_at IS NULL THEN NOW() ELSE closed_at END,
-          last_fill_id = $4,
-          last_chain_signature = $5
-        WHERE position_id = $6
-          AND position_version = $7
+          closed_at = CASE WHEN $2::varchar = 'CLOSED' AND closed_at IS NULL THEN NOW() ELSE closed_at END,
+          last_fill_id = $4::varchar,
+          last_chain_signature = $5::varchar
+        WHERE position_id = $6::varchar
+          AND position_version = $7::bigint
         RETURNING *;
       `;
 
