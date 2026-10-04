@@ -85,7 +85,7 @@ test('Nexus V2.1B — PostgresJournalRepository Implementation & Contract Tests 
 
     assert.strictEqual(result.created, true);
     assert.strictEqual(result.intent.status, 'CREATED');
-    assert.strictEqual(result.intent.claimEpoch, 0);
+    assert.strictEqual(result.intent.claimEpoch, 0n);
 
     // Confere que houve query de dedupeKey, query de exclusão ativa e INSERT
     assert.ok(executedQueries.some(q => q.sql.includes('WHERE economic_dedupe_key = $1')));
@@ -210,7 +210,7 @@ test('Nexus V2.1B — PostgresJournalRepository Implementation & Contract Tests 
 
     assert.ok(claimed !== null);
     assert.strictEqual(claimed.claimedBy, 'worker_alpha');
-    assert.strictEqual(claimed.claimEpoch, 1);
+    assert.strictEqual(claimed.claimEpoch, 1n);
     assert.strictEqual(claimed.status, 'CLAIMED');
 
     // Confere protocolo de transação
@@ -244,11 +244,11 @@ test('Nexus V2.1B — PostgresJournalRepository Implementation & Contract Tests 
     const repo = new PostgresJournalRepository(mockPool);
     // Worker zumbi tenta mutar com expectedEpoch = 1
     await assert.rejects(
-      () => repo.updateAttemptState('att_1', 'ORDER_READY', { requestId: 'req_stale' }, 1),
+      () => repo.updateAttemptState('att_1', 'ORDER_READY', { requestId: 'req_stale' }, 1n),
       (err: any) => {
         assert.ok(err instanceof StaleEpochError);
-        assert.strictEqual(err.expectedEpoch, 1);
-        assert.strictEqual(err.actualEpoch, 2);
+        assert.strictEqual(BigInt(err.expectedEpoch), 1n);
+        assert.strictEqual(BigInt(err.actualEpoch), 2n);
         return true;
       }
     );

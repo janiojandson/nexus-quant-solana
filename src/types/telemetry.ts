@@ -98,7 +98,7 @@ export interface EventTimingProfile {
 
 export type TradeId = string;
 export type PositionId = string;
-export type PositionVersion = number;
+export type PositionVersion = bigint;
 export type ObservationId = string;
 export type DecisionId = string;
 export type ExitIntentId = string;

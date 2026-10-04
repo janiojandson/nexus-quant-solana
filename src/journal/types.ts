@@ -106,7 +106,7 @@ export interface ExitIntent {
 
   // Claim & Lease semantics
   claimedBy?: string | null;
-  claimEpoch: number;
+  claimEpoch: bigint;
   claimedAtWallMs?: WallMs | null;
   leaseExpiresAtWallMs?: WallMs | null;
 
@@ -119,6 +119,8 @@ export interface ExitIntent {
   readonly createdAtWallMs: WallMs;
   readonly expiresAtWallMs: WallMs;
 }
+
+export type ClaimEpoch = bigint;
 
 export const TERMINAL_INTENT_STATUSES: ReadonlySet<ExitIntentStatus> = new Set([
   'APPLIED',
@@ -148,8 +150,8 @@ export class StaleEpochError extends Error {
   constructor(
     message: string,
     public readonly intentId: string,
-    public readonly expectedEpoch: number,
-    public readonly actualEpoch: number
+    public readonly expectedEpoch: bigint | number,
+    public readonly actualEpoch: bigint | number
   ) {
     super(message);
     this.name = 'StaleEpochError';
@@ -202,7 +204,7 @@ export interface ExecutionAttempt {
   state: ExecutionAttemptState;
   failureReason?: string;
   errorClassification?: string;
-  lastValidBlockHeight?: number | string;
+  lastValidBlockHeight?: bigint | string;
 
   readonly startedAtWallMs: WallMs;
   preparedAtWallMs?: WallMs;
@@ -279,7 +281,7 @@ export interface ExecutionReconciliationEvent {
 export interface ComputeDedupeKeyInput {
   walletId: string;
   mint: string;
-  positionVersion?: number | string | null;
+  positionVersion?: bigint | number | string | null;
   requestedAmountAtomic: string;
   amountPolicy: ExitIntentAmountPolicy;
 }

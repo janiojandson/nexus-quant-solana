@@ -420,7 +420,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
       leaseDurationMs: 100
     });
     assert.ok(claimedA);
-    assert.strictEqual(claimedA?.claimEpoch, 1);
+    assert.strictEqual(claimedA?.claimEpoch, 1n);
 
     // Simula expiração de lease
     await pool.query(
@@ -435,7 +435,7 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
       leaseDurationMs: 30_000
     });
     assert.ok(claimedB);
-    assert.strictEqual(claimedB?.claimEpoch, 2);
+    assert.strictEqual(claimedB?.claimEpoch, 2n);
 
     // Worker A (zombie) tenta atualizar com expectedEpoch = 1
     // No PostgreSQL real, a query WHERE claim_epoch = 1 retorna rowCount = 0
@@ -446,13 +446,13 @@ describe('Nexus V2.1B — Real PostgreSQL Integration (V2.1B-H)', () => {
           'CRITICAL',
           'STOP_LOSS_CRITICAL',
           'obs_zombie_real',
-          1 // expectedEpoch defasado
+          1n // expectedEpoch defasado
         );
       },
       (err: any) => {
         assert.ok(err instanceof StaleEpochError);
-        assert.strictEqual(err.expectedEpoch, 1);
-        assert.strictEqual(err.actualEpoch, 2);
+        assert.strictEqual(BigInt(err.expectedEpoch), 1n);
+        assert.strictEqual(BigInt(err.actualEpoch), 2n);
         return true;
       }
     );

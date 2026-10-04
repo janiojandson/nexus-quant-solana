@@ -65,7 +65,7 @@ export interface CreateIntentInput {
   walletId: string;
   mint: string;
   tokenProgram: string;
-  positionVersion?: number | string | null;
+  positionVersion?: bigint | number | string | null;
   requestedAmountAtomic: string;
   amountPolicy: ExitIntentAmountPolicy;
   initialSeverity: ExitIntentSeverity;
@@ -87,7 +87,7 @@ export interface PrepareAttemptInput {
   expectedOutAtomic?: string;
   minimumOutAtomic?: string;
   initialState?: ExecutionAttemptState;
-  lastValidBlockHeight?: number | string;
+  lastValidBlockHeight?: bigint | string | number;
   nowMs?: number;
 }
 
@@ -111,19 +111,19 @@ export interface IExitJournalRepository {
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
     observationId?: string,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<IntentSeverityEvent>;
   claimIntent(input: ClaimIntentInput): Promise<ExitIntent | null>;
-  prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt>;
+  prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt>;
   getAttemptById(attemptId: string): Promise<ExecutionAttempt | null>;
   getAttemptsForIntent(intentId: string): Promise<ExecutionAttempt[]>;
   updateAttemptState(
     attemptId: string,
     state: ExecutionAttemptState,
     updates?: Partial<ExecutionAttempt>,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExecutionAttempt>;
-  recordFill(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }>;
+  recordFill(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }>;
   getFillsForTrade(tradeId: string): Promise<FillRecord[]>;
   getFillsForPosition(positionId: string): Promise<FillRecord[]>;
   recordReconciliationEvent(
@@ -131,12 +131,12 @@ export interface IExitJournalRepository {
   ): Promise<ExecutionReconciliationEvent>;
   getIntent?(id: string): Promise<ExitIntent | null>;
   claimNextIntent?(input: ClaimIntentInput): Promise<ExitIntent | null>;
-  renewLease?(intentId: string, workerId: string, durationMs: number, expectedEpoch?: number): Promise<ExitIntent>;
-  recordSeverityEvent?(intentId: string, newSeverity: ExitIntentSeverity, reason: ExitIntentReason, observationId?: string, expectedEpoch?: number): Promise<IntentSeverityEvent>;
-  createAttempt?(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt>;
-  markReconciliationDebt?(intentId: string, debt: boolean, expectedEpoch?: number): Promise<ExitIntent>;
-  applyFillIdempotently?(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }>;
-  releaseTerminalIntent?(intentId: string, terminalStatus: ExitIntentStatus, expectedEpoch?: number): Promise<ExitIntent>;
+  renewLease?(intentId: string, workerId: string, durationMs: number, expectedEpoch?: bigint | number): Promise<ExitIntent>;
+  recordSeverityEvent?(intentId: string, newSeverity: ExitIntentSeverity, reason: ExitIntentReason, observationId?: string, expectedEpoch?: bigint | number): Promise<IntentSeverityEvent>;
+  createAttempt?(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt>;
+  markReconciliationDebt?(intentId: string, debt: boolean, expectedEpoch?: bigint | number): Promise<ExitIntent>;
+  applyFillIdempotently?(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }>;
+  releaseTerminalIntent?(intentId: string, terminalStatus: ExitIntentStatus, expectedEpoch?: bigint | number): Promise<ExitIntent>;
   getUnreconciledIntents?(): Promise<ExitIntent[]>;
 }
 
@@ -232,7 +232,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       reason: input.reason,
       policyVersion: input.policyVersion,
       claimedBy: null,
-      claimEpoch: 0,
+      claimEpoch: 0n,
       claimedAtWallMs: null,
       leaseExpiresAtWallMs: null,
       status: 'CREATED',
@@ -261,18 +261,18 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
     observationId?: string,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<IntentSeverityEvent> {
     const intent = this.intents.get(intentId);
     if (!intent) {
       throw new Error(`ExitIntent not found: ${intentId}`);
     }
 
-    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+    if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
         intent.id,
-        expectedEpoch,
+        BigInt(expectedEpoch),
         intent.claimEpoch
       );
     }
@@ -336,7 +336,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       this.lockedIntents.add(intent.id);
       try {
         intent.claimedBy = input.workerId;
-        intent.claimEpoch += 1;
+        intent.claimEpoch += 1n;
         intent.claimedAtWallMs = now as WallMs;
         intent.leaseExpiresAtWallMs = (now + input.leaseDurationMs) as WallMs;
         intent.status = 'CLAIMED';
@@ -349,17 +349,17 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     return null;
   }
 
-  public async prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
+  public async prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt> {
     const intent = this.intents.get(input.intentId);
     if (!intent) {
       throw new Error(`ExitIntent not found for attempt: ${input.intentId}`);
     }
 
-    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+    if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
         intent.id,
-        expectedEpoch,
+        BigInt(expectedEpoch),
         intent.claimEpoch
       );
     }
@@ -409,7 +409,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     attemptId: string,
     state: ExecutionAttemptState,
     updates?: Partial<ExecutionAttempt>,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExecutionAttempt> {
     const attempt = this.attempts.get(attemptId);
     if (!attempt) {
@@ -418,11 +418,11 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
 
     const intent = this.intents.get(attempt.intentId);
     if (intent) {
-      if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
           intent.id,
-          expectedEpoch,
+          BigInt(expectedEpoch),
           intent.claimEpoch
         );
       }
@@ -469,7 +469,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     return { ...attempt };
   }
 
-  public async recordFill(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }> {
+  public async recordFill(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }> {
     // Unique on-chain identity: (signature, chainLegIndex, instructionIndex, innerInstructionIndex)
     const onChainKey = `${fill.signature}:${fill.chainLegIndex}:${fill.instructionIndex}:${fill.innerInstructionIndex}`;
 
@@ -484,11 +484,11 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
 
     const intent = this.intents.get(fill.intentId);
     if (intent) {
-      if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for fill on intent ${intent.id}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
           intent.id,
-          expectedEpoch,
+          BigInt(expectedEpoch),
           intent.claimEpoch
         );
       }
@@ -531,7 +531,7 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     intentId: string,
     workerId: string,
     durationMs: number,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExitIntent> {
     const intent = this.intents.get(intentId);
     if (!intent) {
@@ -540,11 +540,11 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     if (intent.claimedBy !== workerId) {
       throw new Error(`Cannot renew lease for intent ${intentId}: claimed by ${intent.claimedBy}, caller is ${workerId}`);
     }
-    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+    if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
         intentId,
-        expectedEpoch,
+        BigInt(expectedEpoch),
         intent.claimEpoch
       );
     }
@@ -557,29 +557,29 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
     observationId?: string,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<IntentSeverityEvent> {
     return this.updateIntentSeverity(intentId, newSeverity, reason, observationId, expectedEpoch);
   }
 
-  public async createAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
+  public async createAttempt(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt> {
     return this.prepareAttempt(input, expectedEpoch);
   }
 
   public async markReconciliationDebt(
     intentId: string,
     debt: boolean,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExitIntent> {
     const intent = this.intents.get(intentId);
     if (!intent) {
       throw new Error(`ExitIntent not found: ${intentId}`);
     }
-    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+    if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
         intentId,
-        expectedEpoch,
+        BigInt(expectedEpoch),
         intent.claimEpoch
       );
     }
@@ -587,14 +587,14 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     return { ...intent };
   }
 
-  public async applyFillIdempotently(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }> {
+  public async applyFillIdempotently(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }> {
     return this.recordFill(fill, expectedEpoch);
   }
 
   public async releaseTerminalIntent(
     intentId: string,
     terminalStatus: ExitIntentStatus,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExitIntent> {
     if (!isIntentTerminal(terminalStatus)) {
       throw new Error(`Cannot release intent ${intentId} with non-terminal status: ${terminalStatus}`);
@@ -603,11 +603,11 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
     if (!intent) {
       throw new Error(`ExitIntent not found: ${intentId}`);
     }
-    if (expectedEpoch !== undefined && intent.claimEpoch !== expectedEpoch) {
+    if (expectedEpoch !== undefined && intent.claimEpoch !== BigInt(expectedEpoch)) {
       throw new StaleEpochError(
         `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intent.claimEpoch}`,
         intentId,
-        expectedEpoch,
+        BigInt(expectedEpoch),
         intent.claimEpoch
       );
     }
@@ -646,13 +646,21 @@ export class InMemoryJournalRepository implements IExitJournalRepository {
       attempts: Array.from(this.attempts.entries()),
       fills: Array.from(this.fills.entries()),
       reconciliations: this.reconciliationEvents
-    });
+    }, (_k, v) => typeof v === 'bigint' ? `${v.toString()}n` : v);
   }
 
   public static restoreFromSnapshot(json: string): InMemoryJournalRepository {
-    const parsed = JSON.parse(json);
+    const parsed = JSON.parse(json, (_k, v) => {
+      if (typeof v === 'string' && /^\d+n$/.test(v)) {
+        return BigInt(v.slice(0, -1));
+      }
+      return v;
+    });
     const repo = new InMemoryJournalRepository();
     for (const [k, v] of parsed.intents) {
+      if (typeof v.claimEpoch === 'string' || typeof v.claimEpoch === 'number') {
+        v.claimEpoch = BigInt(v.claimEpoch);
+      }
       repo.intents.set(k, v);
       repo.intentsByDedupeKey.set(v.economicDedupeKey, k);
     }

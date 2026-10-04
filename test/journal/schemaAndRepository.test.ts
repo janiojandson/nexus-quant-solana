@@ -80,7 +80,7 @@ test('Nexus V2.1A — Schema, Migrations & Repository Interfaces (C1)', async (t
     const res1 = await repo.createOrGetIntent(input);
     assert.strictEqual(res1.created, true);
     assert.strictEqual(res1.intent.status, 'CREATED');
-    assert.strictEqual(res1.intent.claimEpoch, 0);
+    assert.strictEqual(res1.intent.claimEpoch, 0n);
     assert.strictEqual(res1.intent.claimedBy, null);
 
     // Call again with exact same economic parameters, even if reason differs

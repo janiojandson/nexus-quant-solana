@@ -190,7 +190,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
     observationId?: string,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<IntentSeverityEvent> {
     const client = await this.pool.connect();
     try {
@@ -202,12 +202,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
+      if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
           intentId,
-          expectedEpoch,
-          Number(intentRow.claim_epoch)
+          BigInt(expectedEpoch),
+          BigInt(intentRow.claim_epoch)
         );
       }
 
@@ -340,7 +340,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     }
   }
 
-  public async prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
+  public async prepareAttempt(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -351,12 +351,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       }
       const intentRow = intentRes.rows[0];
 
-      if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
+      if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${input.intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
           input.intentId,
-          expectedEpoch,
-          Number(intentRow.claim_epoch)
+          BigInt(expectedEpoch),
+          BigInt(intentRow.claim_epoch)
         );
       }
 
@@ -418,7 +418,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     attemptId: string,
     state: ExecutionAttemptState,
     updates?: Partial<ExecutionAttempt>,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExecutionAttempt> {
     const client = await this.pool.connect();
     try {
@@ -433,12 +433,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [attRow.intent_id]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
+        if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
           throw new StaleEpochError(
             `Stale claim epoch for intent ${intentRow.id}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
             intentRow.id,
-            expectedEpoch,
-            Number(intentRow.claim_epoch)
+            BigInt(expectedEpoch),
+            BigInt(intentRow.claim_epoch)
           );
         }
       }
@@ -527,7 +527,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
 
   public async recordFill(
     fill: FillRecord,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<{ fill: FillRecord; created: boolean }> {
     const client = await this.pool.connect();
     try {
@@ -536,12 +536,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       const intentRes = await client.query('SELECT * FROM exit_intents WHERE id = $1 FOR UPDATE', [fill.intentId]);
       if (intentRes.rows.length > 0) {
         const intentRow = intentRes.rows[0];
-        if (expectedEpoch !== undefined && Number(intentRow.claim_epoch) !== expectedEpoch) {
+        if (expectedEpoch !== undefined && BigInt(intentRow.claim_epoch) !== BigInt(expectedEpoch)) {
           throw new StaleEpochError(
             `Stale claim epoch for fill on intent ${fill.intentId}: expected ${expectedEpoch}, actual ${intentRow.claim_epoch}`,
             fill.intentId,
-            expectedEpoch,
-            Number(intentRow.claim_epoch)
+            BigInt(expectedEpoch),
+            BigInt(intentRow.claim_epoch)
           );
         }
       }
@@ -672,7 +672,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     intentId: string,
     workerId: string,
     durationMs: number,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExitIntent> {
     const client = await this.pool.connect();
     try {
@@ -685,12 +685,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       if (row.claimed_by !== workerId) {
         throw new Error(`Cannot renew lease for intent ${intentId}: claimed by ${row.claimed_by}, caller is ${workerId}`);
       }
-      if (expectedEpoch !== undefined && row.claim_epoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && BigInt(row.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
           intentId,
-          expectedEpoch,
-          row.claim_epoch
+          BigInt(expectedEpoch),
+          BigInt(row.claim_epoch)
         );
       }
       const now = nowWallMs();
@@ -714,19 +714,19 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     newSeverity: ExitIntentSeverity,
     reason: ExitIntentReason,
     observationId?: string,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<IntentSeverityEvent> {
     return this.updateIntentSeverity(intentId, newSeverity, reason, observationId, expectedEpoch);
   }
 
-  public async createAttempt(input: PrepareAttemptInput, expectedEpoch?: number): Promise<ExecutionAttempt> {
+  public async createAttempt(input: PrepareAttemptInput, expectedEpoch?: bigint | number): Promise<ExecutionAttempt> {
     return this.prepareAttempt(input, expectedEpoch);
   }
 
   public async markReconciliationDebt(
     intentId: string,
     debt: boolean,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExitIntent> {
     const client = await this.pool.connect();
     try {
@@ -736,12 +736,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         throw new Error(`ExitIntent not found: ${intentId}`);
       }
       const row = intentRes.rows[0];
-      if (expectedEpoch !== undefined && row.claim_epoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && BigInt(row.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
           intentId,
-          expectedEpoch,
-          row.claim_epoch
+          BigInt(expectedEpoch),
+          BigInt(row.claim_epoch)
         );
       }
       const up = await client.query(
@@ -758,14 +758,14 @@ export class PostgresJournalRepository implements IExitJournalRepository {
     }
   }
 
-  public async applyFillIdempotently(fill: FillRecord, expectedEpoch?: number): Promise<{ fill: FillRecord; created: boolean }> {
+  public async applyFillIdempotently(fill: FillRecord, expectedEpoch?: bigint | number): Promise<{ fill: FillRecord; created: boolean }> {
     return this.recordFill(fill, expectedEpoch);
   }
 
   public async releaseTerminalIntent(
     intentId: string,
     terminalStatus: ExitIntentStatus,
-    expectedEpoch?: number
+    expectedEpoch?: bigint | number
   ): Promise<ExitIntent> {
     if (!isIntentTerminal(terminalStatus)) {
       throw new Error(`Cannot release intent ${intentId} with non-terminal status: ${terminalStatus}`);
@@ -778,12 +778,12 @@ export class PostgresJournalRepository implements IExitJournalRepository {
         throw new Error(`ExitIntent not found: ${intentId}`);
       }
       const row = intentRes.rows[0];
-      if (expectedEpoch !== undefined && row.claim_epoch !== expectedEpoch) {
+      if (expectedEpoch !== undefined && BigInt(row.claim_epoch) !== BigInt(expectedEpoch)) {
         throw new StaleEpochError(
           `Stale claim epoch for intent ${intentId}: expected ${expectedEpoch}, actual ${row.claim_epoch}`,
           intentId,
-          expectedEpoch,
-          row.claim_epoch
+          BigInt(expectedEpoch),
+          BigInt(row.claim_epoch)
         );
       }
       const up = await client.query(
@@ -820,7 +820,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       walletId: row.wallet_id,
       mint: row.mint,
       tokenProgram: row.token_program,
-      positionVersion: row.position_version,
+      positionVersion: row.position_version !== null && row.position_version !== undefined ? BigInt(row.position_version) : null,
       requestedAmountAtomic: String(row.requested_amount_atomic),
       amountPolicy: row.amount_policy,
       economicDedupeKey: row.economic_dedupe_key,
@@ -830,7 +830,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       reason: row.reason,
       policyVersion: row.policy_version,
       claimedBy: row.claimed_by,
-      claimEpoch: Number(row.claim_epoch),
+      claimEpoch: BigInt(row.claim_epoch),
       claimedAtWallMs: row.claimed_at ? Math.round(new Date(row.claimed_at).getTime()) as any : null,
       leaseExpiresAtWallMs: row.lease_expires_at ? Math.round(new Date(row.lease_expires_at).getTime()) as any : null,
       status: row.status,
@@ -856,7 +856,7 @@ export class PostgresJournalRepository implements IExitJournalRepository {
       state: row.state,
       failureReason: row.failure_reason,
       errorClassification: row.error_classification,
-      lastValidBlockHeight: row.last_valid_block_height ? String(row.last_valid_block_height) : undefined,
+      lastValidBlockHeight: row.last_valid_block_height !== null && row.last_valid_block_height !== undefined ? BigInt(row.last_valid_block_height) : undefined,
       startedAtWallMs: Math.round(new Date(row.started_at).getTime()) as any,
       preparedAtWallMs: row.prepared_at ? Math.round(new Date(row.prepared_at).getTime()) as any : undefined,
       submittedAtWallMs: row.submitted_at ? Math.round(new Date(row.submitted_at).getTime()) as any : undefined,

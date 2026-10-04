@@ -73,7 +73,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     assert.strictEqual(loser, null, 'The other worker must receive null (SKIP LOCKED)');
     assert.strictEqual(winner.id, intent.id);
     assert.strictEqual(winner.status, 'CLAIMED');
-    assert.strictEqual(winner.claimEpoch, 1);
+    assert.strictEqual(winner.claimEpoch, 1n);
     assert.ok(winner.claimedBy === 'worker_alpha' || winner.claimedBy === 'worker_beta');
   });
 
@@ -105,7 +105,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       nowMs: baseTime
     });
     assert.strictEqual(claimedA?.claimedBy, 'worker_alpha');
-    assert.strictEqual(claimedA?.claimEpoch, 1);
+    assert.strictEqual(claimedA?.claimEpoch, 1n);
 
     // Worker B tries to claim at baseTime + 2000 (lease still active) -> rejected
     const midClaim = await repo.claimIntent({
@@ -123,7 +123,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
     });
     assert.ok(recoveredClaim !== null);
     assert.strictEqual(recoveredClaim.claimedBy, 'worker_beta');
-    assert.strictEqual(recoveredClaim.claimEpoch, 2, 'Epoch must increment to 2');
+    assert.strictEqual(recoveredClaim.claimEpoch, 2n, 'Epoch must increment to 2');
     assert.strictEqual(recoveredClaim.status, 'CLAIMED');
   });
 
@@ -396,7 +396,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       leaseDurationMs: leaseDuration,
       nowMs: baseTime
     });
-    assert.strictEqual(claimA?.claimEpoch, 1);
+    assert.strictEqual(claimA?.claimEpoch, 1n);
 
     // Worker A prepares attempt under epoch 1
     const attemptA = await repo.prepareAttempt({
@@ -406,7 +406,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       requestedAmountAtomic: '4375826130',
       initialState: 'ORDER_READY',
       nowMs: baseTime + 100
-    }, 1);
+    }, 1n);
 
     // Lease of Worker A expires at baseTime + 6000
     // Worker B claims at baseTime + 6000 -> gets claimEpoch = 2
@@ -416,16 +416,16 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       nowMs: baseTime + 6000
     });
     assert.strictEqual(claimB?.claimedBy, 'worker_beta');
-    assert.strictEqual(claimB?.claimEpoch, 2);
+    assert.strictEqual(claimB?.claimEpoch, 2n);
 
     // Zombie Worker A wakes up and attempts to update attempt state or commit a fill using epoch 1
     // Database / Repo fencing must REJECT with StaleEpochError (simulating WHERE claim_epoch = 1 -> 0 rows affected)
     await assert.rejects(
-      () => repo.updateAttemptState(attemptA.attemptId, 'ORDER_READY', { requestId: 'req_stale' }, 1),
+      () => repo.updateAttemptState(attemptA.attemptId, 'ORDER_READY', { requestId: 'req_stale' }, 1n),
       (err: any) => {
         assert.ok(err instanceof StaleEpochError);
-        assert.strictEqual(err.expectedEpoch, 1);
-        assert.strictEqual(err.actualEpoch, 2);
+        assert.strictEqual(BigInt(err.expectedEpoch), 1n);
+        assert.strictEqual(BigInt(err.actualEpoch), 2n);
         return true;
       }
     );
@@ -639,7 +639,7 @@ test('Nexus V2.1A — Idempotency, Durable Claims, Lease Recovery & Crash Simula
       await repo.claimIntent({ workerId: `worker_${i}`, leaseDurationMs: 100, nowMs: baseTime + i * 200 });
     }
     const claim5 = await repo.claimIntent({ workerId: 'worker_5', leaseDurationMs: 10_000, nowMs: baseTime + 1000 });
-    assert.strictEqual(claim5?.claimEpoch, 5);
+    assert.strictEqual(claim5?.claimEpoch, 5n);
 
     // Persiste Attempt
     const attempt = await repo.prepareAttempt({

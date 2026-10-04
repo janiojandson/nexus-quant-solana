@@ -708,7 +708,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       leaseDurationMs: 50
     });
     assert.ok(claimedA);
-    assert.strictEqual(claimedA?.claimEpoch, 1);
+    assert.strictEqual(claimedA?.claimEpoch, 1n);
 
     // Lease expira...
     const expiredNow = nowWallMs() + 100;
@@ -720,7 +720,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       nowMs: expiredNow
     });
     assert.ok(claimedB);
-    assert.strictEqual(claimedB?.claimEpoch, 2);
+    assert.strictEqual(claimedB?.claimEpoch, 2n);
 
     // Worker A (zombie) acorda e tenta atualizar o intent esperando epoch = 1
     await assert.rejects(
@@ -730,13 +730,13 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
           'CRITICAL',
           'STOP_LOSS_CRITICAL',
           'obs_zombie',
-          1 // expectedEpoch defasada!
+          1n // expectedEpoch defasada!
         );
       },
       (err: any) => {
         assert.ok(err instanceof StaleEpochError);
-        assert.strictEqual(err.expectedEpoch, 1);
-        assert.strictEqual(err.actualEpoch, 2);
+        assert.strictEqual(BigInt(err.expectedEpoch), 1n);
+        assert.strictEqual(BigInt(err.actualEpoch), 2n);
         return true;
       }
     );
@@ -772,7 +772,7 @@ describe('Nexus V2.1B — SQL Behavior & Protocol Harness (C2)', () => {
       lastValidBlockHeight: 310554200
     });
 
-    assert.strictEqual(attempt.lastValidBlockHeight, '310554200');
+    assert.strictEqual(BigInt(attempt.lastValidBlockHeight!), 310554200n);
 
     // Transição para SIGNED ativa reconciliationDebt
     await repo.updateAttemptState(attempt.attemptId, 'SIGNED', {
