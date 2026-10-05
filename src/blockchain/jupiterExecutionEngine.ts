@@ -132,6 +132,9 @@ export class JupiterExecutionEngine {
     this.dexAggregator = config.dexAggregator || new DexAggregatorService();
     this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
     this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+    const rawKeys = process.env.JUPITER_API_KEYS || config.apiKey || process.env.JUPITER_API_KEY || '';
+    this.apiKeys = rawKeys.split(',').map(k => k.trim()).filter(Boolean);
+    if (!this.apiKey && this.apiKeys.length > 0) this.apiKey = this.apiKeys[0];
     this.v2BaseUrl = (
       config.v2BaseUrl ||
       process.env.JUPITER_V2_BASE_URL ||
@@ -141,6 +144,16 @@ export class JupiterExecutionEngine {
       20_000,
       config.confirmationTimeoutMs ?? Number(process.env.JUPITER_V2_EXECUTE_TIMEOUT_MS || 30_000)
     );
+  }
+
+  private apiKeys: string[] = [];
+  private currentKeyIndex = 0;
+
+  public getNextApiKey(): string | undefined {
+    if (this.apiKeys.length === 0) return this.apiKey;
+    const key = this.apiKeys[this.currentKeyIndex % this.apiKeys.length];
+    this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
+    return key;
   }
 
   public getAggregator(): DexAggregatorService {
@@ -188,7 +201,8 @@ export class JupiterExecutionEngine {
   }
 
   private async getOrder(req: SwapExecutionRequest): Promise<{ order: JupiterV2OrderResponse; orderHttpMs: number }> {
-    if (!this.apiKey) {
+    const activeKey = this.getNextApiKey() || this.apiKey;
+    if (!activeKey) {
       throw new Error('JUPITER_API_KEY ausente para Jupiter Swap API V2.');
     }
 
@@ -211,7 +225,7 @@ export class JupiterExecutionEngine {
         () => axios.get(`${this.v2BaseUrl}/order`, {
           params,
           timeout: 10_000,
-          headers: { 'x-api-key': this.apiKey }
+          headers: { 'x-api-key': activeKey }
         }),
         'general',
         { traceId: req.traceId, operationType: 'order' }
@@ -473,7 +487,7 @@ export class JupiterExecutionEngine {
               timeout: this.executeTimeoutMs,
               headers: {
                 'Content-Type': 'application/json',
-                ...(this.apiKey ? { 'x-api-key': this.apiKey } : {})
+                ...((this.getNextApiKey() || this.apiKey) ? { 'x-api-key': (this.getNextApiKey() || this.apiKey) } : {})
               }
             }
           ),

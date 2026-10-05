@@ -623,15 +623,6 @@ export function renderDashboardHtml(state: DashboardState): string {
       </div>
     </section>
 
-    <!-- OBSERVATÓRIO PUMP.FUN READ-ONLY -->
-    ${renderPumpObservatorySection(state)}
-
-    <!-- LABORATÓRIO ECONÔMICO PUMP / JUPITER -->
-    ${renderPumpStrategyLabSection(state)}
-
-    <!-- FALLBACK DIRETO PUMP SELL-ONLY -->
-    ${renderPumpSellFallbackSection(state)}
-
     <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
       <div class="p-4 md:px-6 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/90">
@@ -725,6 +716,15 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     <!-- HISTÓRICO DE TRADES FECHADOS -->
     ${renderClosedTradesSection(state)}
+
+    <!-- OBSERVATÓRIO PUMP.FUN READ-ONLY -->
+    ${renderPumpObservatorySection(state)}
+
+    <!-- LABORATÓRIO ECONÔMICO PUMP / JUPITER -->
+    ${renderPumpStrategyLabSection(state)}
+
+    <!-- FALLBACK DIRETO PUMP SELL-ONLY -->
+    ${renderPumpSellFallbackSection(state)}
 
     <!-- DECISION JOURNAL & CALIBRAÇÃO DE EV v2.5.0 (4 CARDS) -->
     ${renderJournalSection()}
@@ -1260,52 +1260,95 @@ export function renderDashboardHtml(state: DashboardState): string {
           if (positions.length === 0) {
             posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos e momentum...</td></tr>';
           } else {
-            posTbody.innerHTML = positions.map(p => {
-              const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
-              const isProfit = pnlPct >= 0;
-              const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
-              const netPnlText = p.netPnlPct !== undefined
-                ? '<div class="text-[11px] font-normal ' + (p.netPnlPct >= 0 ? 'text-emerald-300' : 'text-amber-400') + '">' +
-                  (p.netPnlPct >= 0 ? '+' : '') + (p.netPnlPct * 100).toFixed(2) + '% líq. ' + (p.netPnlPct >= 0 ? '💰' : '(taxas)') + '</div>'
-                : '';
-              const breakEvenContent = p.breakEvenPct !== undefined
-                ? '<div class="text-slate-200 font-semibold">+' + (p.breakEvenPct * 100).toFixed(1) + '%</div>' +
-                  '<div class="text-[10px] text-slate-400">$' + Number(p.breakEvenPriceUsd || 0).toFixed(6) + '</div>'
-                : '<span class="text-slate-500">—</span>';
-              const partialButton = p.partialTaken
-                ? '<span class="inline-block text-[11px] text-emerald-400 font-bold px-2 py-1 bg-emerald-950/60 rounded border border-emerald-700/60 mr-2">50% Feita ✅</span>'
-                : '<button disabled data-admin-action="true" onclick="partialExitToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Executar parcial de 50% a mercado." class="admin-action bg-emerald-900/80 hover:bg-emerald-700 text-emerald-200 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-emerald-600 mr-2 transition cursor-not-allowed">Parcial 50% 💰</button>';
+            var existingRows = Array.from(posTbody.querySelectorAll('tr[id^="pos-row-"]'));
+            var existingMints = existingRows.map(function(r) { return r.id.replace('pos-row-', ''); });
+            var newMints = positions.map(function(p) { return p.mint; });
+            var canUpdateInPlace = existingMints.length === newMints.length && existingMints.every(function(m, i) { return m === newMints[i]; });
 
-              return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +
-                '<td class="py-4 px-4 md:px-6 font-sans">' +
-                  '<div class="font-bold text-white flex items-center gap-2">' +
-                    '<span>' + p.symbol + '</span>' +
-                    '<a href="https://solscan.io/token/' + p.mint + '" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>' +
-                  '</div>' +
-                  '<div class="text-[11px] text-slate-400 font-mono">' + p.mint.slice(0, 6) + '...' + p.mint.slice(-4) + '</div>' +
-                '</td>' +
-                '<td class="py-4 px-4 text-slate-300">$' + Number(p.entryPriceUsd || 0).toFixed(6) + '</td>' +
-                '<td id="price-' + p.mint + '" class="py-4 px-4 text-slate-200">$' + Number(p.currentPriceUsd || 0).toFixed(6) + '</td>' +
-                '<td id="pnl-' + p.mint + '" class="py-4 px-4 font-bold ' + (isProfit ? 'text-emerald-400' : 'text-rose-400') + '">' +
-                  '<div>' + (isProfit ? '+' : '') + Number(pnlPct).toFixed(2) + '% <span class="text-[10px] text-slate-400 font-normal font-sans">bruto</span></div>' +
-                  netPnlText +
-                '</td>' +
-                '<td class="py-4 px-4 text-xs font-mono">' + breakEvenContent + '</td>' +
-                '<td class="py-4 px-4 text-xs">' +
-                  (p.stopStatusText
+            if (canUpdateInPlace) {
+              positions.forEach(function(p) {
+                var pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
+                var isProfit = pnlPct >= 0;
+                var stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
+                var priceEl = document.getElementById('price-' + p.mint);
+                if (priceEl) priceEl.textContent = '$' + Number(p.currentPriceUsd || 0).toFixed(6);
+
+                var pnlEl = document.getElementById('pnl-' + p.mint);
+                if (pnlEl) {
+                  var netPnlText = p.netPnlPct !== undefined
+                    ? '<div class="text-[11px] font-normal ' + (p.netPnlPct >= 0 ? 'text-emerald-300' : 'text-amber-400') + '">' +
+                      (p.netPnlPct >= 0 ? '+' : '') + (p.netPnlPct * 100).toFixed(2) + '% líq. ' + (p.netPnlPct >= 0 ? '💰' : '(taxas)') + '</div>'
+                    : '';
+                  pnlEl.className = 'py-4 px-4 font-bold ' + (isProfit ? 'text-emerald-400' : 'text-rose-400');
+                  pnlEl.innerHTML = '<div>' + (isProfit ? '+' : '') + Number(pnlPct).toFixed(2) + '% <span class="text-[10px] text-slate-400 font-normal font-sans">bruto</span></div>' + netPnlText;
+                }
+
+                var beEl = document.getElementById('be-' + p.mint);
+                if (beEl) {
+                  beEl.innerHTML = p.breakEvenPct !== undefined
+                    ? '<div class="text-slate-200 font-semibold">+' + (p.breakEvenPct * 100).toFixed(1) + '%</div>' +
+                      '<div class="text-[10px] text-slate-400">$' + Number(p.breakEvenPriceUsd || 0).toFixed(6) + '</div>'
+                    : '<span class="text-slate-500">—</span>';
+                }
+
+                var stopEl = document.getElementById('stop-' + p.mint);
+                if (stopEl) {
+                  stopEl.innerHTML = p.stopStatusText
                     ? '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-400') + '">' + p.stopStatusText + '</span>'
                     : '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-500') + '">' +
                       ((p.trailingStopActive || p.trailingActive) ? 'ATIVO (proteção dinâmica)' : 'INATIVO (ativa a partir de +8%)') +
-                    '</span>') +
-                '</td>' +
-                '<td class="py-4 px-4 md:px-6 text-right font-sans whitespace-nowrap">' +
-                  partialButton +
-                  '<button disabled data-admin-action="true" onclick="panicToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Liquidar 100% da posição." class="admin-action bg-slate-800 text-slate-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 hover:bg-rose-950/80 hover:text-rose-200 hover:border-rose-700/80 transition cursor-not-allowed">' +
-                    'LIQUIDAR POSIÇÃO' +
-                  '</button>' +
-                '</td>' +
-              '</tr>';
-            }).join('');
+                    '</span>';
+                }
+              });
+            } else {
+              posTbody.innerHTML = positions.map(function(p) {
+                var pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
+                var isProfit = pnlPct >= 0;
+                var stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
+                var netPnlText = p.netPnlPct !== undefined
+                  ? '<div class="text-[11px] font-normal ' + (p.netPnlPct >= 0 ? 'text-emerald-300' : 'text-amber-400') + '">' +
+                    (p.netPnlPct >= 0 ? '+' : '') + (p.netPnlPct * 100).toFixed(2) + '% líq. ' + (p.netPnlPct >= 0 ? '💰' : '(taxas)') + '</div>'
+                  : '';
+                var breakEvenContent = p.breakEvenPct !== undefined
+                  ? '<div class="text-slate-200 font-semibold">+' + (p.breakEvenPct * 100).toFixed(1) + '%</div>' +
+                    '<div class="text-[10px] text-slate-400">$' + Number(p.breakEvenPriceUsd || 0).toFixed(6) + '</div>'
+                  : '<span class="text-slate-500">—</span>';
+                var partialButton = p.partialTaken
+                  ? '<span class="inline-block text-[11px] text-emerald-400 font-bold px-2 py-1 bg-emerald-950/60 rounded border border-emerald-700/60 mr-2">50% Feita ✅</span>'
+                  : '<button disabled data-admin-action="true" onclick="partialExitToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Executar parcial de 50% a mercado." class="admin-action bg-emerald-900/80 hover:bg-emerald-700 text-emerald-200 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-emerald-600 mr-2 transition cursor-not-allowed">Parcial 50% 💰</button>';
+
+                return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +
+                  '<td class="py-4 px-4 md:px-6 font-sans">' +
+                    '<div class="font-bold text-white flex items-center gap-2">' +
+                      '<span>' + p.symbol + '</span>' +
+                      '<a href="https://solscan.io/token/' + p.mint + '" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>' +
+                    '</div>' +
+                    '<div class="text-[11px] text-slate-400 font-mono">' + p.mint.slice(0, 6) + '...' + p.mint.slice(-4) + '</div>' +
+                  '</td>' +
+                  '<td class="py-4 px-4 text-slate-300">$' + Number(p.entryPriceUsd || 0).toFixed(6) + '</td>' +
+                  '<td id="price-' + p.mint + '" class="py-4 px-4 text-slate-200">$' + Number(p.currentPriceUsd || 0).toFixed(6) + '</td>' +
+                  '<td id="pnl-' + p.mint + '" class="py-4 px-4 font-bold ' + (isProfit ? 'text-emerald-400' : 'text-rose-400') + '">' +
+                    '<div>' + (isProfit ? '+' : '') + Number(pnlPct).toFixed(2) + '% <span class="text-[10px] text-slate-400 font-normal font-sans">bruto</span></div>' +
+                    netPnlText +
+                  '</td>' +
+                  '<td id="be-' + p.mint + '" class="py-4 px-4 text-xs font-mono">' + breakEvenContent + '</td>' +
+                  '<td id="stop-' + p.mint + '" class="py-4 px-4 text-xs">' +
+                    (p.stopStatusText
+                      ? '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-400') + '">' + p.stopStatusText + '</span>'
+                      : '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-500') + '">' +
+                        ((p.trailingStopActive || p.trailingActive) ? 'ATIVO (proteção dinâmica)' : 'INATIVO (ativa a partir de +8%)') +
+                      '</span>') +
+                  '</td>' +
+                  '<td class="py-4 px-4 md:px-6 text-right font-sans whitespace-nowrap">' +
+                    partialButton +
+                    '<button disabled data-admin-action="true" onclick="panicToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Liquidar 100% da posição." class="admin-action bg-slate-800 text-slate-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 hover:bg-rose-950/80 hover:text-rose-200 hover:border-rose-700/80 transition cursor-not-allowed">' +
+                      'LIQUIDAR POSIÇÃO' +
+                    '</button>' +
+                  '</td>' +
+                '</tr>';
+              }).join('');
+              applyAdminUi();
+            }
           }
         }
 

@@ -31,7 +31,11 @@ export class RugCheckService {
     'mutable metadata',
     'high market cap per holder',
     'copycat token',
-    'low liquidity'
+    'low liquidity',
+    'large amount of lp unlocked',
+    'top 10 holders high ownership',
+    'single holder ownership',
+    'high ownership'
   ]);
 
   constructor(options?: RugCheckOptions) {
@@ -68,6 +72,9 @@ export class RugCheckService {
       // 2. Extração de métricas de LP trancada/queimada. Ausência permanece UNKNOWN.
       const directLp = data.lpLockedPct == null ? NaN : Number(data.lpLockedPct);
       let lpLockedPct: number | undefined = Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
+      const isPumpFun = mint.toLowerCase().endsWith('pump') ||
+        (Array.isArray(data.markets) && data.markets.some((m: any) => m.marketType === 'pump_fun_amm'));
+
       if (Array.isArray(data.markets)) {
         const raydiumMarket = data.markets.find((m: any) => m.lp);
         if (raydiumMarket?.lp) {
@@ -78,10 +85,23 @@ export class RugCheckService {
         }
       }
 
+      // Em tokens na curva do Pump.fun, a liquidez fica 100% sob custódia do contrato imutável (impossível rugpull)
+      if (isPumpFun && (lpLockedPct === undefined || lpLockedPct === 0)) {
+        lpLockedPct = 100;
+      }
+
       // Top five measured holder percentages. Missing or invalid facts remain unknown.
       let topHoldersPct: number | undefined;
       if (Array.isArray(data.topHolders) && data.topHolders.length > 0) {
-        const nonAmmHolders = data.topHolders.filter((h: any) => !h.isLpPool && !h.owner?.includes('Raydium') && !h.address?.includes('11111111111111111111111111111111'));
+        const nonAmmHolders = data.topHolders.filter((h: any) => {
+          if (h.isLpPool) return false;
+          const owner = String(h.owner || '').toLowerCase();
+          const address = String(h.address || '').toLowerCase();
+          if (owner.includes('raydium') || address.includes('11111111111111111111111111111111')) return false;
+          // Ignora a conta da Bonding Curve PDA / Programa Pump.fun (reserva do protocolo, não baleia humana)
+          if (owner.includes('6ef8rrecthr5dkzon8nwu78hrvfckubj14m5ubewf6p') || owner.includes('pump') || address.endsWith('pump')) return false;
+          return true;
+        });
         const percentages = nonAmmHolders.map((h: any) => h.pct == null ? NaN : Number(h.pct));
         if (percentages.every((pct: number) => Number.isFinite(pct) && pct >= 0 && pct <= 100)) {
           const sum = percentages.sort((a: number, b: number) => b - a).slice(0, 5).reduce((acc: number, pct: number) => acc + pct, 0);

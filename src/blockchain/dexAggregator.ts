@@ -84,6 +84,8 @@ export class JupiterQuoteException extends Error {
 export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
   private apiKey?: string;
+  private apiKeys: string[] = [];
+  private currentKeyIndex = 0;
   private rateLimitMs: number;
   private cacheTtlMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
@@ -97,20 +99,31 @@ export class DexAggregatorService {
     config: DexAggregatorConfig = {}
   ) {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl.replace(/\/$/, '');
-    this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+    const rawKeys = process.env.JUPITER_API_KEYS || config.apiKey || process.env.JUPITER_API_KEY || '';
+    this.apiKeys = rawKeys.split(',').map(k => k.trim()).filter(Boolean);
+    this.apiKey = this.apiKeys[0];
     const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
+    const keyCount = Math.max(1, this.apiKeys.length);
+    const baseRateLimit = this.apiKeys.length > 0 ? Math.max(50, Math.floor(250 / keyCount)) : 2100;
     const configuredRateLimitMs = config.rateLimitMs ??
-      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 250 : 2100)));
+      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || baseRateLimit));
 
     this.rateLimitMs = isTestEndpoint
       ? configuredRateLimitMs
-      : (this.apiKey ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
+      : (this.apiKeys.length > 0 ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
     this.trafficCoordinator = config.trafficCoordinator ??
       ((isTestEndpoint || config.rateLimitMs !== undefined)
         ? new JupiterTrafficCoordinator({ generalIntervalMs: this.rateLimitMs, executeIntervalMs: 0 })
         : getGlobalJupiterTrafficCoordinator());
     this.cacheTtlMs = config.cacheTtlMs ??
       (isTestEndpoint ? 0 : Number(process.env.JUPITER_QUOTE_CACHE_TTL_MS || 750));
+  }
+
+  public getNextApiKey(): string | undefined {
+    if (this.apiKeys.length === 0) return this.apiKey;
+    const key = this.apiKeys[this.currentKeyIndex % this.apiKeys.length];
+    this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
+    return key;
   }
 
   public getBaseUrl(): string {
@@ -210,12 +223,13 @@ export class DexAggregatorService {
     for (let attempt = 0; attempt < 2; attempt++) {
       const requestStartedMonoNs = nowMonotonicNs();
       try {
+        const activeKey = this.getNextApiKey();
         response = await this.trafficCoordinator.schedule(
           params.trafficPriority ?? 5,
           () => axios.get(`${this.jupiterApiBaseUrl}/order`, {
             params: queryParams,
             timeout: 8000,
-            headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
+            headers: activeKey ? { 'x-api-key': activeKey } : undefined
           }),
           'general',
           { traceId: params.traceId, operationType: params.operationType || 'quote' }
