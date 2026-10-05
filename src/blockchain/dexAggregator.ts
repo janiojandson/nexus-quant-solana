@@ -100,7 +100,7 @@ export class DexAggregatorService {
     this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
     const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
     const configuredRateLimitMs = config.rateLimitMs ??
-      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 1050 : 2100)));
+      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 250 : 2100)));
 
     this.rateLimitMs = isTestEndpoint
       ? configuredRateLimitMs

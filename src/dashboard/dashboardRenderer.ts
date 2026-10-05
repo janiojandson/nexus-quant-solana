@@ -11,7 +11,7 @@ export interface ClosedTradeView {
   exitTimestamp: number;
   pnlPct: number;
   pnlSolEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'MANUAL_PARTIAL_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
@@ -146,6 +146,11 @@ export interface DashboardState {
     stopStatusText?: string;
     trailingStopSolValue?: number;
     peakSolValue?: number;
+    partialTaken?: boolean;
+    breakEvenPriceUsd?: number;
+    breakEvenPct?: number;
+    netPnlPct?: number;
+    isNetProfit?: boolean;
   }>;
   walletHoldings?: WalletHoldingView[];
   closedTrades: ClosedTradeView[];
@@ -330,6 +335,7 @@ const EXIT_REASON_LABELS: Record<string, { label: string; cls: string }> = {
   STOP_LOSS: { label: 'Stop Loss', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
   WATCHDOG_EXIT: { label: 'Watchdog Exit', cls: 'bg-rose-500/15 text-rose-300 border-rose-500/30' },
   PARTIAL_TAKE_PROFIT_50: { label: 'Colheita Parcial +35%', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
+  MANUAL_PARTIAL_50: { label: 'Parcial Manual 50%', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
   TRAILING_STOP: { label: 'Trailing Stop', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30' },
   TIME_STOP: { label: 'Time-Stop', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
   TAKE_PROFIT: { label: 'Take Profit', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' },
@@ -650,11 +656,11 @@ export function renderDashboardHtml(state: DashboardState): string {
             <tr>
               <th class="py-3 px-4 md:px-6">Token / Mint</th>
               <th class="py-3 px-4">Preço Entrada</th>
-              <th class="py-3 px-4">Preço Sensor</th>
-              <th class="py-3 px-4">PnL Sensor</th>
-              <th class="py-3 px-4">Stop Loss</th>
+              <th class="py-3 px-4">Preço Atual</th>
+              <th class="py-3 px-4">PnL Bruto / Líquido</th>
+              <th class="py-3 px-4">Break-Even Real</th>
               <th class="py-3 px-4">Trailing Stop</th>
-              <th class="py-3 px-4 md:px-6 text-right">Ação</th>
+              <th class="py-3 px-4 md:px-6 text-right">Ações</th>
             </tr>
           </thead>
           <tbody id="positions-tbody" class="divide-y divide-slate-800/60 font-mono">
@@ -679,16 +685,33 @@ export function renderDashboardHtml(state: DashboardState): string {
                 <td class="py-4 px-4 text-slate-300">$${Number(p.entryPriceUsd).toFixed(6)}</td>
                 <td id="price-${p.mint}" class="py-4 px-4 text-slate-200">$${Number(p.currentPriceUsd).toFixed(6)}</td>
                 <td id="pnl-${p.mint}" class="py-4 px-4 font-bold ${isProfit ? 'text-emerald-400' : 'text-rose-400'}">
-                  ${isProfit ? '+' : ''}${(pnlVal * 100).toFixed(2)}%
+                  <div>${isProfit ? '+' : ''}${(pnlVal * 100).toFixed(2)}% <span class="text-[10px] text-slate-400 font-normal font-sans">bruto</span></div>
+                  ${p.netPnlPct !== undefined ? `
+                    <div class="text-[11px] font-normal ${p.netPnlPct >= 0 ? 'text-emerald-300' : 'text-amber-400'}">
+                      ${p.netPnlPct >= 0 ? '+' : ''}${(p.netPnlPct * 100).toFixed(2)}% líq. ${p.netPnlPct >= 0 ? '💰' : '(taxas)'}
+                    </div>
+                  ` : ''}
                 </td>
-                <td class="py-4 px-4 text-xs text-slate-400">${(Number(p.stopLossPct) * 100).toFixed(1)}%</td>
+                <td class="py-4 px-4 text-xs font-mono">
+                  ${p.breakEvenPct !== undefined ? `
+                    <div class="text-slate-200 font-semibold">+${(p.breakEvenPct * 100).toFixed(1)}%</div>
+                    <div class="text-[10px] text-slate-400">$${Number(p.breakEvenPriceUsd || 0).toFixed(6)}</div>
+                  ` : '<span class="text-slate-500">—</span>'}
+                </td>
                 <td class="py-4 px-4 text-xs">
                   <span class="${p.trailingActive ? 'text-emerald-400 font-semibold' : 'text-slate-500'}">
                     ${p.stopStatusText || (p.trailingActive ? 'ATIVO (proteção dinâmica)' : 'INATIVO (ativa a partir de +8%)')}
                   </span>
                 </td>
-                <td class="py-4 px-4 md:px-6 text-right font-sans">
-                  <button disabled data-admin-action="true" onclick="panicToken('${p.mint}', '${p.symbol.replace(/\'/g, '')}')" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">
+                <td class="py-4 px-4 md:px-6 text-right font-sans whitespace-nowrap">
+                  ${p.partialTaken ? `
+                    <span class="inline-block text-[11px] text-emerald-400 font-bold px-2 py-1 bg-emerald-950/60 rounded border border-emerald-700/60 mr-2">50% Feita ✅</span>
+                  ` : `
+                    <button disabled data-admin-action="true" onclick="partialExitToken('${p.mint}', '${escapeDashboardHtml(p.symbol)}')" title="Requer sessão ADMIN. Executar parcial de 50% a mercado." class="admin-action bg-emerald-900/80 hover:bg-emerald-700 text-emerald-200 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-emerald-600 mr-2 transition cursor-not-allowed">
+                      Parcial 50% 💰
+                    </button>
+                  `}
+                  <button disabled data-admin-action="true" onclick="panicToken('${p.mint}', '${escapeDashboardHtml(p.symbol)}')" title="Requer sessão ADMIN. Liquidar 100% da posição." class="admin-action bg-slate-800 text-slate-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 hover:bg-rose-950/80 hover:text-rose-200 hover:border-rose-700/80 transition cursor-not-allowed">
                     LIQUIDAR POSIÇÃO
                   </button>
                 </td>
@@ -923,6 +946,24 @@ export function renderDashboardHtml(state: DashboardState): string {
         adminSession = null;
       }
       applyAdminUi();
+    }
+
+    async function partialExitToken(mint, symbol) {
+      if (!confirm('💰 CONFIRMAR PARCIAL MANUAL (50%):\\nRealizar venda a mercado de 50% de ' + (symbol || mint) + ', garantindo o lucro/principal e ativando trailing stop nos 50% restantes.\\n\\nDeseja prosseguir?')) {
+        return;
+      }
+      try {
+        const res = await adminFetch('/api/positions/' + encodeURIComponent(mint) + '/partial-exit', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+          alert('✅ ' + (data.message || 'Parcial de 50% executada com sucesso!'));
+          pollDashboard();
+        } else {
+          alert('❌ Falha na parcial: ' + (data.error || 'Erro desconhecido'));
+        }
+      } catch (err) {
+        alert('❌ Erro de conexão ao enviar ordem de parcial: ' + err.message);
+      }
     }
 
     async function panicToken(mint, symbol) {
@@ -1223,6 +1264,18 @@ export function renderDashboardHtml(state: DashboardState): string {
               const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
               const isProfit = pnlPct >= 0;
               const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
+              const netPnlText = p.netPnlPct !== undefined
+                ? '<div class="text-[11px] font-normal ' + (p.netPnlPct >= 0 ? 'text-emerald-300' : 'text-amber-400') + '">' +
+                  (p.netPnlPct >= 0 ? '+' : '') + (p.netPnlPct * 100).toFixed(2) + '% líq. ' + (p.netPnlPct >= 0 ? '💰' : '(taxas)') + '</div>'
+                : '';
+              const breakEvenContent = p.breakEvenPct !== undefined
+                ? '<div class="text-slate-200 font-semibold">+' + (p.breakEvenPct * 100).toFixed(1) + '%</div>' +
+                  '<div class="text-[10px] text-slate-400">$' + Number(p.breakEvenPriceUsd || 0).toFixed(6) + '</div>'
+                : '<span class="text-slate-500">—</span>';
+              const partialButton = p.partialTaken
+                ? '<span class="inline-block text-[11px] text-emerald-400 font-bold px-2 py-1 bg-emerald-950/60 rounded border border-emerald-700/60 mr-2">50% Feita ✅</span>'
+                : '<button disabled data-admin-action="true" onclick="partialExitToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Executar parcial de 50% a mercado." class="admin-action bg-emerald-900/80 hover:bg-emerald-700 text-emerald-200 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-emerald-600 mr-2 transition cursor-not-allowed">Parcial 50% 💰</button>';
+
               return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +
                 '<td class="py-4 px-4 md:px-6 font-sans">' +
                   '<div class="font-bold text-white flex items-center gap-2">' +
@@ -1234,9 +1287,10 @@ export function renderDashboardHtml(state: DashboardState): string {
                 '<td class="py-4 px-4 text-slate-300">$' + Number(p.entryPriceUsd || 0).toFixed(6) + '</td>' +
                 '<td id="price-' + p.mint + '" class="py-4 px-4 text-slate-200">$' + Number(p.currentPriceUsd || 0).toFixed(6) + '</td>' +
                 '<td id="pnl-' + p.mint + '" class="py-4 px-4 font-bold ' + (isProfit ? 'text-emerald-400' : 'text-rose-400') + '">' +
-                  (isProfit ? '+' : '') + Number(pnlPct).toFixed(2) + '%' +
+                  '<div>' + (isProfit ? '+' : '') + Number(pnlPct).toFixed(2) + '% <span class="text-[10px] text-slate-400 font-normal font-sans">bruto</span></div>' +
+                  netPnlText +
                 '</td>' +
-                '<td class="py-4 px-4 text-xs text-slate-400">' + Number(stopLoss).toFixed(1) + '%</td>' +
+                '<td class="py-4 px-4 text-xs font-mono">' + breakEvenContent + '</td>' +
                 '<td class="py-4 px-4 text-xs">' +
                   (p.stopStatusText
                     ? '<span class="' + ((p.trailingStopActive || p.trailingActive) ? 'text-emerald-400 font-semibold' : 'text-slate-400') + '">' + p.stopStatusText + '</span>'
@@ -1244,8 +1298,9 @@ export function renderDashboardHtml(state: DashboardState): string {
                       ((p.trailingStopActive || p.trailingActive) ? 'ATIVO (proteção dinâmica)' : 'INATIVO (ativa a partir de +8%)') +
                     '</span>') +
                 '</td>' +
-                '<td class="py-4 px-4 md:px-6 text-right font-sans">' +
-                  '<button disabled data-admin-action="true" onclick="panicToken(&quot;' + p.mint + '&quot;)" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">' +
+                '<td class="py-4 px-4 md:px-6 text-right font-sans whitespace-nowrap">' +
+                  partialButton +
+                  '<button disabled data-admin-action="true" onclick="panicToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Liquidar 100% da posição." class="admin-action bg-slate-800 text-slate-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 hover:bg-rose-950/80 hover:text-rose-200 hover:border-rose-700/80 transition cursor-not-allowed">' +
                     'LIQUIDAR POSIÇÃO' +
                   '</button>' +
                 '</td>' +
@@ -1277,6 +1332,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             var reasonLabels = {
               STOP_LOSS: ['Stop Loss', 'bg-rose-500/15 text-rose-300 border-rose-500/30'],
               PARTIAL_TAKE_PROFIT_50: ['Colheita Parcial +35%', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],
+              MANUAL_PARTIAL_50: ['Parcial Manual 50%', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],
               TRAILING_STOP: ['Trailing Stop', 'bg-amber-500/15 text-amber-300 border-amber-500/30'],
               TIME_STOP: ['Time-Stop', 'bg-slate-500/15 text-slate-300 border-slate-500/30'],
               TAKE_PROFIT: ['Take Profit', 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'],

@@ -30,6 +30,11 @@ export interface PositionTracking {
   lastJupiterExecutableSolValue?: number;
   /** Epoch ms da última rota de saída comprovadamente saudável. */
   lastHealthyExitRouteAt?: number;
+  /** Previsão de Break-Even Real (descontado gas, priority fee, DEX e slippage) */
+  breakEvenPriceUsd?: number;
+  breakEvenPct?: number;
+  netPnlPct?: number;
+  isNetProfit?: boolean;
 }
 
 export interface PositionInput extends Omit<PositionTracking, 'stopLossPct' | 'takeProfitPct'> {
@@ -61,7 +66,7 @@ export interface ClosedTrade {
   exitTimestamp: number;
   pnlPct: number;
   pnlUsdEst: number;
-  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
+  exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'MANUAL_PARTIAL_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
   txSignature?: string;
   pnlSolEst?: number;
 }
@@ -85,6 +90,55 @@ export interface ExitSignal {
   stopStatusText?: string;
   /** Motivo detalhado do gatilho analítico (ex: Ayla Liquidity Drain, Ayla Dynamic Time-Stop) */
   reasonDetail?: string;
+}
+
+export interface BreakEvenCalculation {
+  breakEvenSol: number;
+  breakEvenPct: number;
+  breakEvenPriceUsd: number;
+  netPnlPct: number;
+  isNetProfit: boolean;
+}
+
+/**
+ * Calcula dinamicamente o Ponto de Equilíbrio Real (Break-Even Líquido),
+ * descontando custos fixos de rede (gas + priority fees de ida e volta)
+ * e custos proporcionais da DEX (taxas de swap e slippage).
+ */
+export function calculateNetBreakEven(params: {
+  entrySol: number;
+  entryPriceUsd: number;
+  currentSolValue?: number;
+  entryFeesSol?: number;
+  estimatedExitFeesSol?: number;
+  variableFeeRate?: number;
+}): BreakEvenCalculation {
+  const entrySol = Math.max(0.000001, params.entrySol || 0.015);
+  const entryPriceUsd = Math.max(0.000000001, params.entryPriceUsd || 0.000001);
+  const fixedFeesSol = (params.entryFeesSol ?? 0.0008) + (params.estimatedExitFeesSol ?? 0.0008);
+  const variableRate = params.variableFeeRate ?? 0.02; // 1% DEX + 1% slippage round-trip
+
+  // proceeds * (1 - variableRate) = entrySol + fixedFeesSol
+  const breakEvenSol = (entrySol + fixedFeesSol) / Math.max(0.01, 1 - variableRate);
+  const breakEvenPct = (breakEvenSol - entrySol) / entrySol;
+  const breakEvenPriceUsd = entryPriceUsd * (1 + breakEvenPct);
+
+  let netPnlPct = 0;
+  let isNetProfit = false;
+  if (params.currentSolValue !== undefined && params.currentSolValue > 0) {
+    const netProceedsSol = (params.currentSolValue * (1 - variableRate)) - (params.estimatedExitFeesSol ?? 0.0008);
+    const totalCostSol = entrySol + (params.entryFeesSol ?? 0.0008);
+    netPnlPct = (netProceedsSol - totalCostSol) / totalCostSol;
+    isNetProfit = netPnlPct > 0;
+  }
+
+  return {
+    breakEvenSol,
+    breakEvenPct,
+    breakEvenPriceUsd,
+    netPnlPct,
+    isNetProfit
+  };
 }
 
 export class PositionExitEngine {
@@ -161,6 +215,17 @@ export class PositionExitEngine {
     fullPosition.observablePeakSolValue = observablePeak;
     fullPosition.peakSolValue = executablePeak;
     this.peakSolValues.set(fullPosition.mint, executablePeak);
+
+    // Inicializa métricas de Break-Even Real na criação/reidratação
+    const beMetrics = calculateNetBreakEven({
+      entrySol,
+      entryPriceUsd: fullPosition.entryPriceUsd,
+      currentSolValue: entrySol
+    });
+    fullPosition.breakEvenPriceUsd = beMetrics.breakEvenPriceUsd;
+    fullPosition.breakEvenPct = beMetrics.breakEvenPct;
+    fullPosition.netPnlPct = beMetrics.netPnlPct;
+    fullPosition.isNetProfit = beMetrics.isNetProfit;
   }
 
   public recordExitRouteObservation(mint: string, observation: ExitRouteObservation): boolean {
@@ -221,6 +286,16 @@ export class PositionExitEngine {
 
   public getAllPositions(): PositionTracking[] {
     return Array.from(this.activePositions.values());
+  }
+
+  public getNetBreakEven(mint: string, currentSolValue?: number): BreakEvenCalculation | null {
+    const pos = this.activePositions.get(mint);
+    if (!pos) return null;
+    return calculateNetBreakEven({
+      entrySol: pos.entrySol || pos.entrySolValue || 0.015,
+      entryPriceUsd: pos.entryPriceUsd,
+      currentSolValue: currentSolValue ?? pos.lastJupiterExecutableSolValue ?? pos.entrySol
+    });
   }
 
   public getClosedTrades(): ClosedTrade[] {
@@ -364,8 +439,34 @@ export class PositionExitEngine {
       position.stopLossPct = 0.01;
     }
 
+    // 🛡️ Degraus de Proteção de Lucro Travado (Anti-Derretimento em Dumps):
+    // Garante que alvos que andaram +100%, +200% ou +300% travem lucros reais e não voltem para o zero
+    if (peakPnlPct >= 3.00) {
+      position.stopLossPct = Math.max(position.stopLossPct, 1.80); // Piso de +180% travado
+    } else if (peakPnlPct >= 2.00) {
+      position.stopLossPct = Math.max(position.stopLossPct, 1.00); // Piso de +100% travado
+    } else if (peakPnlPct >= 1.00) {
+      position.stopLossPct = Math.max(position.stopLossPct, 0.40); // Piso de +40% travado
+    }
+
     // Trailing Stop dinâmico pós-parcial = pico * (1 - 0.10)
-    const trailingStopSolValue = newPeak * (1 - PositionExitEngine.TRAILING_DISTANCE);
+    let dynamicTrailingStopSol = newPeak * (1 - PositionExitEngine.TRAILING_DISTANCE);
+    if (position.stopLossPct > 0) {
+      const guaranteedFloorSol = entrySol * (1 + position.stopLossPct);
+      dynamicTrailingStopSol = Math.max(dynamicTrailingStopSol, guaranteedFloorSol);
+    }
+    const trailingStopSolValue = dynamicTrailingStopSol;
+
+    // Atualiza métricas de Break-Even Real na posição rastreada
+    const beMetrics = calculateNetBreakEven({
+      entrySol,
+      entryPriceUsd: position.entryPriceUsd,
+      currentSolValue
+    });
+    position.breakEvenPriceUsd = beMetrics.breakEvenPriceUsd;
+    position.breakEvenPct = beMetrics.breakEvenPct;
+    position.netPnlPct = beMetrics.netPnlPct;
+    position.isNetProfit = beMetrics.isNetProfit;
 
     // ==========================================
     // Protecoes de saida total precedem colheitas parciais
@@ -479,6 +580,8 @@ export class PositionExitEngine {
     // b) Time-Stop Dinâmico: Se após 5 minutos o volume estagnar e o PnL flutuar negativo entre -5% e -10%, encerra preventivamente
     const elapsedMs = currentTimestamp - position.entryTimestamp;
     const elapsedMinutes = elapsedMs / (60 * 1000);
+    const elapsedSeconds = elapsedMs / 1000;
+
     if (!position.partialTaken && elapsedMinutes >= 5 && pnlPct <= -0.05 && pnlPct >= -0.10) {
       const isVolumeStagnant = context?.currentVolume5m !== undefined && position.entryVolume5m !== undefined
         ? context.currentVolume5m <= position.entryVolume5m * 1.05
@@ -497,6 +600,21 @@ export class PositionExitEngine {
           reasonDetail: `SOLANA_DYNAMIC_TIME_STOP: 5min decorridos com PnL negativo (${(pnlPct * 100).toFixed(1)}%) e volume estagnado`
         };
       }
+    }
+
+    // c) Invalidação Rápida de Momentum (90 Segundos): se após 90s o trade não ganhou tração e estiver estagnado/negativo com pico < 3%, encerra preventivamente
+    if (!position.partialTaken && elapsedSeconds >= 90 && pnlPct <= -0.02 && peakPnlPct < 0.03) {
+      return {
+        shouldExit: true,
+        type: 'TIME_STOP',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: position.tokenAmount,
+        shouldCloseAta: true,
+        peakSolValue: newPeak,
+        trailingStopSolValue,
+        reasonDetail: `MOMENTUM_STALL_90S: Trade sem tração após 90s (PnL ${(pnlPct * 100).toFixed(1)}%, pico < +3%)`
+      };
     }
 
     // ==========================================

@@ -301,6 +301,31 @@ export class PumpObservatory {
     }
   }
 
+  /**
+   * Retorna candidatos com tração comprovada no Pump.fun:
+   * 1. Near-Graduation (70% a 98% da curva preenchida com volume recente)
+   * 2. Post-Graduation (acabou de migrar para Raydium)
+   */
+  getNearGraduationOrPostGradCandidates(options: { minProgressPct?: number; maxAgeMs?: number } = {}): PumpObservation[] {
+    const minProgress = options.minProgressPct ?? 70;
+    const maxAge = options.maxAgeMs ?? 20 * 60 * 1000;
+    const nowTs = this.now();
+    return [...this.observations.values()]
+      .reverse()
+      .filter(obs => {
+        const age = nowTs - obs.eventTimestampMs;
+        if (age > maxAge) return false;
+        if (!obs.complete && (obs.progressPct || 0) >= minProgress && (obs.progressPct || 0) <= 98) {
+          return true;
+        }
+        if (obs.complete && (obs.dexReadyAtMs != null || obs.dexFirstSeenAtMs != null)) {
+          return true;
+        }
+        return false;
+      })
+      .slice(0, 10);
+  }
+
   snapshot(): PumpObservatorySnapshot {
     const recent = [...this.observations.values()].reverse().map(item => ({ ...item }));
     const graduatedCount = recent.filter(item => item.complete).length;

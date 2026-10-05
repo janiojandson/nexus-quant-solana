@@ -13,7 +13,7 @@ import {
   isFinancialMutationEndpoint
 } from '../core/financialReadiness.js';
 
-export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
+export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'MANUAL_PARTIAL_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
 
 export interface RouteContext {
   latestState: DashboardState;
@@ -353,9 +353,10 @@ export async function handleApiRoutes(
     return true;
   }
 
-  // 4. PÂNICO INDIVIDUAL: POST /api/panic/:mint (ou POST /api/positions/:mint/exit)
+  // 4. PÂNICO INDIVIDUAL: POST /api/panic/:mint (ou POST /api/positions/:mint/exit / /api/positions/:mint/partial-exit)
   const isPanicMint = pathname.startsWith('/api/panic/') && pathname !== '/api/panic/all';
   const isPositionExit = pathname.startsWith('/api/positions/') && pathname.endsWith('/exit');
+  const isPositionPartialExit = pathname.startsWith('/api/positions/') && pathname.endsWith('/partial-exit');
   const legacyPanicEnabled = ctx.enableLegacyPanicApi ??
     (process.env.NEXUS_ENABLE_LEGACY_PANIC_API === 'true');
 
@@ -368,7 +369,7 @@ export async function handleApiRoutes(
     return true;
   }
 
-  if ((isPanicMint || isPositionExit) && method === 'POST') {
+  if ((isPanicMint || isPositionExit || isPositionPartialExit) && method === 'POST') {
     const segments = pathname.split('/');
     const mint = decodeURIComponent(isPanicMint ? segments[3] || '' : segments[3] || '');
     if (!mint || mint === 'undefined') {
@@ -393,7 +394,9 @@ export async function handleApiRoutes(
     }
 
     if (ctx.executeExitOrder) {
-      const result = await ctx.executeExitOrder(mint, 'MANUAL', 0, 0, { shouldCloseAta: true });
+      const exitReason = isPositionPartialExit ? 'MANUAL_PARTIAL_50' : 'MANUAL';
+      const shouldCloseAta = !isPositionPartialExit;
+      const result = await ctx.executeExitOrder(mint, exitReason, 0, 0, { shouldCloseAta });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         ...result,
@@ -401,8 +404,8 @@ export async function handleApiRoutes(
         txSignature: result?.txSignature || null,
         txid: result?.txSignature || null,
         message: result?.success === false
-          ? 'Saída manual não confirmada; posição preservada.'
-          : 'Saída manual processada pelo executor de posições.'
+          ? (isPositionPartialExit ? 'Parcial manual de 50% não confirmada; posição preservada.' : 'Saída manual não confirmada; posição preservada.')
+          : (isPositionPartialExit ? 'Parcial manual de 50% confirmada on-chain.' : 'Saída manual processada pelo executor de posições.')
       }));
       return true;
     }

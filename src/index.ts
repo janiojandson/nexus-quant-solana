@@ -101,16 +101,17 @@ const OFFICIAL_PHANTOM_WALLET = process.env.AGENT_SOLANA_PUBLIC_KEY || 'FBx2SKLD
 const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
 const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
-const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
-const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 1));
+const FAST_EXIT_INTERVAL_MS = Math.max(250, Number(process.env.FAST_EXIT_INTERVAL_MS || 500)); // 500ms para Ultra-Fast Exit Monitor
+const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 4));
 const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
-const ENTRY_EQUITY_PCT = Math.min(0.25, Math.max(0.01, Number(process.env.ENTRY_EQUITY_PCT || 0.10)));
-const MAX_TOTAL_ALLOCATION_PCT = Math.min(0.50, Math.max(ENTRY_EQUITY_PCT, Number(process.env.MAX_TOTAL_ALLOCATION_PCT || 0.20)));
+const ENTRY_EQUITY_PCT = Math.min(0.25, Math.max(0.01, Number(process.env.ENTRY_EQUITY_PCT || 0.15)));
+const MAX_TOTAL_ALLOCATION_PCT = Math.min(0.50, Math.max(ENTRY_EQUITY_PCT, Number(process.env.MAX_TOTAL_ALLOCATION_PCT || 0.30)));
 const MIN_EXECUTABLE_ENTRY_SOL = Math.max(0.0001, Number(process.env.MIN_EXECUTABLE_ENTRY_SOL || 0.001));
 const GAS_RESERVE_EQUITY_PCT = Math.min(0.25, Math.max(0, Number(process.env.GAS_RESERVE_EQUITY_PCT || 0.10)));
 const MIN_GAS_RESERVE_SOL = Math.max(0, Number(process.env.MIN_GAS_RESERVE_SOL || 0.01));
 const MAX_GAS_RESERVE_SOL = Math.max(MIN_GAS_RESERVE_SOL, Number(process.env.MAX_GAS_RESERVE_SOL || 0.05));
-const MAX_TOTAL_ALLOCATION_SOL = Math.max(MAX_TRADE_AMOUNT_SOL, Number(process.env.MAX_TOTAL_ALLOCATION_SOL || 0.10));
+const MAX_TRADE_AMOUNT_SOL_CEILING = Math.max(MAX_TRADE_AMOUNT_SOL, Number(process.env.MAX_TRADE_AMOUNT_SOL || 10.0));
+const MAX_TOTAL_ALLOCATION_SOL = Math.max(MAX_TRADE_AMOUNT_SOL_CEILING, Number(process.env.MAX_TOTAL_ALLOCATION_SOL || 20.0));
 const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
@@ -638,7 +639,7 @@ if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN && !NEXUS_MAINTENANCE_MODE) {
  * 3. Quarentena severa de 24 horas no AntiSpamMemory se for STOP_LOSS ou MANUAL
  * 4. Registro no histórico de trades fechados e atualização no Dashboard
  */
-type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT';
+type ExitOrderReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'MANUAL_PARTIAL_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT';
 type ExitOrderOptions = {
   exitTokenAmount?: number;
   shouldCloseAta?: boolean;
@@ -719,10 +720,11 @@ async function executeExitOrderUnlocked(
   }
 
   const tokenAmountToSell = options?.exitTokenAmount || pos.tokenAmount;
-  const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50';
+  const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50' || exitReason === 'MANUAL_PARTIAL_50';
   const shouldCloseAta = options?.shouldCloseAta ?? !isPartial;
   const trafficPriority = options?.trafficPriority ?? priorityForJupiterWork('PROTECTIVE_EXIT');
-  const initialSlippageBps = Math.min(750, Math.max(250, options?.initialSlippageBps ?? 500));
+  const isUrgentExit = exitReason === 'STOP_LOSS' || exitReason === 'TRAILING_STOP' || exitReason === 'TIME_STOP' || exitReason === 'MANUAL';
+  const initialSlippageBps = Math.min(750, Math.max(250, options?.initialSlippageBps ?? (isUrgentExit ? 750 : 500)));
 
   // Validação atômica ANTES de qualquer cotação. `tokenAmount` vem de
   // `swapSim.outAmount` (inteiro do Jupiter), mas um refactor futuro poderia
@@ -881,13 +883,12 @@ async function executeExitOrderUnlocked(
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
     keypair: wallet.getKeypair(),
     slippageBps: initialSlippageBps,
-    priorityLevel: 'high',
+    priorityLevel: isUrgentExit ? 'veryHigh' : 'high',
+    skipPreflight: isUrgentExit, // Elimina Erro 6001 (SlippageToleranceExceeded): pula simulação RPC lenta e envia direto ao managed landing
     trafficPriority
   });
 
-  // Segunda tentativa ainda fail-closed: amplia até o hard-cap de 7,5%,
-  // mas continua simulando antes de transmitir. Não existe mais envio cego com
-  // skipPreflight, evitando pagar taxa por uma falha que a simulação detectaria.
+  // Segunda tentativa com prioridade máxima e slippage 750bps
   if (exitSwap.status === 'FAILED') {
     console.warn(`⚠️ [TENTATIVA 1 FALHOU DEFINITIVAMENTE] ${pos.symbol}: ${exitSwap.error} | Tentando nova ordem com slippage 750bps...`);
 
@@ -899,7 +900,7 @@ async function executeExitOrderUnlocked(
       keypair: wallet.getKeypair(),
       slippageBps: 750,
       priorityLevel: 'veryHigh',
-      skipPreflight: false,
+      skipPreflight: true,
       trafficPriority
     });
 
@@ -1253,7 +1254,7 @@ async function executeExitOrderUnlocked(
     const QUARANTINE_MS: Record<string, number> = {
       STOP_LOSS:     3 * 60 * 60 * 1000,  // 3 horas
       TIME_STOP:     30 * 60 * 1000,       // 30 minutos
-      MANUAL:        24 * 60 * 60 * 1000,  // 24 horas
+      MANUAL:        0,                   // 0ms (saída manual a pedido do operador: sem quarentena)
       WATCHDOG_EXIT: 24 * 60 * 60 * 1000,  // 24 horas após perda prolongada de rota
       TRAILING_STOP: 0,
       TAKE_PROFIT:   0,
@@ -1307,6 +1308,7 @@ async function executeExitOrderUnlocked(
   const exitTypeMap: Record<string, DecisionType> = {
     STOP_LOSS: 'EXIT_SL',
     PARTIAL_TAKE_PROFIT_50: 'EXIT_PARTIAL',
+    MANUAL_PARTIAL_50: 'EXIT_PARTIAL',
     TRAILING_STOP: 'EXIT_TRAILING',
     TIME_STOP: 'EXIT_TIME_STOP',
     MANUAL: 'EXIT_PANIC',
@@ -1446,6 +1448,11 @@ function updateDashboardViews() {
       trailingStopSolValue: p.trailingStopSolValue,
       stopStatusText: p.stopStatusText,
       peakSolValue: p.peakSolValue,
+      partialTaken: p.partialTaken ?? false,
+      breakEvenPriceUsd: p.breakEvenPriceUsd ?? existing?.breakEvenPriceUsd,
+      breakEvenPct: p.breakEvenPct ?? existing?.breakEvenPct,
+      netPnlPct: p.netPnlPct ?? existing?.netPnlPct,
+      isNetProfit: p.isNetProfit ?? existing?.isNetProfit,
       dexScreenerUrl: `https://dexscreener.com/solana/${p.mint}`,
       solscanUrl: `https://solscan.io/token/${p.mint}`
     };
@@ -2031,36 +2038,8 @@ async function runUltraFastExitMonitor() {
           `SL: ${((pos.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT) * 100).toFixed(1)}% | Trailing: ${trailingStatus}`
         );
 
-        const elapsedMin = Math.floor((Date.now() - pos.entryTimestamp) / 60000);
-        const dashPos = latestState.positions.find(p => p.mint === pos.mint);
-        if (dashPos) {
-          dashPos.pnlPct = pnlPct;
-          dashPos.currentPriceUsd = sensorPriceUsd;
-        }
-
-        // 📊 Log Sintético de Monitor de Posição (a cada ciclo de 1.5s)
-        const pnlSign = pnlPct >= 0 ? '+' : '';
-        const peakSign = peakPnlPct >= 0 ? '+' : '';
-        const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
-
-        // Exibição clara e não ambígua do status de proteção.
-        const stopStatusText = pos.partialTaken
-          ? `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
-          : earlyTrailingActive
-            ? `Stop Ativo: Trailing Momentum (-6% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
-            : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: aguardando +8%`;
-
-        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | Sensor PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
-
-        // Propaga o estado real de proteção para o painel. Sem isto a coluna
-        // "Trailing Stop" ficava em INATIVO mesmo com o trailing ativo.
-        pos.trailingActive = pos.partialTaken || earlyTrailingActive;
-        pos.stopStatusText = stopStatusText;
-        pos.peakSolValue = peakSolValue;
-        pos.trailingStopSolValue = trailingStopSolValue;
-
         // 🧠 Sentinela Solana de Saída Adaptativa:
-        // Passa contexto atual da posição se disponível
+        // Avalia proteções, trailing stop dinâmico e métricas de Break-Even Real
         const exitSignal = positionEngine.evaluateExitBySol(
           pos.mint,
           currentSolValue,
@@ -2070,6 +2049,41 @@ async function runUltraFastExitMonitor() {
             currentVolume5m: marketSnapshot?.volume5mUsd
           }
         );
+
+        const elapsedMin = Math.floor((Date.now() - pos.entryTimestamp) / 60000);
+        const dashPos = latestState.positions.find(p => p.mint === pos.mint);
+        if (dashPos) {
+          dashPos.pnlPct = pnlPct;
+          dashPos.currentPriceUsd = sensorPriceUsd;
+          dashPos.breakEvenPriceUsd = pos.breakEvenPriceUsd;
+          dashPos.breakEvenPct = pos.breakEvenPct;
+          dashPos.netPnlPct = pos.netPnlPct;
+          dashPos.isNetProfit = pos.isNetProfit;
+          dashPos.partialTaken = pos.partialTaken;
+        }
+
+        // 📊 Log Sintético de Monitor de Posição (a cada ciclo de 500ms)
+        const pnlSign = pnlPct >= 0 ? '+' : '';
+        const peakSign = peakPnlPct >= 0 ? '+' : '';
+        const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
+        const beText = pos.breakEvenPct !== undefined
+          ? ` | BE Real: +${(pos.breakEvenPct * 100).toFixed(1)}% ($${pos.breakEvenPriceUsd?.toFixed(6) ?? '?'}) | Líquido: ${pos.netPnlPct !== undefined ? (pos.netPnlPct >= 0 ? '+' : '') + (pos.netPnlPct * 100).toFixed(2) + '%' : 'N/D'}`
+          : '';
+
+        // Exibição clara e não ambígua do status de proteção.
+        const stopStatusText = pos.partialTaken
+          ? `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
+          : earlyTrailingActive
+            ? `Stop Ativo: Trailing Momentum (-6% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
+            : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: aguardando +8%`;
+
+        console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | Sensor PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}%${beText} | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
+
+        // Propaga o estado real de proteção para o painel
+        pos.trailingActive = pos.partialTaken || earlyTrailingActive;
+        pos.stopStatusText = stopStatusText;
+        pos.peakSolValue = peakSolValue;
+        pos.trailingStopSolValue = trailingStopSolValue;
 
         if (!exitSignal.shouldExit || exitSignal.type === 'HOLD') {
           persistPeakWatermark(pos, positionEngine.getPeakSolValue(pos.mint));
@@ -2291,7 +2305,7 @@ async function executeAutonomousCycle() {
       maxPositions: MAX_CONCURRENT_POSITIONS,
       entryEquityPct: ENTRY_EQUITY_PCT,
       maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
-      maxEntrySol: MAX_TRADE_AMOUNT_SOL,
+      maxEntrySol: MAX_TRADE_AMOUNT_SOL_CEILING,
       maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
       minExecutableEntrySol: MIN_EXECUTABLE_ENTRY_SOL,
       gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
@@ -2341,6 +2355,31 @@ async function executeAutonomousCycle() {
     console.log('🔍 [1/3 Scanner Descoberta] Buscando piscinas consolidadas (5-60m | Liquidez >= $15k)...');
     const candidates = await scanner.scanSolanaTrends(15000);
     const { waiting, mature, technicalDiscards: scannerDiscards } = scanner.lastIncubatorStats;
+
+    // 🚀 Expansão de Estratégia via Pump.fun Observatory (sem alterar o scanner 5m):
+    // Incorpora candidatos com liquidez e preço indexados no DEX pós-graduação/Raydium
+    try {
+      const obsCandidates = pumpObservatory.getNearGraduationOrPostGradCandidates({ minProgressPct: 70 })
+        .filter(obs => (obs.dexLiquidityUsd || 0) >= 15000 && obs.dexPriceUsd && !candidates.some(c => c.mint === obs.mint))
+        .map(obs => ({
+          mint: obs.mint,
+          symbol: obs.symbol || 'PUMP',
+          name: obs.name || obs.symbol || 'Pump Token',
+          priceUsd: obs.dexPriceUsd || 0,
+          liquidityUsd: obs.dexLiquidityUsd || 0,
+          volume24hUsd: 0,
+          volume5mUsd: 0,
+          pairCreatedAt: obs.dexPairCreatedAtMs || obs.eventTimestampMs,
+          dexId: 'raydium',
+          pairAddress: obs.dexPairAddress
+        } as any));
+      if (obsCandidates.length > 0) {
+        console.log(`🚀 [PumpObservatory] +${obsCandidates.length} candidato(s) graduados/Raydium incorporados à triagem`);
+        candidates.push(...obsCandidates);
+      }
+    } catch (obsErr: any) {
+      console.warn('⚠️ [PumpObservatory] Falha defensiva ao coletar candidatos:', obsErr?.message || obsErr);
+    }
 
     let technicalDiscardCount = scannerDiscards || 0;
     let quarantineCount = 0;
@@ -3146,16 +3185,16 @@ async function executeAutonomousCycle() {
       console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
     }
 
-    // Ciclo 5: Verificação de Reprodução Darwinista
-    if (reproduction.canReproduce(balanceSol)) {
-      const split = reproduction.calculateSurplusSplit({
-        currentBalanceSol: balanceSol,
-        reserveOperatingBalanceSol: 0.20
-      });
-      console.log(`🎉 PROSPERIDADE! Saque Janio: ${split.profitShareJanioSol} SOL | Alocação Filho: ${split.childInitialStakeSol} SOL`);
-      const child = await reproduction.spawnChildAgent('MEME_HUNTER');
-      console.log(`👶 Subagente Filho Parido: ${child.childPublicKey} (${child.specialty})`);
-    }
+    // Ciclo 5: Verificação de Reprodução Darwinista (DESATIVADA a pedido do operador - aportes manuais preservados para juros compostos nas posições)
+    // if (reproduction.canReproduce(balanceSol)) {
+    //   const split = reproduction.calculateSurplusSplit({
+    //     currentBalanceSol: balanceSol,
+    //     reserveOperatingBalanceSol: 0.20
+    //   });
+    //   console.log(`🎉 PROSPERIDADE! Saque Janio: ${split.profitShareJanioSol} SOL | Alocação Filho: ${split.childInitialStakeSol} SOL`);
+    //   const child = await reproduction.spawnChildAgent('MEME_HUNTER');
+    //   console.log(`👶 Subagente Filho Parido: ${child.childPublicKey} (${child.specialty})`);
+    // }
 
     console.log(`✅ [${new Date().toLocaleTimeString()}] Ciclo finalizado com proteção integral.`);
   } catch (error: any) {
