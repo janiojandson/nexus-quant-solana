@@ -312,3 +312,51 @@ export async function updateLiveAttemptOnConfirmation(mint: string, signature: s
 export function clearLiveAttempt(mint: string): void {
   activeLiveAttempts.delete(mint);
 }
+
+/**
+ * Rehydrates durable execution debts on boot into financialExitSafetyGuard.
+ * Retrieves any intents with active reconciliation debt or UNKNOWN status,
+ * or attempts in SUBMITTED/UNKNOWN/SIGNED state.
+ */
+export async function rehydrateDurableExitDebtsOnBoot(
+  repo?: IExitJournalRepository | null
+): Promise<number> {
+  const activeRepo = repo || activeDurableSafetyRepository;
+  if (!activeRepo) return 0;
+
+  const lockedMints = new Set<string>();
+
+  // If repository provides getUnreconciledIntents (e.g. InMemoryJournalRepository)
+  if (typeof activeRepo.getUnreconciledIntents === 'function') {
+    const unreconciled = await activeRepo.getUnreconciledIntents();
+    for (const intent of unreconciled) {
+      if (intent.mint) {
+        lockedMints.add(intent.mint);
+        financialExitSafetyGuard.registerUnresolvedDebt(intent.mint);
+      }
+    }
+  }
+
+  // If repository has access to pool (e.g. PostgresJournalRepository)
+  if ('getPool' in (activeRepo as any) && typeof (activeRepo as any).getPool === 'function') {
+    const pool = (activeRepo as any).getPool();
+    if (pool) {
+      const res = await pool.query(`
+        SELECT DISTINCT ei.mint
+        FROM exit_intents ei
+        LEFT JOIN execution_attempts ea ON ea.intent_id = ei.id
+        WHERE ei.status IN ('SUBMITTED', 'UNKNOWN')
+           OR ei.reconciliation_debt = true
+           OR ea.state IN ('SIGNED', 'SUBMITTED', 'UNKNOWN')
+      `);
+      for (const row of res.rows) {
+        if (row.mint) {
+          lockedMints.add(row.mint);
+          financialExitSafetyGuard.registerUnresolvedDebt(row.mint);
+        }
+      }
+    }
+  }
+
+  return lockedMints.size;
+}

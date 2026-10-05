@@ -84,12 +84,8 @@ test('Nexus V2.3 — BigInt Fencing & Precision Preservation (Hardening Pre-Flig
     const testDbUrl = process.env.TEST_DATABASE_URL || 'postgresql://test_nexus_user:descartavel_secret_pass_123@localhost:55432/test_nexus_journal';
     const pool = new Pool({ connectionString: testDbUrl });
 
-    try {
-      await pool.query('SELECT 1');
-    } catch {
-      // Se banco não estiver acessível, pula
-      return;
-    }
+    // Requirement 41: Fail-closed verification - no silent catch { return; } false-green
+    await pool.query('SELECT 1');
 
     const repo = new PostgresJournalRepository(pool);
 
