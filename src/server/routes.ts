@@ -224,7 +224,8 @@ export async function handleApiRoutes(
       peakSolValue: p.peakSolValue,
       solscanUrl: p.solscanUrl,
       dexScreenerUrl: p.dexScreenerUrl,
-      timeOpenSeconds: Math.floor((Date.now() - (p.entryTimestamp || Date.now())) / 1000)
+      timeOpenSeconds: Math.floor((Date.now() - (p.entryTimestamp || Date.now())) / 1000),
+      strategy: (p as any).strategy || (p.mint.toLowerCase().endsWith('pump') ? 'PUMP_FUN' : 'DEX_5M')
     }));
 
     const formattedLogs = (s.scannerLogs || []).map(l =>
@@ -248,7 +249,8 @@ export async function handleApiRoutes(
       txUrl: t.txSignature ? `https://solscan.io/tx/${t.txSignature}` : null,
       closedAt: t.exitTimestamp,
       dexScreenerUrl: t.dexScreenerUrl,
-      solscanUrl: t.solscanUrl
+      solscanUrl: t.solscanUrl,
+      strategy: (t as any).strategy || (t.mint.toLowerCase().endsWith('pump') ? 'PUMP_FUN' : 'DEX_5M')
     }));
 
     // Auditorias recentes: probes, aprovações e falhas de swap.
@@ -301,6 +303,18 @@ export async function handleApiRoutes(
       walletHoldings: s.walletHoldings || [],
       totalRealizedPnlSol: s.totalRealizedPnlSol,
       totalNetworkFeesSolEst: s.totalNetworkFeesSolEst,
+      strategySummary: {
+        pumpFun: {
+          activeCount: formattedPositions.filter(p => p.strategy === 'PUMP_FUN').length,
+          closedCount: formattedClosedTrades.filter(t => t.strategy === 'PUMP_FUN').length,
+          pnlSol: Number(formattedClosedTrades.filter(t => t.strategy === 'PUMP_FUN').reduce((a, t) => a + t.realizedPnlSol, 0).toFixed(6))
+        },
+        dex5m: {
+          activeCount: formattedPositions.filter(p => p.strategy === 'DEX_5M').length,
+          closedCount: formattedClosedTrades.filter(t => t.strategy === 'DEX_5M').length,
+          pnlSol: Number(formattedClosedTrades.filter(t => t.strategy === 'DEX_5M').reduce((a, t) => a + t.realizedPnlSol, 0).toFixed(6))
+        }
+      },
       operational: {
         executionMode: s.dryRun ? 'DRY_RUN' : 'REAL_ON_CHAIN',
         maintenanceMode: Boolean(s.maintenanceMode),

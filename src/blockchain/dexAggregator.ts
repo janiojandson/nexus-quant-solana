@@ -99,8 +99,13 @@ export class DexAggregatorService {
     config: DexAggregatorConfig = {}
   ) {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl.replace(/\/$/, '');
-    const rawKeys = process.env.JUPITER_API_KEYS || config.apiKey || process.env.JUPITER_API_KEY || '';
-    this.apiKeys = rawKeys.split(',').map(k => k.trim()).filter(Boolean);
+    const pluralKeys = (process.env.JUPITER_API_KEYS || '').split(',');
+    const singularKeys = (process.env.JUPITER_API_KEY || '').split(',');
+    const configKeys = (config.apiKey || '').split(',');
+    const allParsed = [...pluralKeys, ...singularKeys, ...configKeys]
+      .map(k => k.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean);
+    this.apiKeys = Array.from(new Set(allParsed));
     this.apiKey = this.apiKeys[0];
     const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
     const keyCount = Math.max(1, this.apiKeys.length);
@@ -117,6 +122,10 @@ export class DexAggregatorService {
         : getGlobalJupiterTrafficCoordinator());
     this.cacheTtlMs = config.cacheTtlMs ??
       (isTestEndpoint ? 0 : Number(process.env.JUPITER_QUOTE_CACHE_TTL_MS || 750));
+
+    if (this.apiKeys.length > 0 && !isTestEndpoint) {
+      console.log(`🔑 [DexAggregator] ${this.apiKeys.length} chave(s) Jupiter API registradas (Rate-limit: ${this.rateLimitMs}ms por slot)`);
+    }
   }
 
   public getNextApiKey(): string | undefined {

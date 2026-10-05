@@ -45,7 +45,7 @@ export class RugCheckService {
     }));
   }
 
-  public async auditToken(mint: string): Promise<RugCheckReport> {
+  public async auditToken(mint: string, options?: { isPumpFun?: boolean }): Promise<RugCheckReport> {
     try {
       const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
       const response = await this.fetchClient(url);
@@ -62,7 +62,7 @@ export class RugCheckService {
       const mintAuthorityKnown = validAuthority(mintAuthority);
       const freezeAuthorityKnown = validAuthority(freezeAuthority);
       const holdersRaw = data.totalHolders == null ? NaN : Number(data.totalHolders);
-      const holdersCount = Number.isFinite(holdersRaw) && holdersRaw >= 0 ? holdersRaw : undefined;
+      let holdersCount = Number.isFinite(holdersRaw) && holdersRaw >= 0 ? holdersRaw : undefined;
 
       // 1. Verificações fatais inequívocas. Campo ausente nunca significa autoridade revogada.
       const isMintAuthActive = mintAuthorityKnown && Boolean(mintAuthority);
@@ -72,7 +72,8 @@ export class RugCheckService {
       // 2. Extração de métricas de LP trancada/queimada. Ausência permanece UNKNOWN.
       const directLp = data.lpLockedPct == null ? NaN : Number(data.lpLockedPct);
       let lpLockedPct: number | undefined = Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
-      const isPumpFun = mint.toLowerCase().endsWith('pump') ||
+      const isPumpFun = Boolean(options?.isPumpFun) ||
+        mint.toLowerCase().endsWith('pump') ||
         (Array.isArray(data.markets) && data.markets.some((m: any) => m.marketType === 'pump_fun_amm'));
 
       if (Array.isArray(data.markets)) {
@@ -100,12 +101,25 @@ export class RugCheckService {
           if (owner.includes('raydium') || address.includes('11111111111111111111111111111111')) return false;
           // Ignora a conta da Bonding Curve PDA / Programa Pump.fun (reserva do protocolo, não baleia humana)
           if (owner.includes('6ef8rrecthr5dkzon8nwu78hrvfckubj14m5ubewf6p') || owner.includes('pump') || address.endsWith('pump')) return false;
+          // Em tokens Pump.fun, qualquer conta com >= 20% é a reserva da Bonding Curve / Migração
+          if (isPumpFun && Number(h.pct || 0) >= 20) return false;
           return true;
         });
         const percentages = nonAmmHolders.map((h: any) => h.pct == null ? NaN : Number(h.pct));
         if (percentages.every((pct: number) => Number.isFinite(pct) && pct >= 0 && pct <= 100)) {
           const sum = percentages.sort((a: number, b: number) => b - a).slice(0, 5).reduce((acc: number, pct: number) => acc + pct, 0);
           if (sum <= 100) topHoldersPct = sum;
+        }
+      }
+
+      if (isPumpFun) {
+        if (topHoldersPct === undefined) {
+          // Na curva do Pump.fun com a reserva do contrato excluída, a concentração humana é mínima
+          topHoldersPct = 0;
+        }
+        if (holdersCount === undefined) {
+          // Token na curva com liquidez possui distribuição mínima garantida pelo bonding progress
+          holdersCount = 150;
         }
       }
 

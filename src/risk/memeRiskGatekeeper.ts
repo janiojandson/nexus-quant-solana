@@ -17,6 +17,7 @@ export interface TokenSecurityMetadata {
   volumeSellsM5?: number;
   priceUsd?: number;
   h1HighPriceUsd?: number;
+  isPumpFun?: boolean;
 }
 
 export interface MomentumValidationResult {
@@ -154,7 +155,8 @@ export class MemeRiskGatekeeper {
     }
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
-    const rugReport = await this.rugCheckService.auditToken(token.mint);
+    const isPump = Boolean(token.isPumpFun || (token.mint && token.mint.toLowerCase().endsWith('pump')));
+    const rugReport = await this.rugCheckService.auditToken(token.mint, { isPumpFun: isPump });
     if (!rugReport.isSafe) {
       return {
       rugCheckReport: rugReport,

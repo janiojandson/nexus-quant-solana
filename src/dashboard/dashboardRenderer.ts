@@ -15,6 +15,7 @@ export interface ClosedTradeView {
   txSignature?: string;
   dexScreenerUrl: string;
   solscanUrl: string;
+  strategy?: 'PUMP_FUN' | 'DEX_5M';
 }
 
 export interface WalletHoldingView {
@@ -151,6 +152,7 @@ export interface DashboardState {
     breakEvenPct?: number;
     netPnlPct?: number;
     isNetProfit?: boolean;
+    strategy?: 'PUMP_FUN' | 'DEX_5M';
   }>;
   walletHoldings?: WalletHoldingView[];
   closedTrades: ClosedTradeView[];
@@ -348,10 +350,19 @@ function renderClosedTradesSection(state: DashboardState): string {
   const realizedPnl = trades.reduce((acc, t) => acc + (t.pnlSolEst || 0), 0);
   const wins = trades.filter(t => (t.pnlPct || 0) > 0).length;
 
+  const pumpTrades = trades.filter(t => t.strategy === 'PUMP_FUN' || t.mint.toLowerCase().endsWith('pump'));
+  const dexTrades = trades.filter(t => !(t.strategy === 'PUMP_FUN' || t.mint.toLowerCase().endsWith('pump')));
+  const pumpPnl = pumpTrades.reduce((acc, t) => acc + (t.pnlSolEst || 0), 0);
+  const dexPnl = dexTrades.reduce((acc, t) => acc + (t.pnlSolEst || 0), 0);
+
   const rows = trades.slice().reverse().map(t => {
     const pnlPct = Number(t.pnlPct || 0) * 100;
     const pnlSol = Number(t.pnlSolEst || 0);
     const isProfit = pnlPct >= 0;
+    const isPump = t.strategy === 'PUMP_FUN' || t.mint.toLowerCase().endsWith('pump');
+    const stratBadge = isPump
+      ? '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-purple-950/80 text-purple-300 border border-purple-600/40">🚀 PUMP</span>'
+      : '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-blue-950/80 text-blue-300 border border-blue-600/40">⏱️ DEX 5M</span>';
     const reason = EXIT_REASON_LABELS[t.exitReason] || { label: t.exitReason, cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' };
     const closedAt = new Date(t.exitTimestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
     const txLink = t.txSignature
@@ -364,6 +375,7 @@ function renderClosedTradesSection(state: DashboardState): string {
         <td class="py-3 px-4">
           <div class="flex items-center gap-2">
             <span class="font-semibold text-slate-200">${t.symbol}</span>
+            ${stratBadge}
             <a href="https://solscan.io/token/${t.mint}" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>
           </div>
           <div class="text-[11px] text-slate-500 font-mono">${t.mint.slice(0, 6)}...${t.mint.slice(-4)}</div>
@@ -393,8 +405,14 @@ function renderClosedTradesSection(state: DashboardState): string {
           <span>📜 Histórico de Trades Fechados</span>
           <span id="closed-trades-badge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">${trades.length} trade(s)</span>
         </h2>
-        <div class="flex items-center gap-4 text-xs font-mono">
-          <span class="text-slate-400">PnL realizado:
+        <div class="flex items-center gap-3 text-xs font-mono flex-wrap">
+          <span id="pump-trades-stat" class="px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800/40 text-purple-300">
+            🚀 Pump.fun: <b>${pumpTrades.length}</b> | PnL: <b class="${pumpPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${pumpPnl >= 0 ? '+' : ''}${pumpPnl.toFixed(4)} SOL</b>
+          </span>
+          <span id="dex-trades-stat" class="px-2 py-0.5 rounded bg-blue-950/60 border border-blue-800/40 text-blue-300">
+            ⏱️ DEX 5m: <b>${dexTrades.length}</b> | PnL: <b class="${dexPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${dexPnl >= 0 ? '+' : ''}${dexPnl.toFixed(4)} SOL</b>
+          </span>
+          <span class="text-slate-400">Total:
             <span id="closed-trades-pnl" class="${realizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'} font-bold">${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(6)} SOL</span>
           </span>
           <span class="text-slate-400">Acerto: <span id="closed-trades-win" class="text-cyan-400 font-bold">${wins}/${trades.length}</span></span>
@@ -625,15 +643,25 @@ export function renderDashboardHtml(state: DashboardState): string {
 
     <!-- TABELA DE POSIÇÕES ATIVAS MONITORADAS -->
     <section class="bg-slate-900/70 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-      <div class="p-4 md:px-6 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/90">
-        <div>
-          <h2 class="text-base md:text-lg font-bold text-white flex items-center gap-2">
-            <span>⚡ Posições Ativas sob Gestão</span>
-            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
-              ${state.positions.length} / 2
+      <div class="p-4 md:px-6 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/90 flex-wrap gap-3">
+        <div class="flex items-center gap-3 flex-wrap">
+          <div>
+            <h2 class="text-base md:text-lg font-bold text-white flex items-center gap-2">
+              <span>⚡ Posições Ativas sob Gestão</span>
+              <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
+                ${state.positions.length} / 2
+              </span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · DexScreener referência · SL inicial: -12.5% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
+          </div>
+          <div class="flex items-center gap-2 text-xs font-mono ml-auto">
+            <span id="active-pump-badge" class="px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800/40 text-purple-300">
+              🚀 Pump: <b>${state.positions.filter(p => p.strategy === 'PUMP_FUN' || p.mint.toLowerCase().endsWith('pump')).length}</b>
             </span>
-          </h2>
-          <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · DexScreener referência · SL inicial: -12.5% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
+            <span id="active-dex-badge" class="px-2 py-0.5 rounded bg-blue-950/60 border border-blue-800/40 text-blue-300">
+              ⏱️ DEX 5m: <b>${state.positions.filter(p => !(p.strategy === 'PUMP_FUN' || p.mint.toLowerCase().endsWith('pump'))).length}</b>
+            </span>
+          </div>
         </div>
         <button id="sweep-rent-button" disabled onclick="sweepRentManual()" title="Requer sessão ADMIN." class="admin-action text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
           <span>🧹</span>
@@ -664,11 +692,16 @@ export function renderDashboardHtml(state: DashboardState): string {
             ` : state.positions.map(p => {
               const pnlVal = Number(p.pnlPct || 0);
               const isProfit = pnlVal >= 0;
+              const isPump = p.strategy === 'PUMP_FUN' || p.mint.toLowerCase().endsWith('pump');
+              const stratBadge = isPump
+                ? '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-purple-950/80 text-purple-300 border border-purple-600/40">🚀 PUMP</span>'
+                : '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-blue-950/80 text-blue-300 border border-blue-600/40">⏱️ DEX 5M</span>';
               return `
               <tr id="pos-row-${p.mint}" class="hover:bg-slate-800/30 transition">
                 <td class="py-4 px-4 md:px-6 font-sans">
                   <div class="font-bold text-white flex items-center gap-2">
                     <span>${p.symbol}</span>
+                    ${stratBadge}
                     <a href="https://solscan.io/token/${p.mint}" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>
                   </div>
                   <div class="text-[11px] text-slate-400 font-mono">${p.mint.slice(0, 6)}...${p.mint.slice(-4)}</div>
@@ -1317,10 +1350,16 @@ export function renderDashboardHtml(state: DashboardState): string {
                   ? '<span class="inline-block text-[11px] text-emerald-400 font-bold px-2 py-1 bg-emerald-950/60 rounded border border-emerald-700/60 mr-2">50% Feita ✅</span>'
                   : '<button disabled data-admin-action="true" onclick="partialExitToken(&quot;' + p.mint + '&quot;, &quot;' + (p.symbol || '').replace(/"/g, '') + '&quot;)" title="Requer sessão ADMIN. Executar parcial de 50% a mercado." class="admin-action bg-emerald-900/80 hover:bg-emerald-700 text-emerald-200 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-emerald-600 mr-2 transition cursor-not-allowed">Parcial 50% 💰</button>';
 
+                var isPump = p.strategy === 'PUMP_FUN' || (p.mint && p.mint.toLowerCase().endsWith('pump'));
+                var stratBadge = isPump
+                  ? '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-purple-950/80 text-purple-300 border border-purple-600/40">🚀 PUMP</span>'
+                  : '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-blue-950/80 text-blue-300 border border-blue-600/40">⏱️ DEX 5M</span>';
+
                 return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +
                   '<td class="py-4 px-4 md:px-6 font-sans">' +
                     '<div class="font-bold text-white flex items-center gap-2">' +
                       '<span>' + p.symbol + '</span>' +
+                      stratBadge +
                       '<a href="https://solscan.io/token/' + p.mint + '" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a>' +
                     '</div>' +
                     '<div class="text-[11px] text-slate-400 font-mono">' + p.mint.slice(0, 6) + '...' + p.mint.slice(-4) + '</div>' +
@@ -1352,6 +1391,18 @@ export function renderDashboardHtml(state: DashboardState): string {
           }
         }
 
+        // Atualiza contadores de estratégia no cabeçalho das posições ativas
+        const activePumpEl = document.getElementById('active-pump-badge');
+        const activeDexEl = document.getElementById('active-dex-badge');
+        if (activePumpEl) {
+          var pCount = positions.filter(function(p) { return p.strategy === 'PUMP_FUN' || (p.mint && p.mint.toLowerCase().endsWith('pump')); }).length;
+          activePumpEl.innerHTML = '🚀 Pump: <b>' + pCount + '</b>';
+        }
+        if (activeDexEl) {
+          var dCount = positions.filter(function(p) { return !(p.strategy === 'PUMP_FUN' || (p.mint && p.mint.toLowerCase().endsWith('pump'))); }).length;
+          activeDexEl.innerHTML = '⏱️ DEX 5m: <b>' + dCount + '</b>';
+        }
+
         // 5. Atualiza Histórico de Trades Fechados
         const closed = (data.closedTrades || []).slice().reverse();
         const tradesTbody = document.getElementById('closed-trades-tbody');
@@ -1367,6 +1418,20 @@ export function renderDashboardHtml(state: DashboardState): string {
             tradesPnl.className = (totalPnl >= 0 ? 'text-emerald-400' : 'text-rose-400') + ' font-bold';
           }
           if (tradesWin) tradesWin.textContent = wins + '/' + closed.length;
+
+          const pumpTrades = closed.filter(function (t) { return t.strategy === 'PUMP_FUN' || (t.mint && t.mint.toLowerCase().endsWith('pump')); });
+          const dexTrades = closed.filter(function (t) { return !(t.strategy === 'PUMP_FUN' || (t.mint && t.mint.toLowerCase().endsWith('pump'))); });
+          const pumpPnl = pumpTrades.reduce(function (a, t) { return a + Number(t.realizedPnlSol || 0); }, 0);
+          const dexPnl = dexTrades.reduce(function (a, t) { return a + Number(t.realizedPnlSol || 0); }, 0);
+
+          const pumpStatEl = document.getElementById('pump-trades-stat');
+          const dexStatEl = document.getElementById('dex-trades-stat');
+          if (pumpStatEl) {
+            pumpStatEl.innerHTML = '🚀 Pump.fun: <b>' + pumpTrades.length + '</b> | PnL: <b class="' + (pumpPnl >= 0 ? 'text-emerald-400' : 'text-rose-400') + '">' + (pumpPnl >= 0 ? '+' : '') + pumpPnl.toFixed(4) + ' SOL</b>';
+          }
+          if (dexStatEl) {
+            dexStatEl.innerHTML = '⏱️ DEX 5m: <b>' + dexTrades.length + '</b> | PnL: <b class="' + (dexPnl >= 0 ? 'text-emerald-400' : 'text-rose-400') + '">' + (dexPnl >= 0 ? '+' : '') + dexPnl.toFixed(4) + ' SOL</b>';
+          }
         }
         if (tradesTbody) {
           if (closed.length === 0) {
@@ -1386,6 +1451,10 @@ export function renderDashboardHtml(state: DashboardState): string {
               var pnlPct = Number(t.pnlPct || 0);
               var pnlSol = Number(t.realizedPnlSol || 0);
               var isProfit = pnlPct >= 0;
+              var isPump = t.strategy === 'PUMP_FUN' || (t.mint && t.mint.toLowerCase().endsWith('pump'));
+              var stratBadge = isPump
+                ? '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-purple-950/80 text-purple-300 border border-purple-600/40">🚀 PUMP</span>'
+                : '<span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-semibold bg-blue-950/80 text-blue-300 border border-blue-600/40">⏱️ DEX 5M</span>';
               var r = reasonLabels[t.exitReason] || [t.exitReason, 'bg-slate-500/15 text-slate-300 border-slate-500/30'];
               var tx = t.txSignature
                 ? '<a href="https://solscan.io/tx/' + t.txSignature + '" target="_blank" class="text-cyan-400 hover:underline font-mono text-[11px]">' + String(t.txSignature).slice(0, 10) + '...↗</a>'
@@ -1396,6 +1465,7 @@ export function renderDashboardHtml(state: DashboardState): string {
                 '<td class="py-3 px-4 text-slate-400 text-xs font-mono whitespace-nowrap">' + when + '</td>' +
                 '<td class="py-3 px-4">' +
                   '<div class="flex items-center gap-2"><span class="font-semibold text-slate-200">' + t.symbol + '</span>' +
+                  stratBadge +
                   '<a href="https://solscan.io/token/' + t.mint + '" target="_blank" class="text-xs text-cyan-400 hover:underline">↗</a></div>' +
                   '<div class="text-[11px] text-slate-500 font-mono">' + String(t.mint).slice(0, 6) + '...' + String(t.mint).slice(-4) + '</div>' +
                 '</td>' +

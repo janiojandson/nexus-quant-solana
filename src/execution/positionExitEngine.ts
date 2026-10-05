@@ -35,6 +35,7 @@ export interface PositionTracking {
   breakEvenPct?: number;
   netPnlPct?: number;
   isNetProfit?: boolean;
+  strategy?: 'DEX_5M' | 'PUMP_FUN';
 }
 
 export interface PositionInput extends Omit<PositionTracking, 'stopLossPct' | 'takeProfitPct'> {
@@ -69,6 +70,7 @@ export interface ClosedTrade {
   exitReason: 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'MANUAL_PARTIAL_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL' | 'LAYA_EXIT' | 'WATCHDOG_EXIT' | 'HOLD';
   txSignature?: string;
   pnlSolEst?: number;
+  strategy?: 'DEX_5M' | 'PUMP_FUN';
 }
 
 export interface ExitSignal {

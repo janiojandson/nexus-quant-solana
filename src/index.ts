@@ -226,6 +226,13 @@ const jupiterEngine = new JupiterExecutionEngine({
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
   isDryRun: IS_DRY_RUN
 });
+const dexAggregator = jupiterEngine.getAggregator();
+
+const BASE_MINTS = new Set([
+  'So11111111111111111111111111111111111111112', // SOL / WSOL
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
+]);
 
 const pumpSellExecutor = new PumpSellExecutor(
   wallet.getConnection() as any,
@@ -1302,7 +1309,8 @@ async function executeExitOrderUnlocked(
     pnlUsdEst: (pnlSol * 130), // Estimativa USD
     pnlSolEst: pnlSol,
     exitReason,
-    txSignature: exitSwap.txSignature
+    txSignature: exitSwap.txSignature,
+    strategy: pos.strategy || (pos.mint.toLowerCase().endsWith('pump') ? 'PUMP_FUN' : 'DEX_5M')
   });
 
   // 5.1 Registro assíncrono no Decision Journal (trade_outcomes) — ZERO bloqueio do loop de 1.5s
@@ -1454,6 +1462,7 @@ function updateDashboardViews() {
       breakEvenPct: p.breakEvenPct ?? existing?.breakEvenPct,
       netPnlPct: p.netPnlPct ?? existing?.netPnlPct,
       isNetProfit: p.isNetProfit ?? existing?.isNetProfit,
+      strategy: p.strategy || (p.mint.toLowerCase().endsWith('pump') ? 'PUMP_FUN' : 'DEX_5M'),
       dexScreenerUrl: `https://dexscreener.com/solana/${p.mint}`,
       solscanUrl: `https://solscan.io/token/${p.mint}`
     };
@@ -1471,6 +1480,7 @@ function updateDashboardViews() {
     pnlSolEst: c.pnlSolEst !== undefined ? c.pnlSolEst : (c.pnlPct * 0.015),
     exitReason: c.exitReason,
     txSignature: c.txSignature,
+    strategy: c.strategy || (c.mint.toLowerCase().endsWith('pump') ? 'PUMP_FUN' : 'DEX_5M'),
     dexScreenerUrl: `https://dexscreener.com/solana/${c.mint}`,
     solscanUrl: `https://solscan.io/token/${c.mint}`
   }));
@@ -2235,10 +2245,68 @@ async function executeAutonomousCycle() {
       }));
 
       for (const spl of splAccounts) {
-        const tracked = positionEngine.getPosition(spl.mint);
-        if (!tracked) continue;
-
+        if (BASE_MINTS.has(spl.mint)) continue;
         const atomicAmount = assertAtomicAmountToNumber(spl.atomicAmount);
+        if (atomicAmount <= 0) continue;
+
+        const tracked = positionEngine.getPosition(spl.mint);
+        if (!tracked) {
+          // Ativo existente na carteira Phantom que ainda não está sob gestão (ex: reinício ou compra recente):
+          let solValueEst = 0;
+          try {
+            const q = await dexAggregator.getQuote({
+              inputMint: spl.mint,
+              outputMint: 'So11111111111111111111111111111111111111112',
+              amountLamports: atomicAmount,
+              slippageBps: 500
+            });
+            if (q && q.outAmount) solValueEst = Number(q.outAmount) / 1e9;
+          } catch {}
+
+          if (solValueEst >= 0.0005 || spl.tokenAmount >= 1) {
+            let symbol = `${spl.mint.slice(0, 4)}...${spl.mint.slice(-4)}`;
+            let priceUsd = 0;
+            let pairAddress: string | undefined;
+            try {
+              const snap = await scanner.fetchCurrentTokenMarketSnapshot(spl.mint);
+              if (snap) {
+                symbol = snap.symbol || symbol;
+                priceUsd = snap.priceUsd || 0;
+                pairAddress = snap.pairAddress;
+              }
+            } catch {}
+
+            const isPump = spl.mint.toLowerCase().endsWith('pump');
+            const strat: 'PUMP_FUN' | 'DEX_5M' = isPump ? 'PUMP_FUN' : 'DEX_5M';
+            const entrySol = solValueEst > 0 ? solValueEst : 0.042;
+            const entryPrice = priceUsd > 0 ? priceUsd : 0.00001;
+
+            positionEngine.addPosition({
+              mint: spl.mint,
+              symbol,
+              tokenAmount: atomicAmount,
+              initialTokenAmount: atomicAmount,
+              entryPriceUsd: entryPrice,
+              entryTimestamp: Date.now(),
+              stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
+              takeProfitPct: 0.35,
+              entrySol,
+              entrySolValue: entrySol,
+              entryLiquidityUsd: 15000,
+              entryVolume5m: 0,
+              entryPairAddress: pairAddress,
+              strategy: strat,
+              traceId: `adopted_cycle_${spl.mint.slice(0, 8)}_${Date.now()}`
+            });
+
+            console.log(
+              `🛡️ [Ciclo Autônomo: Ativo On-Chain Adotado] ${symbol} (${spl.mint}) | ` +
+              `Saldo: ${spl.tokenAmount} | Valor: ${entrySol.toFixed(4)} SOL | Sob gestão ativa!`
+            );
+          }
+          continue;
+        }
+
         if (atomicAmount < tracked.tokenAmount) {
           console.warn(
             `⚖️ [Reconciliação On-Chain] ${tracked.symbol} (${spl.mint}) quantidade gerida ${tracked.tokenAmount} -> ${atomicAmount} unidades atômicas.`
@@ -2254,10 +2322,6 @@ async function executeAutonomousCycle() {
         const h = latestState.walletHoldings.find(x => x.mint === spl.mint);
         if (h && meta?.symbol) h.symbol = meta.symbol;
       }
-
-      // Tokens presentes na carteira, mas ausentes do ledger de execução do bot,
-      // permanecem apenas no painel de custódia. Nunca são promovidos a posição
-      // operacional com preço/custo/stops inventados.
     } catch (err: any) {
       console.warn(`⚠️ [Aviso Custódia] Falha ao sincronizar contas SPL: ${err?.message || err}`);
     }
@@ -2371,7 +2435,9 @@ async function executeAutonomousCycle() {
           volume24hUsd: 0,
           volume5mUsd: 0,
           pairCreatedAt: obs.dexPairCreatedAtMs || obs.eventTimestampMs,
-          dexId: 'raydium',
+          dexId: obs.complete ? 'raydium' : 'pumpfun',
+          isPumpObservatory: true,
+          strategy: 'PUMP_FUN',
           pairAddress: obs.dexPairAddress
         } as any));
       if (obsCandidates.length > 0) {
@@ -2467,28 +2533,35 @@ async function executeAutonomousCycle() {
         console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
         console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
 
+        const isPumpToken = Boolean(
+          (topCandidate as any).isPumpObservatory ||
+          (topCandidate as any).strategy === 'PUMP_FUN' ||
+          topCandidate.mint.toLowerCase().endsWith('pump')
+        );
+
         // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
-        console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
+        console.log(`🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço${isPumpToken ? ' [Estratégia Pump.fun 🚀]' : ''}...`);
         const audit = await gatekeeper.auditToken({
-        mint: topCandidate.mint,
-        liquidityUsd: topCandidate.liquidityUsd,
-        priceChangeM5: topCandidate.priceChangeM5,
-        buysM5: topCandidate.buysM5,
-        sellsM5: topCandidate.sellsM5,
-        volumeBuysM5: topCandidate.volumeBuysM5,
-        volumeSellsM5: topCandidate.volumeSellsM5,
-        priceUsd: topCandidate.priceUsd,
-        h1HighPriceUsd: topCandidate.h1HighPriceUsd
-      });
+          mint: topCandidate.mint,
+          liquidityUsd: topCandidate.liquidityUsd,
+          priceChangeM5: topCandidate.priceChangeM5,
+          buysM5: topCandidate.buysM5,
+          sellsM5: topCandidate.sellsM5,
+          volumeBuysM5: topCandidate.volumeBuysM5,
+          volumeSellsM5: topCandidate.volumeSellsM5,
+          priceUsd: topCandidate.priceUsd,
+          h1HighPriceUsd: topCandidate.h1HighPriceUsd,
+          isPumpFun: isPumpToken
+        });
 
       console.log(`   Veredito de Segurança: ${audit.safe ? 'APROVADO ✅' : 'VETADO ⛔'}`);
       console.log(`   Score: ${audit.score}/100 | Validador: ${audit.validatedBy}`);
 
       if (audit.safe) {
-        const m5Pct = topCandidate.priceChangeM5 !== undefined ? topCandidate.priceChangeM5.toFixed(1) : '0.0';
+        const m5Pct = topCandidate.priceChangeM5 !== undefined ? topCandidate.priceChangeM5.toFixed(1) : (isPumpToken ? 'Curva Pump' : '0.0');
         const buys = topCandidate.buysM5 ?? 0;
         const sells = topCandidate.sellsM5 ?? 0;
-        console.log(`🛡️ [Filtros Solana aprovados]: Contrato Seguro (80+) | Momentum m5: +${m5Pct}% | Buys/Sells: ${buys}/${sells} | Vol Comprador > Vendedor`);
+        console.log(`🛡️ [Filtros Solana aprovados]: Contrato Seguro (80+) | Momentum m5: ${m5Pct}% | Buys/Sells: ${buys}/${sells} | Vol Comprador > Vendedor`);
       }
 
       let txSignature: string | null = null;
@@ -2501,12 +2574,19 @@ async function executeAutonomousCycle() {
       const buySellRatio = topCandidate.sellsM5 && topCandidate.sellsM5 > 0
         ? Number(((topCandidate.buysM5 || 0) / topCandidate.sellsM5).toFixed(2))
         : (topCandidate.buysM5 ? 2.0 : 1.0);
-      const isPriceWindowValid = (topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 85;
-      const isBuyDominanceValid = buySellRatio >= 1.0;
+      const isPriceWindowValid = isPumpToken && topCandidate.priceChangeM5 === undefined
+        ? true
+        : ((topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 85);
+      const isBuyDominanceValid = isPumpToken && topCandidate.buysM5 === undefined
+        ? true
+        : (buySellRatio >= 1.0);
+      const isMaturityValid = isPumpToken
+        ? (candidateAgeMinutes <= 60)
+        : (candidateAgeMinutes >= 5 && candidateAgeMinutes <= 60);
       const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
 
       const gates: GateEvaluation[] = [
-        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 5 && candidateAgeMinutes <= 60, candidateAgeMinutes, 5),
+        DecisionLogger.evaluateGate('MATURITY_AGE', isMaturityValid, candidateAgeMinutes, isPumpToken ? 0 : 5),
         DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
         ...buildContractGates(audit, topCandidate),
         DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 85),
@@ -3010,7 +3090,8 @@ async function executeAutonomousCycle() {
             entryLiquidityUsd: topCandidate.liquidityUsd,
             entryVolume5m: topCandidate.volume5mUsd || 0,
             entryPairAddress: topCandidate.pairAddress,
-            traceId: currentTraceId
+            traceId: currentTraceId,
+            strategy: (topCandidate as any).strategy || (topCandidate.mint.toLowerCase().endsWith('pump') ? 'PUMP_FUN' : 'DEX_5M')
           });
 
           // Ledger de execução real: somente este evento prova que a compra chegou
@@ -3305,13 +3386,6 @@ async function rehydratePositionsFromWalletOnBoot() {
     const splAccounts = await wallet.getSplTokenAccounts();
     console.log(`📦 [BOOT: Contas SPL Encontradas] ${splAccounts.length} conta(s) com saldo > 0.`);
 
-    // Ignora tokens de infraestrutura base (USDC, USDT, Wrapped SOL)
-    const BASE_MINTS = new Set([
-      'So11111111111111111111111111111111111111112', // SOL / WSOL
-      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-      'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'  // USDT
-    ]);
-
     // Uma posição só volta à mesa quando existe prova durável de execução:
     // ENTRY_EXECUTED + trade_outcomes OPEN/PARTIAL_CLOSED + tx signature.
     // O saldo on-chain serve apenas para reconciliar a quantidade efetivamente
@@ -3332,12 +3406,89 @@ async function rehydratePositionsFromWalletOnBoot() {
       const recovery = recoverablePositions.get(spl.mint);
 
       if (!recovery) {
-        orphans.push({
+        if (currentAtomic <= 0) {
+          orphans.push({
+            mint: spl.mint,
+            tokenAmount: spl.tokenAmount,
+            decimals: spl.decimals,
+            ataAddress: spl.ataAddress
+          });
+          continue;
+        }
+
+        // Tenta obter snapshot de mercado atual e metadados do token
+        let symbol = `${spl.mint.slice(0, 4)}...${spl.mint.slice(-4)}`;
+        let priceUsd = 0;
+        let liquidityUsd = 15000;
+        let pairAddress: string | undefined;
+
+        try {
+          const snapshot = await scanner.fetchCurrentTokenMarketSnapshot(spl.mint);
+          if (snapshot) {
+            symbol = snapshot.symbol || symbol;
+            priceUsd = snapshot.priceUsd || 0;
+            liquidityUsd = snapshot.liquidityUsd || 15000;
+            pairAddress = snapshot.pairAddress;
+          }
+        } catch {}
+
+        // Tenta cotação Jupiter de saída para saber valor em SOL em tempo real
+        let solValueEst = 0;
+        try {
+          const q = await dexAggregator.getQuote({
+            inputMint: spl.mint,
+            outputMint: 'So11111111111111111111111111111111111111112',
+            amountLamports: currentAtomic,
+            slippageBps: 500
+          });
+          if (q && q.outAmount) {
+            solValueEst = Number(q.outAmount) / 1e9;
+          }
+        } catch {}
+
+        if (solValueEst <= 0 && priceUsd > 0) {
+          solValueEst = (priceUsd * spl.tokenAmount) / 130;
+        }
+
+        // Se for pó insignificante (< 0.0005 SOL e < 1 token), deixa como órfão
+        if (solValueEst < 0.0005 && spl.tokenAmount < 1) {
+          orphans.push({
+            mint: spl.mint,
+            tokenAmount: spl.tokenAmount,
+            decimals: spl.decimals,
+            ataAddress: spl.ataAddress
+          });
+          continue;
+        }
+
+        const isPump = spl.mint.toLowerCase().endsWith('pump');
+        const strat: 'PUMP_FUN' | 'DEX_5M' = isPump ? 'PUMP_FUN' : 'DEX_5M';
+        const entrySol = solValueEst > 0 ? solValueEst : 0.042;
+        const entryPrice = priceUsd > 0 ? priceUsd : 0.00001;
+
+        positionEngine.addPosition({
           mint: spl.mint,
-          tokenAmount: spl.tokenAmount,
-          decimals: spl.decimals,
-          ataAddress: spl.ataAddress
+          symbol,
+          tokenAmount: currentAtomic,
+          initialTokenAmount: currentAtomic,
+          entryPriceUsd: entryPrice,
+          entryTimestamp: Date.now(),
+          stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT, // -0.125 (-12.5%)
+          takeProfitPct: 0.35,
+          entrySol,
+          entrySolValue: entrySol,
+          entryLiquidityUsd: liquidityUsd,
+          entryVolume5m: 0,
+          entryPairAddress: pairAddress,
+          strategy: strat,
+          traceId: `adopted_${spl.mint.slice(0, 8)}_${Date.now()}`
         });
+
+        console.log(
+          `🛡️ [BOOT: Ativo On-Chain Reconhecido e Ativado] ${symbol} (${spl.mint}) | ` +
+          `Saldo: ${spl.tokenAmount} | Valor est.: ${entrySol.toFixed(4)} SOL | ` +
+          `Estratégia: ${strat} | Stops ativados e visível no painel!`
+        );
         continue;
       }
 

@@ -132,8 +132,13 @@ export class JupiterExecutionEngine {
     this.dexAggregator = config.dexAggregator || new DexAggregatorService();
     this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
     this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
-    const rawKeys = process.env.JUPITER_API_KEYS || config.apiKey || process.env.JUPITER_API_KEY || '';
-    this.apiKeys = rawKeys.split(',').map(k => k.trim()).filter(Boolean);
+    const pluralKeys = (process.env.JUPITER_API_KEYS || '').split(',');
+    const singularKeys = (process.env.JUPITER_API_KEY || '').split(',');
+    const configKeys = (config.apiKey || '').split(',');
+    const allParsed = [...pluralKeys, ...singularKeys, ...configKeys]
+      .map(k => k.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean);
+    this.apiKeys = Array.from(new Set(allParsed));
     if (!this.apiKey && this.apiKeys.length > 0) this.apiKey = this.apiKeys[0];
     this.v2BaseUrl = (
       config.v2BaseUrl ||
