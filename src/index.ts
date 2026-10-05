@@ -59,6 +59,7 @@ import {
 import type { SwapExecutionResponse } from './blockchain/jupiterExecutionEngine.js';
 import { PostgresJournalRepository } from './journal/postgresRepository.js';
 import { PostgresPositionRepository } from './position/postgresPositionRepository.js';
+import { applyV2Migrations } from './database/v2MigrationsSql.js';
 import {
   shadowOnExitDecision,
   shadowOnFillConfirmed,
@@ -3587,22 +3588,30 @@ async function main() {
   }
 
   try {
-    // 0. Inicialização do Decision Journal & Agendamento do Cron Noturno (03:00 UTC)
-    if (isShadowJournalEnabled() || process.env.DATABASE_URL) {
-      if (!pgPool) {
-        throw new Error('PostgreSQL pool unavailable while persistence is required');
-      }
+    // 0. Inicialização do Decision Journal, Migrações DDL e Agendamento do Cron Noturno
+    if (pgPool) {
       await journal.initSchema();
-      const tableCheck = await pgPool.query(`
-        SELECT count(*)::int as count FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-          AND table_name IN ('exit_intents', 'execution_attempts', 'fill_ledger');
-      `);
-      if (Number(tableCheck.rows[0]?.count) < 3) {
-        throw new Error(`Expected durable tables (exit_intents, execution_attempts, fill_ledger) not found in schema`);
+      try {
+        await applyV2Migrations(pgPool);
+      } catch (migErr: any) {
+        console.warn('⚠️ [BOOT: Migrações] Erro ao aplicar DDL das migrações V2:', migErr?.message || migErr);
+      }
+
+      if (isShadowJournalEnabled()) {
+        const tableCheck = await pgPool.query(`
+          SELECT count(*)::int as count FROM information_schema.tables 
+          WHERE table_schema = 'public' 
+            AND table_name IN ('exit_intents', 'execution_attempts', 'fill_ledger');
+        `);
+        if (Number(tableCheck.rows[0]?.count) < 3) {
+          throw new Error(`Expected durable tables (exit_intents, execution_attempts, fill_ledger) not found in schema`);
+        }
       }
     } else {
       await journal.initSchema();
+      if (isShadowJournalEnabled()) {
+        throw new Error('PostgreSQL pool unavailable while persistence is required');
+      }
     }
 
     // Requirement 36 / Finding P1-08, P1-09, T3-P1-02:
