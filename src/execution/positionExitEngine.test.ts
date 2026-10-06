@@ -414,3 +414,52 @@ test('full protective exits precede profit partials after a pullback or liquidit
  assert.notStrictEqual(signal.type,'PARTIAL_TAKE_PROFIT_50');
  }
 });
+
+test('PositionExitEngine (4D TP Ladder): deve executar escada completa TP1 (50%), TP2 (50%) e TP3 (100% hard cap)', () => {
+  const engine = new PositionExitEngine();
+  const mint = 'LadderMint4D';
+  engine.addPosition({
+    mint,
+    symbol: 'LADDER',
+    tokenAmount: 1000,
+    entryPriceUsd: 1.0,
+    entryTimestamp: Date.now(),
+    entrySol: 0.015
+  });
+
+  // Degrau 1: +35% -> Vende 50% do total (500 tokens)
+  const tp1 = engine.evaluateExitBySol(mint, 0.02025);
+  assert.strictEqual(tp1.shouldExit, true);
+  assert.strictEqual(tp1.type, 'PARTIAL_TAKE_PROFIT_50');
+  assert.strictEqual(tp1.exitTokenAmount, 500);
+  assert.strictEqual(tp1.shouldCloseAta, false);
+  assert.ok(tp1.reasonDetail?.includes('TP_LADDER_STEP_1_35PCT'));
+  engine.commitPartialExit(mint, 500, 0.02025);
+
+  let pos = engine.getPosition(mint);
+  assert.strictEqual(pos?.highestTpStepReached, 1);
+  assert.strictEqual(pos?.tokenAmount, 500);
+  assert.strictEqual(pos?.stopLossPct, 0.01, 'Stop Loss puxado para Breakeven (+1.0%)');
+
+  // Degrau 2: +100% -> Vende 50% do saldo restante (50% de 500 = 250 tokens)
+  const tp2 = engine.evaluateExitBySol(mint, 0.0155); // PnL > +100% líquido sobre base ajustada (0.0075 SOL)
+  assert.strictEqual(tp2.shouldExit, true);
+  assert.strictEqual(tp2.type, 'PARTIAL_TAKE_PROFIT_50');
+  assert.strictEqual(tp2.exitTokenAmount, 250);
+  assert.strictEqual(tp2.shouldCloseAta, false);
+  assert.ok(tp2.reasonDetail?.includes('TP_LADDER_STEP_2_100PCT'));
+  engine.commitPartialExit(mint, 250, 0.0155);
+
+  pos = engine.getPosition(mint);
+  assert.strictEqual(pos?.highestTpStepReached, 2);
+  assert.strictEqual(pos?.tokenAmount, 250);
+
+  // Degrau 3: +300% -> Vende 100% (250 tokens) e fecha ATA (Hard Cap / Rug Prevention)
+  const tp3 = engine.evaluateExitBySol(mint, 0.0155); // PnL > +300% líquido sobre base de 0.00375 SOL
+  assert.strictEqual(tp3.shouldExit, true);
+  assert.strictEqual(tp3.type, 'TAKE_PROFIT');
+  assert.strictEqual(tp3.exitTokenAmount, 250);
+  assert.strictEqual(tp3.shouldCloseAta, true);
+  assert.ok(tp3.reasonDetail?.includes('TP_LADDER_STEP_3_300PCT'));
+});
+

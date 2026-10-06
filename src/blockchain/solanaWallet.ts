@@ -4,6 +4,7 @@ import bs58 from 'bs58';
 export interface WalletServiceConfig {
   secretKeyRaw: string;
   rpcUrl?: string;
+  rpcUrls?: string[];
 }
 
 export interface TradeValidationResult {
@@ -12,15 +13,65 @@ export interface TradeValidationResult {
   maxAllowedAllocationSol: number;
 }
 
+export function createResilientConnection(urls: string[]): Connection {
+  const sanitizedUrls = urls
+    .map(u => (u || '').trim())
+    .filter(u => u.length > 0 && (u.startsWith('http://') || u.startsWith('https://')));
+
+  const uniqueUrls = Array.from(new Set(sanitizedUrls));
+  if (uniqueUrls.length === 0) {
+    uniqueUrls.push('https://api.mainnet-beta.solana.com');
+  }
+
+  const connections = uniqueUrls.map(u => new Connection(u, 'confirmed'));
+  let counter = 0;
+  let activeIndex = 0;
+
+  return new Proxy(connections[0], {
+    get(target, prop, receiver) {
+      if (typeof (target as any)[prop] === 'function') {
+        return async (...args: any[]) => {
+          let lastErr: any;
+          const startIdx = (counter++) % connections.length;
+          for (let attempt = 0; attempt < connections.length; attempt++) {
+            const idx = (startIdx + attempt) % connections.length;
+            const conn = connections[idx];
+            try {
+              const res = await (conn as any)[prop](...args);
+              activeIndex = idx;
+              return res;
+            } catch (err: any) {
+              lastErr = err;
+              if (connections.length > 1) {
+                console.warn(`[SolanaRPC] Falha/Limite no RPC ${uniqueUrls[idx].split('?')[0]} (${err?.message || err}). Alternando para próximo endpoint...`);
+              } else {
+                throw err;
+              }
+            }
+          }
+          throw lastErr;
+        };
+      }
+      return Reflect.get(connections[activeIndex], prop, receiver);
+    }
+  });
+}
+
 export class SolanaWalletService {
   private keypair: Keypair;
   private connection: Connection;
+  private lastKnownBalanceSol: number = 0;
   public static readonly MAX_TRADE_ALLOCATION_RATIO = 0.10; // Teto de 10%
   public static readonly MIN_GAS_RESERVE_SOL = 0.005; // Reserva intangível para taxas
 
   constructor(config: WalletServiceConfig) {
     this.keypair = this.parseKeypair(config.secretKeyRaw);
-    this.connection = new Connection(config.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
+    const candidateUrls = [
+      ...(config.rpcUrls || []),
+      ...(config.rpcUrl ? [config.rpcUrl] : []),
+      'https://api.mainnet-beta.solana.com'
+    ];
+    this.connection = createResilientConnection(candidateUrls);
   }
 
   private parseKeypair(raw: string): Keypair {
@@ -68,9 +119,30 @@ export class SolanaWalletService {
   public async getBalanceSol(): Promise<number> {
     try {
       const lamports = await this.connection.getBalance(this.keypair.publicKey);
-      return lamports / LAMPORTS_PER_SOL;
-    } catch {
+      const bal = lamports / LAMPORTS_PER_SOL;
+      this.lastKnownBalanceSol = bal;
+      return bal;
+    } catch (err: any) {
+      if (this.lastKnownBalanceSol > 0) {
+        console.warn(`[SolanaWallet] getBalance falhou (${err?.message || err}). Preservando último saldo conhecido: ${this.lastKnownBalanceSol.toFixed(4)} SOL`);
+        return this.lastKnownBalanceSol;
+      }
       return 0;
+    }
+  }
+
+  /**
+   * Consulta priorização de taxas dinâmicas na rede Solana
+   */
+  public async getDynamicPriorityFee(microLamportsDefault = 50_000): Promise<number> {
+    try {
+      const fees = await this.connection.getRecentPrioritizationFees();
+      if (!fees || fees.length === 0) return microLamportsDefault;
+      const sorted = fees.map(f => f.prioritizationFee).sort((a, b) => a - b);
+      const p75 = sorted[Math.floor(sorted.length * 0.75)] || microLamportsDefault;
+      return Math.max(microLamportsDefault, p75);
+    } catch {
+      return microLamportsDefault;
     }
   }
 

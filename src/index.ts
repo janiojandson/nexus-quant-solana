@@ -127,10 +127,23 @@ const exitPathHealth = new ExitPathHealth({
   emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
 });
 
+const CANDIDATE_RPC_URLS: string[] = [];
+if (process.env.HELIUS_RPC_URL) CANDIDATE_RPC_URLS.push(process.env.HELIUS_RPC_URL);
+if (process.env.HELIUS_API_KEYS) {
+  const keys = process.env.HELIUS_API_KEYS.split(/[,\s]+/).map(k => k.trim()).filter(Boolean);
+  for (const k of keys) {
+    CANDIDATE_RPC_URLS.push(`https://mainnet.helius-rpc.com/?api-key=${k}`);
+  }
+}
+if (process.env.QUICKNODE_RPC_URL) CANDIDATE_RPC_URLS.push(process.env.QUICKNODE_RPC_URL);
+if (process.env.SOLANA_RPC_URL) CANDIDATE_RPC_URLS.push(process.env.SOLANA_RPC_URL);
+CANDIDATE_RPC_URLS.push('https://api.mainnet-beta.solana.com');
+
 // Instâncias Globais dos Serviços Operacionais
 const wallet = new SolanaWalletService({
   secretKeyRaw: SECRET_KEY_RAW,
-  rpcUrl: ACTIVE_SOLANA_RPC_URL
+  rpcUrl: ACTIVE_SOLANA_RPC_URL,
+  rpcUrls: CANDIDATE_RPC_URLS
 });
 
 const rentRecovery = new RentRecoveryService(wallet.getConnection(), wallet.getKeypair());
@@ -2096,6 +2109,13 @@ async function executeAutonomousCycle() {
           
           console.log(`⏭️ Candidato #${candidateIndex + 1} falhou no dimensionamento. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
           // Não marca como processado - continua loop para próximo candidato
+          continue;
+        }
+
+        const routeSummaryLower = (sizing.quote.routePlanSummary || '').toLowerCase();
+        const routerLower = (sizing.quote.router || '').toLowerCase();
+        if (routeSummaryLower.includes('pump.fun') || routeSummaryLower.includes('pump amm') || routerLower.includes('pump')) {
+          console.warn(`🚫 [Veto de Rota] ${topCandidate.symbol}: Rota Jupiter tenta comprar via Pump.fun bonding curve. Entrada abortada (BUY Pump desabilitado; apenas DEXes com liquidez real).`);
           continue;
         }
 

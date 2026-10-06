@@ -8,7 +8,9 @@ export interface PositionTracking {
   takeProfitPct: number;  // Ex: +35% (+0.35) para colheita parcial
   entrySol?: number;      // Ex: 0.015 SOL investidos na entrada
   maxHoldDurationMs?: number; // Padrão: 15 minutos (15 * 60 * 1000)
+  highestTpStepReached?: number; // 0 = nenhum, 1 = TP1 (+35%), 2 = TP2 (+100%), 3 = TP3 (+300%)
   partialTaken?: boolean; // True quando a parcial de 50% em +35% foi executada
+  partialLevel?: number;
   initialTokenAmount?: number; // Lote original total
   // Snapshot de Entrada (Contexto Inicial da Operação):
   entrySolValue?: number;
@@ -96,6 +98,15 @@ export class PositionExitEngine {
   public static readonly DEFAULT_STOP_LOSS_PCT = -0.125;        // Initial loss trigger relative to actual entry cost.
   public static readonly BREAKEVEN_TRIGGER_PCT = 0.12;          // +12% ativa Breakeven (+1%)
   public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
+
+  // 🪜 Degraus da Escada de Realização 4D (TP Ladder)
+  public static readonly TP1_TRIGGER_PCT = 0.35;         // +35% Líquido -> Vende 50% do total
+  public static readonly TP1_SELL_FRACTION = 0.50;
+  public static readonly TP2_TRIGGER_PCT = 1.00;         // +100% Líquido -> Vende 50% do saldo restante
+  public static readonly TP2_SELL_FRACTION = 0.50;
+  public static readonly TP3_TRIGGER_PCT = 3.00;         // +300% Líquido -> Vende 100% (Hard Cap / Rug Prevention)
+  public static readonly TP3_SELL_FRACTION = 1.00;
+
   /** Proteção de momentum antes da parcial: ativa a partir de +8%. */
   public static readonly EARLY_TRAILING_TRIGGER_PCT = 0.08;
   public static readonly EARLY_TRAILING_DISTANCE = 0.06;        // aceita recuo de 6% do pico
@@ -113,12 +124,14 @@ export class PositionExitEngine {
   public getStopStatusText(mint: string): string {
     const pos = this.activePositions.get(mint);
     if (!pos) return 'Sem posição';
-    if (pos.partialTaken) {
+    const tpStep = pos.highestTpStepReached ?? (pos.partialTaken ? 1 : 0);
+    if (tpStep >= 1) {
       const peak = this.peakSolValues.get(mint) || pos.entrySol || 0.015;
       const trailSol = peak * (1 - PositionExitEngine.TRAILING_DISTANCE);
       const entrySol = pos.entrySol || 0.015;
       const trailPct = ((trailSol - entrySol) / entrySol) * 100;
-      return `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%)`;
+      const stepDesc = tpStep >= 2 ? 'TP2 Concluído' : 'TP1 Concluído';
+      return `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPct >= 0 ? '+' : ''}${trailPct.toFixed(2)}%) | ${stepDesc}`;
     }
     const peak = this.peakSolValues.get(mint) || pos.entrySol || 0.015;
     const entrySol = pos.entrySol || 0.015;
@@ -140,7 +153,9 @@ export class PositionExitEngine {
       stopLossPct: position.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
       takeProfitPct: position.takeProfitPct ?? PositionExitEngine.DEFAULT_TAKE_PROFIT_PCT,
       maxHoldDurationMs: position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS,
-      initialTokenAmount: position.initialTokenAmount || position.tokenAmount
+      initialTokenAmount: position.initialTokenAmount || position.tokenAmount,
+      highestTpStepReached: position.highestTpStepReached ?? (position.partialTaken ? 1 : 0),
+      partialTaken: Boolean(position.partialTaken || (position.highestTpStepReached && position.highestTpStepReached >= 1))
     };
     this.activePositions.set(fullPosition.mint, fullPosition);
     // Inicializa/reidrata o pico. Em restart de um runner, nunca devemos
@@ -242,7 +257,7 @@ export class PositionExitEngine {
    */
   public commitPartialExit(mint: string, tokensSold: number, currentSolValue: number): boolean {
     const position = this.activePositions.get(mint);
-    if (!position || position.partialTaken) return false;
+    if (!position) return false;
     const sold = Math.floor(tokensSold);
     if (!Number.isFinite(sold) || sold <= 0 || sold >= position.tokenAmount) return false;
 
@@ -250,12 +265,21 @@ export class PositionExitEngine {
     const remaining = tokenAmountBefore - sold;
     const remainingRatio = remaining / tokenAmountBefore;
 
+    const nextStep = (position.highestTpStepReached || 0) + 1;
+    position.highestTpStepReached = nextStep;
     position.partialTaken = true;
+    position.partialLevel = nextStep;
     position.tokenAmount = remaining;
     // O runner restante precisa carregar apenas o custo-base proporcional.
     // Sem isto, 50% dos tokens eram comparados contra 100% do SOL investido.
     position.entrySol = (position.entrySol || 0.015) * remainingRatio;
-    position.stopLossPct = 0.01;
+    
+    // Atualiza piso de proteção garantida conforme os degraus da escada
+    if (nextStep >= 2) {
+      position.stopLossPct = Math.max(position.stopLossPct, 0.25); // +25% garantido após TP2
+    } else {
+      position.stopLossPct = Math.max(position.stopLossPct, 0.01); // Breakeven (+1.0%) após TP1
+    }
     const reducedPeak = Math.max(currentSolValue, this.peakSolValues.get(mint) || 0, position.executablePeakSolValue || 0) * remainingRatio;
     this.peakSolValues.set(mint, reducedPeak);
     position.peakSolValue = reducedPeak;
@@ -446,22 +470,6 @@ export class PositionExitEngine {
       }
     }
 
-    // Alerta de Drenagem via cotação súbita em SOL (> 30% de perda imediata)
-    if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
-      const tokensToSell = Math.floor(position.tokenAmount / 2);
-
-      return {
-        shouldExit: true,
-        type: 'PARTIAL_TAKE_PROFIT_50',
-        pnlPct,
-        currentPriceUsd: currentSolValue,
-        exitTokenAmount: tokensToSell,
-        shouldCloseAta: false, // NÃO fecha ATA: 50% continuam em custódia
-        peakSolValue: currentSolValue,
-        trailingStopSolValue: currentSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE)
-      };
-    }
-
     if (pnlPct < -0.30) {
       return {
         shouldExit: true,
@@ -473,6 +481,58 @@ export class PositionExitEngine {
         peakSolValue: newPeak,
         trailingStopSolValue,
         reasonDetail: `SOLANA_SOL_DRAIN: Queda súbita de ${(Math.abs(pnlPct) * 100).toFixed(1)}% em SOL`
+      };
+    }
+
+    const tpStep = position.highestTpStepReached ?? (position.partialTaken ? 1 : 0);
+
+    // ==========================================
+    // 🪜 ESCADA DE REALIZAÇÃO 4D (TP LADDER)
+    // ==========================================
+    // TP3 (Hard Cap / Rug Prevention): +300% Líquido -> Vende 100% (encerra operação)
+    if (tpStep < 3 && pnlPct >= (PositionExitEngine.TP3_TRIGGER_PCT - 0.005)) {
+      return {
+        shouldExit: true,
+        type: 'TAKE_PROFIT',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: position.tokenAmount,
+        shouldCloseAta: true,
+        peakSolValue: newPeak,
+        trailingStopSolValue,
+        reasonDetail: 'TP_LADDER_STEP_3_300PCT: Hard Cap / Rug Prevention (+300% líquido). Liquidação de 100% do saldo restante.'
+      };
+    }
+
+    // TP2 (Lucro Massivo): +100% Líquido -> Vende 50% do saldo restante
+    if (tpStep < 2 && pnlPct >= (PositionExitEngine.TP2_TRIGGER_PCT - 0.005)) {
+      const tokensToSell = Math.floor(position.tokenAmount * PositionExitEngine.TP2_SELL_FRACTION);
+      return {
+        shouldExit: true,
+        type: 'PARTIAL_TAKE_PROFIT_50',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: tokensToSell,
+        shouldCloseAta: false,
+        peakSolValue: newPeak,
+        trailingStopSolValue,
+        reasonDetail: 'TP_LADDER_STEP_2_100PCT: Lucro Massivo (+100% líquido). Despejo de 50% do saldo restante.'
+      };
+    }
+
+    // TP1 (Colheita Parcial): +35% Líquido -> Vende 50% do saldo total
+    if (tpStep < 1 && pnlPct >= (PositionExitEngine.TP1_TRIGGER_PCT - 0.005)) {
+      const tokensToSell = Math.floor(position.tokenAmount * PositionExitEngine.TP1_SELL_FRACTION);
+      return {
+        shouldExit: true,
+        type: 'PARTIAL_TAKE_PROFIT_50',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: tokensToSell,
+        shouldCloseAta: false,
+        peakSolValue: currentSolValue,
+        trailingStopSolValue: currentSolValue * (1 - PositionExitEngine.TRAILING_DISTANCE),
+        reasonDetail: 'TP_LADDER_STEP_1_35PCT: Colheita Parcial (+35% líquido). Despejo de 50% do saldo total.'
       };
     }
 
