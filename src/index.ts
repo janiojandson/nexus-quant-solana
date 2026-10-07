@@ -36,13 +36,14 @@ import { runMaintenance } from './database/maintenanceJob.js';
 import { DailyPnlTracker } from './risk/dailyPnlTracker.js';
 import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './execution/atomicAmount.js';
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
-import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode } from './risk/solanaLayaAdapter.js';
+import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
 import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
 import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
-import { SentinelHandoffScanner, type SentinelHandoffToken } from './scanner/sentinelHandoffScanner.js';
+import { SentinelHandoffScanner, type SentinelHandoffToken, type SentinelCrossMemoryResult } from './scanner/sentinelHandoffScanner.js';
+import { BUY_AMOUNT_SOL, BUY_AMOUNT_LAMPORTS } from './config/env.js';
 
 
 dotenv.config();
@@ -1629,9 +1630,9 @@ async function executeAutonomousCycle() {
       maxPositions: MAX_CONCURRENT_POSITIONS,
       entryEquityPct: ENTRY_EQUITY_PCT,
       maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
-      maxEntrySol: MAX_TRADE_AMOUNT_SOL,
+      maxEntrySol: BUY_AMOUNT_SOL,
       maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
-      minExecutableEntrySol: MIN_EXECUTABLE_ENTRY_SOL,
+      minExecutableEntrySol: BUY_AMOUNT_SOL,
       gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
       minGasReserveSol: MIN_GAS_RESERVE_SOL,
       maxGasReserveSol: MAX_GAS_RESERVE_SOL
@@ -1753,6 +1754,30 @@ async function executeAutonomousCycle() {
     if (latestState.scannerLogs.length > 15) latestState.scannerLogs.pop();
 
     if (eligibleCandidates.length > 0) {
+      // Consulta de Memória Cruzada Sentinel: verifica histórico de graduação na bonding curve (sentinel_handoff)
+      for (const candidate of eligibleCandidates) {
+        try {
+          const cross = await sentinelHandoffScanner.checkCrossMemory(candidate.mint, (candidate as any).devWallet);
+          if (cross.found && (cross.isGraduated || (cross.layaScore !== null && cross.layaScore >= 75))) {
+            (candidate as any).sentinelCrossMemory = cross;
+            (candidate as any).hasSentinelPriorityBonus = true;
+            console.log(
+              `⚡ [Memória Cruzada Sentinel] Token ${candidate.symbol} (${candidate.mint}) reconhecido no Sentinel Handoff! ` +
+              `Status=${cross.status} LayaScore=${cross.layaScore ?? 'N/D'} | Bonificação heurística de prioridade no pipeline Jupiter concedida.`
+            );
+          }
+        } catch {
+          // Tolerante
+        }
+      }
+
+      // Prioriza candidatos reconhecidos pelo Sentinel no topo da fila
+      eligibleCandidates.sort((a, b) => {
+        const aBonus = (a as any).hasSentinelPriorityBonus ? 1 : 0;
+        const bBonus = (b as any).hasSentinelPriorityBonus ? 1 : 0;
+        return bBonus - aBonus;
+      });
+
       // PRIORIDADE 2: Fila de fallback - tenta até 3 candidatos se os primeiros falharem
       const maxCandidatesToTry = Math.min(3, eligibleCandidates.length);
       let candidateProcessed = false;
@@ -1987,21 +2012,145 @@ async function executeAutonomousCycle() {
           }
         }
 
-        // A Laya recebe os fatos depois dos hard gates, em background e somente
-        // para telemetria. A resposta não aprova, veta ou atrasa a ordem.
-        if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF') {
+        // 🧠 Laya Sistema 1: Live Gatekeeper ou Shadow
+        if (SOLANA_LAYA_TACTICAL_MODE === 'LIVE') {
           if (!audit.layaFacts) {
-            console.warn(
-              `⚠️ [Laya:Tactical:SHADOW:ENTRY] fatos ausentes para ${topCandidate.symbol}`
+            const vetoReason = 'MOTIVO: Veto por IA Laya Sentinel (Score 0 < 75 - fatos ausentes)';
+            console.warn(`⚠️ [Laya:Tactical:LIVE:ENTRY] ${topCandidate.symbol}: fatos ausentes`);
+            antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, Math.max(SCAN_INTERVAL_MS, 30_000));
+            journal.logDecision({
+              traceId: currentTraceId,
+              decision: 'ENTRY_REJECTED',
+              compositeScore: 0,
+              token: {
+                mint: topCandidate.mint,
+                tokenSymbol: topCandidate.symbol,
+                liquidityUsd: topCandidate.liquidityUsd,
+                priceUsd: topCandidate.priceUsd,
+                priceChange5mPct: topCandidate.priceChangeM5,
+                buysCount5m: topCandidate.buysM5,
+                sellsCount5m: topCandidate.sellsM5,
+                buySellRatio,
+                volume5mUsd: topCandidate.volume5mUsd
+              },
+              market: {
+                sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+                sessionHourUtc: new Date().getUTCHours(),
+                isWeekend: [0, 6].includes(new Date().getUTCDay())
+              },
+              gateEvaluations: [
+                ...gates,
+                DecisionLogger.evaluateGate('LAYA_LIVE_GATE', false, 0, 75, vetoReason)
+              ],
+              rejectionReason: vetoReason,
+              metadata: {
+                phase: 'LAYA_LIVE_GATE',
+                layaStatus: 'FAIL_MISSING_FACTS'
+              }
+            });
+            continue;
+          }
+
+          try {
+            console.log(`🧠 [Laya:Tactical:LIVE:ENTRY] Avaliando ${topCandidate.symbol} com IA Laya Sentinel...`);
+            const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
+            layaEntryTelemetry = {
+              status: 'COMPLETED',
+              mode: 'LIVE',
+              action: layaEntry.action,
+              score: layaEntry.score,
+              confidence: layaEntry.confidence,
+              abstention: layaEntry.abstention,
+              latencyMs: layaEntry.latencyMs
+            };
+
+            const layaGate = shouldBlockSolanaEntryFromLaya(layaEntry, 'LIVE');
+            if (layaGate.blocked) {
+              const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score ${layaGate.score} < 75)`;
+              console.log(
+                `🛑 [Laya:Tactical:LIVE:VETO] ${topCandidate.symbol} VETADO por Laya: action=${layaEntry.action} ` +
+                `score=${layaGate.score} latencyMs=${layaEntry.latencyMs} | ${vetoReason}`
+              );
+
+              antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, Math.max(SCAN_INTERVAL_MS, 60_000));
+              journal.logDecision({
+                traceId: currentTraceId,
+                decision: 'ENTRY_REJECTED',
+                compositeScore: layaGate.score,
+                token: {
+                  mint: topCandidate.mint,
+                  tokenSymbol: topCandidate.symbol,
+                  liquidityUsd: topCandidate.liquidityUsd,
+                  priceUsd: topCandidate.priceUsd,
+                  priceChange5mPct: topCandidate.priceChangeM5,
+                  buysCount5m: topCandidate.buysM5,
+                  sellsCount5m: topCandidate.sellsM5,
+                  buySellRatio,
+                  volume5mUsd: topCandidate.volume5mUsd
+                },
+                market: {
+                  sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
+                  sessionHourUtc: new Date().getUTCHours(),
+                  isWeekend: [0, 6].includes(new Date().getUTCDay())
+                },
+                gateEvaluations: [
+                  ...gates,
+                  DecisionLogger.evaluateGate('LAYA_LIVE_GATE', false, layaGate.score, 75, vetoReason)
+                ],
+                rejectionReason: vetoReason,
+                metadata: {
+                  phase: 'LAYA_LIVE_GATE',
+                  layaStatus: 'VETOED',
+                  layaAction: layaEntry.action,
+                  layaScore: layaGate.score,
+                  layaConfidence: layaEntry.confidence,
+                  layaAbstention: layaEntry.abstention ?? null,
+                  layaLatencyMs: layaEntry.latencyMs
+                }
+              });
+              continue;
+            }
+
+            console.log(
+              `✅ [Laya:Tactical:LIVE:APROVADO] ${topCandidate.symbol} APROVADO: action=${layaEntry.action} ` +
+              `score=${layaGate.score} latencyMs=${layaEntry.latencyMs}`
             );
-          } else {
+          } catch (layaErr: any) {
+            const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score 0 < 75 - Erro: ${layaErr?.message || layaErr})`;
+            console.warn(`🚨 [Laya:Tactical:LIVE:FAIL-CLOSED] ${topCandidate.symbol} bloqueado por erro na Laya: ${layaErr?.message || layaErr}`);
+            antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, Math.max(SCAN_INTERVAL_MS, 30_000));
+            journal.logDecision({
+              traceId: currentTraceId,
+              decision: 'ENTRY_REJECTED',
+              compositeScore: 0,
+              token: {
+                mint: topCandidate.mint,
+                tokenSymbol: topCandidate.symbol,
+                liquidityUsd: topCandidate.liquidityUsd,
+                priceUsd: topCandidate.priceUsd
+              },
+              market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
+              gateEvaluations: [
+                ...gates,
+                DecisionLogger.evaluateGate('LAYA_LIVE_GATE', false, 0, 75, vetoReason)
+              ],
+              rejectionReason: vetoReason,
+              metadata: {
+                phase: 'LAYA_LIVE_GATE',
+                layaStatus: 'FAIL_CLOSED_ERROR',
+                error: layaErr?.message || String(layaErr)
+              }
+            });
+            continue;
+          }
+        } else if (SOLANA_LAYA_TACTICAL_MODE === 'SHADOW') {
+          if (audit.layaFacts) {
             layaEntryTelemetry = { status: 'SCHEDULED', mode: 'SHADOW' };
             void solanaLayaAdapter.evaluateEntry(audit.layaFacts)
               .then(layaEntry => {
                 console.log(
                   `🧠 [Laya:Tactical:SHADOW:ENTRY] ${topCandidate.symbol} ` +
-                  `action=${layaEntry.action} confidence=${layaEntry.confidence.toFixed(4)} ` +
-                  `abstention=${layaEntry.abstention ?? 'none'} latencyMs=${layaEntry.latencyMs}`
+                  `action=${layaEntry.action} score=${layaEntry.score} confidence=${layaEntry.confidence.toFixed(4)} latencyMs=${layaEntry.latencyMs}`
                 );
               })
               .catch((layaEntryErr: any) => {
@@ -2022,7 +2171,9 @@ async function executeAutonomousCycle() {
           // Colisao calibrada pela profundidade real da pool, em vez do valor
           // fixo de 1000 USD que apertava demais o slippage em pools de 15k-100k.
           maxAutoSlippageBps: 750,
-          trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
+          trafficPriority: (topCandidate as any).hasSentinelPriorityBonus
+            ? priorityForJupiterWork('ENTRY_ORDER')
+            : priorityForJupiterWork('ENTRY_SIZING')
         };
 
         console.log(
@@ -2121,13 +2272,12 @@ async function executeAutonomousCycle() {
           continue;
         }
 
-        const dynamicAllocSol = sizing.sizeSol;
-        const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
-        console.log(`📐 Lote dimensionado e validado no pré-voo: ${dynamicAllocSol} SOL (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
+        const dynamicAllocSol = BUY_AMOUNT_SOL;
+        const tradeLamports = BUY_AMOUNT_LAMPORTS;
+        console.log(`📐 Lote equalizado e validado no pré-voo: ${dynamicAllocSol} SOL (${tradeLamports} lamports) (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
         console.log(`   Escada percorrida: ${sizing.attempts.map((a) => `${a.sizeSol}SOL(${a.accepted ? 'ok' : 'rej'})`).join(' -> ')}`);
 
-        // ENTRY_APPROVED agora significa literalmente "pronto para enviar ao Jupiter":
-        // hard gates + momentum + sizing/preflight já passaram; Laya foi apenas agendada em SHADOW.
+        // ENTRY_APPROVED pronto para enviar ao Jupiter v6 (25.000.000 lamports):
         journal.logDecision({
           traceId: currentTraceId,
           decision: 'ENTRY_APPROVED',
@@ -2976,9 +3126,9 @@ async function executeSentinelEntryCandidate(
     maxPositions: MAX_CONCURRENT_POSITIONS,
     entryEquityPct: ENTRY_EQUITY_PCT,
     maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
-    maxEntrySol: MAX_TRADE_AMOUNT_SOL,
+    maxEntrySol: BUY_AMOUNT_SOL,
     maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
-    minExecutableEntrySol: MIN_EXECUTABLE_ENTRY_SOL,
+    minExecutableEntrySol: BUY_AMOUNT_SOL,
     gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
     minGasReserveSol: MIN_GAS_RESERVE_SOL,
     maxGasReserveSol: MAX_GAS_RESERVE_SOL
@@ -2989,6 +3139,24 @@ async function executeSentinelEntryCandidate(
     return;
   }
 
+  // 🧠 Laya Live Gatekeeper para tokens do Sentinel
+  if (SOLANA_LAYA_TACTICAL_MODE === 'LIVE' && audit.layaFacts) {
+    try {
+      const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
+      const layaGate = shouldBlockSolanaEntryFromLaya(layaEntry, 'LIVE');
+      if (layaGate.blocked) {
+        const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score ${layaGate.score} < 75)`;
+        console.warn(`[SentinelHandoff] ${topCandidate.symbol} VETADO por Laya LIVE: ${vetoReason}`);
+        antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, 60 * 60 * 1000);
+        return;
+      }
+      console.log(`[SentinelHandoff] ${topCandidate.symbol} APROVADO pela Laya LIVE: score=${layaGate.score}`);
+    } catch (layaErr: any) {
+      console.warn(`[SentinelHandoff] Falha na Laya LIVE para ${topCandidate.symbol}: ${layaErr?.message || layaErr}`);
+      return;
+    }
+  }
+
   const quoteParams = {
     inputMint: SOL_MINT_GLOBAL,
     outputMint: topCandidate.mint,
@@ -2996,7 +3164,7 @@ async function executeSentinelEntryCandidate(
     autoSlippage: true,
     poolLiquidityUsd: topCandidate.liquidityUsd,
     maxAutoSlippageBps: 750,
-    trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
+    trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
   };
 
   const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
@@ -3006,7 +3174,7 @@ async function executeSentinelEntryCandidate(
         const sim = await jupiterEngine.simulateSwap({
           inputMint: SOL_MINT_GLOBAL,
           outputMint: topCandidate.mint,
-          amountLamports: Math.floor(sizeSol * 1e9),
+          amountLamports: BUY_AMOUNT_LAMPORTS,
           autoSlippage: true,
           poolLiquidityUsd: topCandidate.liquidityUsd,
           maxAutoSlippageBps: 750,
@@ -3014,7 +3182,7 @@ async function executeSentinelEntryCandidate(
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair(),
           priorityLevel: 'medium',
-          trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
+          trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
         }, _quote);
         return sim.success ? null : (sim.error || 'SIMULATION_REJECTED');
       } catch (err: any) {
@@ -3037,11 +3205,11 @@ async function executeSentinelEntryCandidate(
     return;
   }
 
-  const tradeLamports = Math.floor(sizing.sizeSol * 1e9);
+  const tradeLamports = BUY_AMOUNT_LAMPORTS;
   const traceId = randomUUID();
   console.log(
     `[SentinelHandoff] Executando swap Graduation Dip — ${topCandidate.symbol} | ` +
-    `${sizing.sizeSol} SOL | impact=${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}% | traceId=${traceId}`
+    `${BUY_AMOUNT_SOL} SOL (${tradeLamports} lamports) | impact=${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}% | traceId=${traceId}`
   );
 
   const swapResult = await jupiterEngine.executeSwap({

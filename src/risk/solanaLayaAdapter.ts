@@ -1,16 +1,70 @@
 import axios from 'axios';
 
 export type SolanaLayaRoute = 'MECHANICAL_PIPELINE' | 'DEEP_REVIEW' | 'ABSTAIN';
-export type SolanaLayaEntryAction = 'BUY' | 'WAIT' | 'ABSTAIN';
+export type SolanaLayaEntryAction = 'BUY' | 'WAIT' | 'ABSTAIN' | 'REJECT' | 'VETO';
 export type SolanaLayaPositionAction = 'HOLD' | 'EXIT' | 'ABSTAIN';
-export type SolanaLayaTacticalMode = 'OFF' | 'SHADOW';
+export type SolanaLayaTacticalMode = 'OFF' | 'SHADOW' | 'LIVE';
 
 export function normalizeSolanaLayaTacticalMode(value: unknown): SolanaLayaTacticalMode {
-  return String(value || 'SHADOW').trim().toUpperCase() === 'OFF' ? 'OFF' : 'SHADOW';
+  const normalized = String(value || 'LIVE').trim().toUpperCase();
+  if (normalized === 'OFF') return 'OFF';
+  if (normalized === 'SHADOW') return 'SHADOW';
+  return 'LIVE';
 }
 
-export function shouldBlockSolanaEntryFromLaya(_action: SolanaLayaEntryAction): boolean {
-  return false;
+export interface SolanaLayaGateResult {
+  blocked: boolean;
+  reason?: string;
+  score: number;
+}
+
+export function shouldBlockSolanaEntryFromLaya(
+  decision: { action: string; confidence?: number; score?: number } | string,
+  mode: SolanaLayaTacticalMode = 'LIVE'
+): SolanaLayaGateResult {
+  if (mode !== 'LIVE') {
+    return { blocked: false, score: 100 };
+  }
+
+  const action = typeof decision === 'string' ? decision : decision.action;
+  const confidence = typeof decision === 'string' ? 1.0 : (decision.confidence ?? 1.0);
+  const score = typeof decision === 'string'
+    ? 100
+    : (decision.score !== undefined ? decision.score : Math.round(confidence * 100));
+
+  if (action === 'REJECT' || action === 'VETO') {
+    return {
+      blocked: true,
+      reason: `Veto por IA Laya Sentinel (Score ${score} < 75)`,
+      score
+    };
+  }
+
+  if (score < 75) {
+    return {
+      blocked: true,
+      reason: `Veto por IA Laya Sentinel (Score ${score} < 75)`,
+      score
+    };
+  }
+
+  if (action === 'WAIT') {
+    return {
+      blocked: true,
+      reason: `Veto por IA Laya Sentinel (Ação WAIT / Score ${score})`,
+      score
+    };
+  }
+
+  if (action === 'ABSTAIN') {
+    return {
+      blocked: true,
+      reason: `Veto por IA Laya Sentinel (Score ${score} < 75)`,
+      score
+    };
+  }
+
+  return { blocked: false, score };
 }
 
 export interface SolanaLayaFacts {
@@ -65,6 +119,7 @@ export interface SolanaLayaDecision {
 export interface SolanaLayaTacticalDecision<TAction extends string> {
   action: TAction;
   confidence: number;
+  score?: number;
   abstention?: string;
   lowConfidence?: boolean;
   routingModel?: string;
@@ -133,7 +188,15 @@ export class SolanaLayaAdapter {
           type: 'choice',
           instructions: request.instructions,
           criteria: request.criteria
-        }
+        },
+        ...(request.questionName === 'action' ? {
+          score: {
+            type: 'score',
+            instructions: 'Pontuação de qualidade e segurança do token de 0 a 100',
+            min: 0,
+            max: 100
+          }
+        } : {})
       },
       lang: 'pt',
       min_confidence: request.minConfidence
@@ -162,6 +225,9 @@ export class SolanaLayaAdapter {
       throw new Error('Laya nativa retornou answer_confidence inválida');
     }
 
+    const rawScore = answer?.score ?? answer?.risk_score ?? (data.answers?.score?.value ?? data.answers?.score?.score ?? data.answers?.score);
+    const score = Number.isFinite(Number(rawScore)) ? Number(rawScore) : Math.round(confidence * 100);
+
     const abstention = typeof answer?.abstention === 'string' ? answer.abstention : undefined;
     const lowConfidence = answer?.low_confidence === true || abstention === 'abstained';
     const effectiveAction = (
@@ -173,6 +239,7 @@ export class SolanaLayaAdapter {
     return {
       action: effectiveAction,
       confidence,
+      score,
       abstention,
       lowConfidence,
       routingModel: typeof data.routing?.model === 'string' ? data.routing.model : undefined,
@@ -269,11 +336,13 @@ export class SolanaLayaAdapter {
       questionName: 'action',
       instructions: 'Qual ação tática de Sistema 1 é adequada agora?',
       criteria: {
-        BUY: 'Contexto favorável e coerente para prosseguir para sizing e simulação de compra.',
+        BUY: 'Contexto favorável e seguro (score >= 75) para prosseguir para sizing e simulação de compra.',
         WAIT: 'Ativo potencialmente válido, mas o contexto imediato ainda não justifica abrir posição neste ciclo.',
-        ABSTAIN: 'Contexto insuficiente, conflitante ou confiança baixa para escolher BUY ou WAIT.'
+        ABSTAIN: 'Contexto insuficiente, conflitante ou confiança baixa para aprovar.',
+        REJECT: 'Risco detectado pela IA Laya, vetar imediatamente.',
+        VETO: 'Risco crítico on-chain ou anomalia detectada pela IA Laya, vetar imediatamente.'
       },
-      allowed: ['BUY', 'WAIT', 'ABSTAIN'] as const,
+      allowed: ['BUY', 'WAIT', 'ABSTAIN', 'REJECT', 'VETO'] as const,
       minConfidence: Number(process.env.SOLANA_LAYA_MIN_CONFIDENCE || 0.85)
     });
   }

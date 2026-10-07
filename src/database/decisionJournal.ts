@@ -38,7 +38,8 @@ export type GateName =
   | 'DISTANCE_FROM_LOW'
   | 'SLIPPAGE_CHECK'
   | 'LATENCY_ABORT'
-  | 'RUG_CHECK';
+  | 'RUG_CHECK'
+  | 'LAYA_LIVE_GATE';
 
 export type GateResult = 'PASS' | 'FAIL' | 'WARN';
 

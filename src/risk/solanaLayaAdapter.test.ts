@@ -134,8 +134,8 @@ test('SolanaLayaAdapter decide entrada BUY/WAIT/ABSTAIN pelo contrato original',
   const result = await adapter.evaluateEntry(FACTS);
   assert.strictEqual(seenPayload.state.stage, 'ENTRY_DECISION');
   assert.strictEqual(seenPayload.state.contractVersion, 'solana-laya-entry/v1');
-  assert.deepStrictEqual(Object.keys(seenPayload.questions), ['action']);
-  assert.deepStrictEqual(Object.keys(seenPayload.questions.action.criteria), ['BUY', 'WAIT', 'ABSTAIN']);
+  assert.deepStrictEqual(Object.keys(seenPayload.questions), ['action', 'score']);
+  assert.deepStrictEqual(Object.keys(seenPayload.questions.action.criteria), ['BUY', 'WAIT', 'ABSTAIN', 'REJECT', 'VETO']);
   assert.strictEqual(seenPayload.min_confidence, 0.85);
   assert.strictEqual(result.action, 'BUY');
   assert.strictEqual(result.confidence, 0.91);
@@ -208,14 +208,26 @@ test('SolanaLayaAdapter usa proxy privado sem bearer do cliente', async () => {
   }
 });
 
-test('política Laya Solana permanece advisory e normaliza ACTIVE para SHADOW', () => {
-  assert.strictEqual(shouldBlockSolanaEntryFromLaya('BUY'), false);
-  assert.strictEqual(shouldBlockSolanaEntryFromLaya('ABSTAIN'), false);
-  assert.strictEqual(shouldBlockSolanaEntryFromLaya('WAIT'), false);
+test('política Laya Solana suporta LIVE Gatekeeper com corte de score < 75 e ações de veto', () => {
+  // Em modo SHADOW, não bloqueia
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'BUY', score: 60 }, 'SHADOW').blocked, false);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'REJECT', score: 90 }, 'SHADOW').blocked, false);
+
+  // Em modo LIVE, bloqueia se score < 75 ou ação não for BUY
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'BUY', score: 85 }, 'LIVE').blocked, false);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'BUY', score: 70 }, 'LIVE').blocked, true);
+  assert.match(shouldBlockSolanaEntryFromLaya({ action: 'BUY', score: 70 }, 'LIVE').reason!, /Score 70 < 75/);
+
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'REJECT', score: 90 }, 'LIVE').blocked, true);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'VETO', score: 90 }, 'LIVE').blocked, true);
+  assert.strictEqual(shouldBlockSolanaEntryFromLaya({ action: 'WAIT', score: 80 }, 'LIVE').blocked, true);
+
+  // Normalização de modos
   assert.strictEqual(normalizeSolanaLayaTacticalMode('OFF'), 'OFF');
   assert.strictEqual(normalizeSolanaLayaTacticalMode('SHADOW'), 'SHADOW');
-  assert.strictEqual(normalizeSolanaLayaTacticalMode('ACTIVE'), 'SHADOW');
-  assert.strictEqual(normalizeSolanaLayaTacticalMode('invalid'), 'SHADOW');
+  assert.strictEqual(normalizeSolanaLayaTacticalMode('LIVE'), 'LIVE');
+  assert.strictEqual(normalizeSolanaLayaTacticalMode('ACTIVE'), 'LIVE');
+  assert.strictEqual(normalizeSolanaLayaTacticalMode(''), 'LIVE');
 });
 
 test('SolanaLayaAdapter health usa proxy privado sem bearer e reporta checkpoint', async () => {

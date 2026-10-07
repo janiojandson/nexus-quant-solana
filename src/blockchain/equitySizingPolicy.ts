@@ -1,3 +1,5 @@
+import { BUY_AMOUNT_SOL } from '../config/env.js';
+
 export interface OpenCapitalPosition {
   costBasisSol: number;
   executableValueSol?: number;
@@ -85,8 +87,8 @@ export function buildEquitySizingPolicy(
     0.50,
     Math.max(entryEquityPct, input.maxTotalAllocationPct ?? entryEquityPct * maxPositions)
   );
-  const maxEntrySol = Math.max(0, input.maxEntrySol ?? 0.05);
-  const maxTotalAllocationSol = Math.max(0, input.maxTotalAllocationSol ?? 0.10);
+  const maxEntrySol = Math.max(0, input.maxEntrySol ?? BUY_AMOUNT_SOL);
+  const maxTotalAllocationSol = Math.max(0, input.maxTotalAllocationSol ?? (BUY_AMOUNT_SOL * maxPositions));
   const minExecutableEntrySol = Math.max(0.0001, input.minExecutableEntrySol ?? 0.001);
   const gasReserveEquityPct = Math.min(0.25, Math.max(0, input.gasReserveEquityPct ?? 0.10));
   const minGasReserveSol = Math.max(0, input.minGasReserveSol ?? 0.01);

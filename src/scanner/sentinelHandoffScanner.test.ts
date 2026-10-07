@@ -180,4 +180,44 @@ describe('SentinelHandoffScanner', () => {
     assert.strictEqual((scanner as any).pollingTimer, null, 'Timer deve ser null após stop()');
   });
 
+  test('checkCrossMemory deve identificar token graduado com layaScore e status', async () => {
+    const mockHandoff = {
+      mint: 'GraduatedMint11111111111111111111111111111111',
+      symbol: 'GRADPUMP',
+      dev_wallet: 'Dev123',
+      status: 'GRADUATING_HIGH_STRENGTH',
+      laya_score: '88.5',
+      pnl_percent: '32.1'
+    };
+    const pool = {
+      query: async (sql: string, params: any[]) => {
+        if (String(sql).includes('sentinel_handoff')) {
+          if (params[0] === mockHandoff.mint || params[1] === mockHandoff.dev_wallet) {
+            return { rows: [mockHandoff] };
+          }
+        }
+        return { rows: [] };
+      }
+    };
+    const scanner = new SentinelHandoffScanner(pool as any);
+    const result = await scanner.checkCrossMemory(mockHandoff.mint);
+    assert.strictEqual(result.found, true);
+    assert.strictEqual(result.isGraduated, true);
+    assert.strictEqual(result.layaScore, 88.5);
+    assert.strictEqual(result.pnlPercent, 32.1);
+    assert.strictEqual(result.status, 'GRADUATING_HIGH_STRENGTH');
+
+    // Teste por dev_wallet
+    const resultDev = await scanner.checkCrossMemory('OtherMint111', 'Dev123');
+    assert.strictEqual(resultDev.found, true);
+    assert.strictEqual(resultDev.isGraduated, true);
+
+    // Teste de token desconhecido
+    const resultNotFound = await scanner.checkCrossMemory('UnknownMint111');
+    assert.strictEqual(resultNotFound.found, false);
+    assert.strictEqual(resultNotFound.isGraduated, false);
+    assert.strictEqual(resultNotFound.layaScore, null);
+  });
+
 });
+

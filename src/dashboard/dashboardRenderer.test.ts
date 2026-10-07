@@ -25,6 +25,12 @@ const state: DashboardState = {
     reason: 'Jupiter rotas saudáveis',
     lastChangedAt: new Date().toISOString()
   },
+  laya: {
+    health: 'OK',
+    tacticalMode: 'LIVE',
+    privateService: true,
+    loaded: ['solana_laya_v2']
+  },
   positions: [
     {
       mint: 'Mint111111111111111111111111111111111111111',
@@ -126,6 +132,10 @@ test('Dashboard Executivo reflete o layout limpo sem seções legadas poluidoras
   assert.match(html, /Elegíveis/);
   assert.match(html, /⚡ Fila Sentinel/);
   assert.match(html, /id="metric-sentinel-queue"/);
+
+  // Laya Live Gatekeeper
+  assert.match(html, /LIVE GATEKEEPER/);
+  assert.match(html, /Laya Sistema 1 LIVE GATEKEEPER/);
 
   // Posições Ativas com Badges de Origem
   assert.match(html, /Posições Ativas sob Gestão/);

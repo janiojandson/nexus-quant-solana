@@ -369,12 +369,12 @@ export function renderDashboardHtml(state: DashboardState): string {
           </div>
         </div>
 
-        <!-- Laya Shadow Badge -->
+        <!-- Laya Live Gatekeeper Badge -->
         <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-2 flex items-center gap-2">
           <span class="h-2 w-2 rounded-full ${state.laya?.health === 'OK' ? 'bg-cyan-400' : 'bg-amber-400'}"></span>
           <div class="text-xs">
             <span class="text-slate-400">Laya:</span>
-            <span id="op-laya-status" class="${state.laya?.health === 'OK' ? 'text-cyan-300' : 'text-amber-300'} ml-1 font-mono font-bold">${state.laya?.health || 'UNKNOWN'} · ${state.laya?.tacticalMode || 'OFF'}</span>
+            <span id="op-laya-status" class="${state.laya?.health === 'OK' ? 'text-cyan-300' : 'text-amber-300'} ml-1 font-mono font-bold">${(state.laya?.tacticalMode || 'LIVE') === 'LIVE' ? (state.laya?.health === 'OK' ? 'LIVE GATEKEEPER' : 'DEGRADED · LIVE GATEKEEPER') : ((state.laya?.health || 'UNKNOWN') + ' · ' + (state.laya?.tacticalMode || 'OFF'))}</span>
           </div>
         </div>
 
@@ -406,8 +406,8 @@ export function renderDashboardHtml(state: DashboardState): string {
         <div id="op-exit-health-detail" class="text-[10px] text-slate-500 mt-1">${escapeDashboardHtml(state.exitPathHealth?.reason || `Falhas: ${state.exitPathHealth?.maxFailures ?? 0} · novas entradas ${state.exitPathHealth?.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'}`)}</div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1 SHADOW</div>
-        <div class="mt-1 font-bold ${state.laya?.health === 'OK' ? 'text-emerald-400' : 'text-amber-400'}">${state.laya?.health || 'UNKNOWN'} · ${state.laya?.tacticalMode || 'OFF'}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1 LIVE GATEKEEPER</div>
+        <div id="op-laya-card-status" class="mt-1 font-bold ${state.laya?.health === 'OK' ? 'text-emerald-400' : 'text-amber-400'}">${(state.laya?.tacticalMode || 'LIVE') === 'LIVE' ? (state.laya?.health === 'OK' ? 'LIVE GATEKEEPER' : 'DEGRADED · LIVE GATEKEEPER') : ((state.laya?.health || 'UNKNOWN') + ' · ' + (state.laya?.tacticalMode || 'OFF'))}</div>
         <div id="op-laya-detail" class="text-[10px] text-slate-500 mt-1">${(state.laya?.loaded || []).join(',') || 'checkpoint nao confirmado'}</div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
@@ -789,8 +789,20 @@ export function renderDashboardHtml(state: DashboardState): string {
         const execEl = document.getElementById('op-execution-mode');
         if (execEl) { execEl.textContent = operational.maintenanceMode ? 'MODO MANUTENÇÃO' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'REAL ON-CHAIN' : 'DRY-RUN'); execEl.className = 'mt-1 font-bold ' + (operational.maintenanceMode ? 'text-amber-300' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'text-emerald-400' : 'text-amber-400')); }
         const layaEl = document.getElementById('op-laya-status');
+        const layaCardEl = document.getElementById('op-laya-card-status');
         const layaDetail = document.getElementById('op-laya-detail');
-        if (layaEl) { layaEl.textContent = (laya.health || 'UNKNOWN') + ' · ' + (laya.tacticalMode || 'OFF'); layaEl.className = 'text-xs ' + (laya.health === 'OK' ? 'text-cyan-300 font-bold' : 'text-amber-300 font-bold'); }
+        const isLayaLive = (laya.tacticalMode || 'LIVE') === 'LIVE';
+        const layaText = isLayaLive
+          ? (laya.health === 'OK' ? 'LIVE GATEKEEPER' : ((laya.health || 'UNKNOWN') + ' · LIVE GATEKEEPER'))
+          : ((laya.health || 'UNKNOWN') + ' · ' + (laya.tacticalMode || 'OFF'));
+        if (layaEl) {
+          layaEl.textContent = layaText;
+          layaEl.className = 'text-xs ' + (laya.health === 'OK' ? 'text-cyan-300 font-bold' : 'text-amber-300 font-bold');
+        }
+        if (layaCardEl) {
+          layaCardEl.textContent = layaText;
+          layaCardEl.className = 'mt-1 font-bold ' + (laya.health === 'OK' ? 'text-emerald-400' : 'text-amber-400');
+        }
         if (layaDetail) layaDetail.textContent = (laya.loaded || []).join(',') || 'checkpoint nao confirmado';
         const exitHealthEl = document.getElementById('op-exit-health-status');
         const exitHealthDetail = document.getElementById('op-exit-health-detail');

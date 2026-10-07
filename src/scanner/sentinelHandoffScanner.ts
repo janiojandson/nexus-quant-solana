@@ -19,6 +19,15 @@ export interface SentinelHandoffToken {
   isSentinelPreAudited: true;
 }
 
+export interface SentinelCrossMemoryResult {
+  found: boolean;
+  isGraduated: boolean;
+  layaScore: number | null;
+  pnlPercent: number | null;
+  status: string | null;
+  devWallet: string | null;
+}
+
 export class SentinelHandoffScanner extends EventEmitter {
   private readonly pgPool: Pool | null;
   private pollingTimer: ReturnType<typeof setInterval> | null = null;
@@ -153,4 +162,82 @@ export class SentinelHandoffScanner extends EventEmitter {
       this.isPolling = false;
     }
   }
+
+  /**
+   * Consulta de Memória Cruzada:
+   * Verifica se o token ou sua dev_wallet constam no histórico da bonding curve (sentinel_handoff).
+   * Identifica se graduou com recomendação prévia do Sentinel.
+   */
+  public async checkCrossMemory(
+    mint: string,
+    devWallet?: string | null
+  ): Promise<SentinelCrossMemoryResult> {
+    if (!this.pgPool) {
+      return {
+        found: false,
+        isGraduated: false,
+        layaScore: null,
+        pnlPercent: null,
+        status: null,
+        devWallet: null
+      };
+    }
+
+    try {
+      const res = await this.pgPool.query<{
+        mint: string;
+        symbol: string;
+        dev_wallet: string | null;
+        status: string | null;
+        laya_score: string | null;
+        pnl_percent: string | null;
+      }>(
+        `SELECT mint, symbol, dev_wallet, status, laya_score, pnl_percent
+         FROM sentinel_handoff
+         WHERE mint = $1 OR ($2::text IS NOT NULL AND dev_wallet = $2::text)
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [mint, devWallet || null]
+      );
+
+      if (res.rows.length === 0) {
+        return {
+          found: false,
+          isGraduated: false,
+          layaScore: null,
+          pnlPercent: null,
+          status: null,
+          devWallet: null
+        };
+      }
+
+      const row = res.rows[0];
+      const isGraduated =
+        row.status === 'GRADUATING_HIGH_STRENGTH' ||
+        row.status === 'GRADUATED' ||
+        row.status === 'GRADUATING';
+
+      return {
+        found: true,
+        isGraduated,
+        layaScore: row.laya_score !== null ? Number(row.laya_score) : null,
+        pnlPercent: row.pnl_percent !== null ? Number(row.pnl_percent) : null,
+        status: row.status,
+        devWallet: row.dev_wallet
+      };
+    } catch (err: any) {
+      if (!String(err?.message || '').includes('does not exist')) {
+        console.warn(`[SentinelHandoff:CrossMemory] Erro na consulta de ${mint}: ${err?.message || err}`);
+      }
+      return {
+        found: false,
+        isGraduated: false,
+        layaScore: null,
+        pnlPercent: null,
+        status: null,
+        devWallet: null
+      };
+    }
+  }
 }
+
