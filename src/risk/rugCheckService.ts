@@ -41,7 +41,7 @@ export class RugCheckService {
     }));
   }
 
-  public async auditToken(mint: string): Promise<RugCheckReport> {
+  public async auditToken(mint: string, targetPairAddress?: string): Promise<RugCheckReport> {
     try {
       const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
       const response = await this.fetchClient(url);
@@ -67,9 +67,12 @@ export class RugCheckService {
 
       // 2. Extração de métricas de LP trancada/queimada. Ausência permanece UNKNOWN.
       const directLp = data.lpLockedPct == null ? NaN : Number(data.lpLockedPct);
-      let lpLockedPct: number | undefined = Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
+      // A target pool must supply its own LP facts; never borrow token-level or another pool's data.
+      let lpLockedPct: number | undefined = !targetPairAddress && Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
       if (Array.isArray(data.markets)) {
-        const raydiumMarket = data.markets.find((m: any) => m.lp);
+        const raydiumMarket = targetPairAddress
+          ? data.markets.find((m: any) => m.pubkey === targetPairAddress)
+          : data.markets.find((m: any) => m.lp);
         if (raydiumMarket?.lp) {
           const locked = Number(raydiumMarket.lp.lpLockedPct ?? raydiumMarket.lp.lpLocked ?? NaN);
           const burned = Number(raydiumMarket.lp.lpBurnedPct ?? raydiumMarket.lp.lpBurned ?? NaN);

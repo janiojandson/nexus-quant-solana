@@ -73,7 +73,7 @@ export interface DashboardState {
     technicalDiscards: number;
     entryEligible: number;
   };
-  /** Contador de tokens na fila Sentinel aguardando abertura de rota na Raydium */
+  /** Handlers Sentinel ativos: warm-up de rota, auditoria e tentativa de entrada. */
   sentinelHandoffQueue?: number;
   /** Campos legados mantidos para compatibilidade com /api/status */
   pumpObservatory?: PumpObservatorySnapshot;

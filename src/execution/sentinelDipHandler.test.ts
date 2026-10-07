@@ -20,10 +20,33 @@ function loadHandler(name: string, dependencies: Record<string, unknown>) {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
   }).outputText;
   return vm.runInNewContext(`${js}\n${name};`, {
+    latestState: { sentinelHandoffQueue: 0 },
     console: { log() {}, warn() {}, error(e: unknown) { throw new Error(String(e)); } },
     ...dependencies
   }) as (...args: any[]) => Promise<void>;
 }
+
+test('Sentinel queue tracks overlapping handlers and clears on expiry', async () => {
+  let now = 0;
+  const latestState = { sentinelHandoffQueue: 0 };
+  const releases: Array<() => void> = [];
+  const handler = loadHandler('handleSentinelGraduationDip', {
+    latestState, Date: { now: () => now }, setTimeout: (resolve: () => void) => releases.push(resolve),
+    antiSpamMemory: { shouldSkip: () => ({ skip: false }) },
+    scanner: { fetchCurrentTokenMarketSnapshot: async () => { throw new Error('upstream failed'); } },
+    console: { log() {}, warn() {}, error() {} }
+  });
+  const first = handler({ mint: 'one', symbol: 'ONE', createdAt: new Date(0) });
+  const second = handler({ mint: 'two', symbol: 'TWO', createdAt: new Date(0) });
+  assert.equal(latestState.sentinelHandoffQueue, 2);
+  await handler({ mint: 'one', symbol: 'ONE', createdAt: new Date() });
+  assert.equal(latestState.sentinelHandoffQueue, 2);
+  now = 91_000;
+  releases[0](); await first;
+  assert.equal(latestState.sentinelHandoffQueue, 1);
+  releases[1](); await second;
+  assert.equal(latestState.sentinelHandoffQueue, 0);
+});
 
 function dipHarness(options: { liquidity?: number; now?: number; score?: number | null; refreshLiquidity?: number; refreshFails?: boolean } = {}) {
   let now = options.now ?? 3_000;

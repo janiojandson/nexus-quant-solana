@@ -58,7 +58,7 @@ export function evaluateEntryMomentum(
       maxPullbackPct: 0,
       risingSteps: 0,
       staleSource: true,
-      reason: 'Fonte de micropreço sem atualização durante a janela; sinal curto indeterminado.',
+      reason: 'Momentum pré-voo indeterminado ou fonte estagnada (STALE_SOURCE): fonte sem atualização.',
       samples
     };
   }
@@ -82,7 +82,7 @@ export function evaluateEntryMomentum(
   let reason = 'Momentum de alta confirmado pela fonte de micropreço.';
   let pass = true;
 
-  if (risePct < config.minRisePct) {
+  if (!Number.isFinite(config.minRisePct) || risePct <= 0 || risePct < config.minRisePct) {
     pass = false;
     reason = `Alta insuficiente: ${risePct.toFixed(3)}% < ${config.minRisePct}%.`;
   } else if (risePct > config.maxRisePct) {

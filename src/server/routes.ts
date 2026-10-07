@@ -239,6 +239,7 @@ export async function handleApiRoutes(
     }));
 
     const responsePayload = {
+      sentinelHandoffQueue: s.sentinelHandoffQueue ?? 0,
       // Formato exigido para clientes avançados / ordem de execução
       wallet: {
         address: s.wallet,

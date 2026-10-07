@@ -28,6 +28,8 @@ export interface SwapExecutionRequest {
   trafficPriority?: JupiterPriority;
   /** Entry-only venue restriction; exits remain unrestricted unless requested. */
   forbiddenProgramIds?: readonly string[];
+  /** Audited entry pool; every final order must reference it before signing. */
+  requiredPoolAddress?: string;
 }
 
 export interface SwapExecutionResponse {
@@ -240,7 +242,7 @@ export class JupiterExecutionEngine {
   }
 
   private async assertEntryProgramsAllowed(order: JupiterV2OrderResponse, req: SwapExecutionRequest): Promise<void> {
-    if (!req.forbiddenProgramIds?.length) return;
+    if (!req.forbiddenProgramIds?.length && !req.requiredPoolAddress) return;
     const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction!, 'base64'));
     const addresses = transaction.message.staticAccountKeys.map(key => key.toBase58());
     // CPI programs may be loaded through a v0 address lookup table.
@@ -253,7 +255,10 @@ export class JupiterExecutionEngine {
         addresses.push(key.toBase58());
       }
     }
-    for (const program of req.forbiddenProgramIds) {
+    if (req.requiredPoolAddress && !addresses.includes(req.requiredPoolAddress)) {
+      throw new Error(`Jupiter order does not reference audited pool: ${req.requiredPoolAddress}`);
+    }
+    for (const program of req.forbiddenProgramIds || []) {
       if (addresses.includes(program)) throw new Error(`Forbidden entry program: ${program}`);
     }
   }

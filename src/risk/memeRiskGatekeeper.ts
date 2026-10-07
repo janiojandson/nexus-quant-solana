@@ -4,6 +4,7 @@ import { SolanaLayaAdapter, sanitizeSolanaLayaFacts, type SolanaLayaDecision, ty
 
 export interface TokenSecurityMetadata {
   mint: string;
+  pairAddress?: string;
   liquidityUsd: number;
   mintAuthority?: string | null;
   freezeAuthority?: string | null;
@@ -154,7 +155,7 @@ export class MemeRiskGatekeeper {
     }
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
-    const rugReport = await this.rugCheckService.auditToken(token.mint);
+    const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress);
     if (!rugReport.isSafe) {
       return {
       rugCheckReport: rugReport,

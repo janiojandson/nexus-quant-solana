@@ -150,6 +150,18 @@ function mockExecuteSuccess(
   }) as any;
 }
 
+test('entry rejects a fresh Jupiter order that does not reference the audited pool before signing or simulation', async () => {
+  mockOrder();
+  let posts = 0;
+  axios.post = (async () => { posts++; return { data: { status: 'Success', signature: 'unexpected' } }; }) as any;
+  const { conn, state } = makeConnection({ err: null });
+  const result = await makeEngine(conn).executeSwap({ ...baseRequest, requiredPoolAddress: Keypair.generate().publicKey.toBase58() } as any);
+  assert.strictEqual(result.status, 'FAILED');
+  assert.match(result.error || '', /audited pool/i);
+  assert.strictEqual(state.simulateCalls, 0);
+  assert.strictEqual(posts, 0);
+});
+
 test('entry program restriction rejects the explicit bonding curve program before sending', async () => {
   mockOrder(testSigner, { routePlan: [{ swapInfo: { programId: BONDING_CURVE_PROGRAM } }] });
   let sends = 0;

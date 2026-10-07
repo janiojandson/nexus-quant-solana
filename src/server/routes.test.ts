@@ -23,6 +23,7 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   const mockContext = {
     adminToken: TEST_ADMIN_TOKEN,
     latestState: {
+      sentinelHandoffQueue: 2,
       agent: 'NexusQuant-Solana-01',
       balanceSol: 0.15,
       positions: [],
@@ -66,6 +67,7 @@ test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   assert.strictEqual(statusCode, 200);
   assert.ok(responseData.includes('NexusQuant-Solana-01'));
   const payload = JSON.parse(responseData);
+  assert.strictEqual(payload.sentinelHandoffQueue, 2);
   assert.strictEqual(payload.pump.readOnly, true);
   assert.strictEqual(payload.pump.totalCreatedObserved, 7);
   assert.strictEqual(payload.operational.exitCapacity.admit, false);

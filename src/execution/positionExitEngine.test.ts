@@ -2,6 +2,40 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { PositionExitEngine } from './positionExitEngine.js';
 
+for (const [value, detail] of [[0.00047, 'SOLANA_SOL_DRAIN'], [0.01225, 'SOLANA_SOL_DRAIN'], [0.0153125, 'INITIAL_STOP_LOSS']] as const) {
+  test(`PUMP regression: armed trailing must yield to loss at ${value} SOL`, () => {
+    const engine = new PositionExitEngine();
+    engine.addPosition({ mint: 'pump', symbol: 'PUMP', tokenAmount: 1000, entryPriceUsd: 1, entryTimestamp: Date.now(), entrySol: 0.0175 });
+    engine.evaluateExitBySol('pump', 0.020766678);
+    const signal = engine.evaluateExitBySol('pump', value);
+    assert.strictEqual(signal.type, 'STOP_LOSS');
+    assert.strictEqual(signal.reasonDetail, detail);
+  });
+}
+
+test('liquidity collapse precedes armed trailing even at positive PnL', () => {
+  const engine = new PositionExitEngine();
+  engine.addPosition({ mint: 'drain', symbol: 'DRAIN', tokenAmount: 1000, entryPriceUsd: 1, entryTimestamp: Date.now(), entrySol: 1, entryLiquidityUsd: 50000 });
+  engine.evaluateExitBySol('drain', 1.2);
+  const signal = engine.evaluateExitBySol('drain', 1.1, Date.now(), { currentLiquidityUsd: 30000 });
+  assert.strictEqual(signal.type, 'STOP_LOSS');
+  assert.match(signal.reasonDetail || '', /LIQUIDITY_DRAIN/);
+});
+
+test('USD exit path classifies catastrophic loss', () => {
+  const engine = new PositionExitEngine();
+  engine.addPosition({ mint: 'usd', symbol: 'USD', tokenAmount: 100, entryPriceUsd: 1, entryTimestamp: Date.now() });
+  assert.strictEqual(engine.evaluateExit('usd', 0.7).reasonDetail, 'SOLANA_SOL_DRAIN');
+});
+
+test('USD catastrophic boundary handles decimal prices independently of a looser stop', () => {
+  const engine = new PositionExitEngine();
+  engine.addPosition({ mint: 'decimal', symbol: 'DEC', tokenAmount: 100, entryPriceUsd: 0.015, entryTimestamp: Date.now(), stopLossPct: -0.5 });
+  const signal = engine.evaluateExit('decimal', 0.0105);
+  assert.strictEqual(signal.type, 'STOP_LOSS');
+  assert.strictEqual(signal.reasonDetail, 'SOLANA_SOL_DRAIN');
+});
+
 test('PositionExitEngine: parcial só altera estado depois da confirmação do swap', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestMint1111111111111111111111111111111111';
@@ -49,10 +83,11 @@ test('PositionExitEngine: deve mover SL para Breakeven (+1%) ao atingir +12% de 
   const pos = engine.getPosition(mint);
   assert.strictEqual(pos?.stopLossPct, 0.01, 'Stop deve subir para +1% ao atingir +12%');
 
-  // Depois de +12%, o trailing de momentum é mais protetor que o breakeven.
+  // Breakeven crossed: stop loss now has priority over the armed trailing.
   const evalRecuo = engine.evaluateExitBySol(mint, 0.01507);
   assert.strictEqual(evalRecuo.shouldExit, true);
-  assert.strictEqual(evalRecuo.type, 'TRAILING_STOP');
+  assert.strictEqual(evalRecuo.type, 'STOP_LOSS');
+  assert.strictEqual(evalRecuo.reasonDetail, 'INITIAL_STOP_LOSS');
   assert.strictEqual(evalRecuo.shouldCloseAta, true);
 });
 
@@ -392,7 +427,8 @@ test('Tesla: restored runner gap closes entire position at observed executable v
  engine.addPosition({mint:'TeslaGap',symbol:'TESLA',tokenAmount:2187913065,entryPriceUsd:1,entryTimestamp:Date.now(),
  entrySol:0.01,partialTaken:true,executablePeakSolValue:0.047647,peakSolValue:0.047647});
  const signal=engine.evaluateExitBySol('TeslaGap',0.000041149);
- assert.strictEqual(signal.type,'TRAILING_STOP');
+ assert.strictEqual(signal.type,'STOP_LOSS');
+ assert.strictEqual(signal.reasonDetail,'SOLANA_SOL_DRAIN');
  assert.strictEqual(signal.exitTokenAmount,2187913065);
  assert.strictEqual(signal.currentPriceUsd,0.000041149);
 });

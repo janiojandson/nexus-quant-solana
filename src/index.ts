@@ -68,7 +68,7 @@ const MAX_TOTAL_ALLOCATION_SOL = Math.max(MAX_TRADE_AMOUNT_SOL, Number(process.e
 const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
-const ENTRY_MOMENTUM_GATE_ENABLED = process.env.ENTRY_MOMENTUM_GATE_ENABLED === 'true';
+const ENTRY_MOMENTUM_GATE_ENABLED = true; // Mandatory live momentum for conventional DEX entries.
 const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
 const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS || DEFAULT_ENTRY_MOMENTUM_CONFIG.intervalMs));
 const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.minRisePct);
@@ -331,6 +331,7 @@ const dailyPnlTracker = new DailyPnlTracker();
 
 // Estado compartilhado em memória para o Dashboard
 const latestState: DashboardState = {
+  sentinelHandoffQueue: 0,
   agent: 'NEXUS_QUANT_SOLANA_V1',
   wallet: OFFICIAL_PHANTOM_WALLET,
   balanceSol: 0,
@@ -1802,6 +1803,7 @@ async function executeAutonomousCycle() {
         console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
         const audit = await entryGatekeeper.auditToken({
         mint: topCandidate.mint,
+        pairAddress: topCandidate.pairAddress,
         liquidityUsd: topCandidate.liquidityUsd,
         priceChangeM5: topCandidate.priceChangeM5,
         buysM5: topCandidate.buysM5,
@@ -1913,11 +1915,7 @@ async function executeAutonomousCycle() {
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
         // Momentum de curtíssimo prazo: usa o micropreço disponível no sensor.
-        // Se todas as amostras vierem exatamente iguais, isso é tratado como fonte
-        // congelada/indeterminada — não como evidência de momentum negativo. Nesse
-        // caso os hard gates de 5m já aprovados continuam válidos e a decisão segue
-        // para a Laya. Movimento real não-estagnado continua sendo bloqueado quando
-        // viola alta mínima/máxima, continuidade ou pullback.
+        // Fonte congelada/indeterminada rejeita o pré-voo. M5 não substitui avanço vivo.
         if (ENTRY_MOMENTUM_GATE_ENABLED) {
           try {
             const momentum = await observeEntryMomentum(
@@ -1937,13 +1935,10 @@ async function executeAutonomousCycle() {
               `passos=${momentum.risingSteps}/${momentum.samples.length - 1} | stale=${momentum.staleSource} | ${momentum.reason}`
             );
 
-            if (momentum.staleSource) {
-              console.warn(
-                `⚠️ [Momentum Gate:STALE] ${topCandidate.symbol}: fonte sem atualização na janela curta; ` +
-                `hard gates de 5m permanecem válidos e o candidato seguirá para Laya.`
-              );
-            } else if (!momentum.pass) {
-              const reason = `MOMENTUM_GATE: ${momentum.reason}`;
+            if (momentum.staleSource || !momentum.pass || momentum.risePct <= 0 || momentum.risePct < ENTRY_MOMENTUM_MIN_RISE_PCT || momentum.risingSteps < 1) {
+              const reason = momentum.staleSource
+                ? 'MOTIVO: Momentum pré-voo indeterminado ou fonte estagnada (STALE_SOURCE)'
+                : `MOMENTUM_GATE: ${momentum.reason}`;
               antiSpamMemory.recordVeto(
                 topCandidate.mint,
                 reason,
@@ -1974,7 +1969,7 @@ async function executeAutonomousCycle() {
                 metadata: {
                   phase: 'MOMENTUM_GATE',
                   momentumSource: 'DEXSCREENER_PRICE',
-                  momentumStatus: 'FAIL',
+                  momentumStatus: momentum.staleSource ? 'REJECTED_STALE_SOURCE' : 'FAIL',
                   momentumRisePct: momentum.risePct,
                   momentumRisingSteps: momentum.risingSteps,
                   momentumMaxPullbackPct: momentum.maxPullbackPct,
@@ -2074,6 +2069,7 @@ async function executeAutonomousCycle() {
                 keypair: wallet.getKeypair(),
                 priorityLevel: 'medium',
                 forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
+                requiredPoolAddress: topCandidate.pairAddress,
                 trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
               }, _quote);
               if (sim.success) {
@@ -2206,6 +2202,7 @@ async function executeAutonomousCycle() {
           maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
           skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
           forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
+          requiredPoolAddress: topCandidate.pairAddress,
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair(),
           trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
@@ -2823,6 +2820,7 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
   console.log(`[SentinelHandoff] ${symbol}: LayaScore advisory=${token.layaScore ?? 'N/D'} (sem veto).`);
 
   sentinelActiveGraduations.add(mint);
+  latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   const startMs = Date.now();
   console.log(`[SentinelHandoff] Iniciando warm-up de rota Jupiter para ${symbol} (${mint})...`);
 
@@ -2947,6 +2945,7 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     console.error(`[SentinelHandoff] ${symbol}: erro no handler de Graduation Dip: ${err?.message || err}`);
   } finally {
     sentinelActiveGraduations.delete(mint);
+    latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   }
 }
 
@@ -2983,6 +2982,7 @@ async function executeSentinelEntryCandidate(
   // Auditoria completa via RugCheck + MemeRiskGatekeeper (sem bypass de risco — apenas de idade)
   const audit = await entryGatekeeper.auditToken({
     mint: topCandidate.mint,
+    pairAddress: topCandidate.pairAddress,
     liquidityUsd: topCandidate.liquidityUsd,
     priceChangeM5: topCandidate.priceChangeM5,
     buysM5: topCandidate.buysM5,
@@ -3051,6 +3051,7 @@ async function executeSentinelEntryCandidate(
           outputMint: topCandidate.mint,
           amountLamports: Math.floor(sizeSol * 1e9),
           forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
+          requiredPoolAddress: topCandidate.pairAddress,
           autoSlippage: true,
           poolLiquidityUsd: topCandidate.liquidityUsd,
           maxAutoSlippageBps: 750,
@@ -3092,6 +3093,7 @@ async function executeSentinelEntryCandidate(
     outputMint: topCandidate.mint,
     amountLamports: tradeLamports,
     forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
+    requiredPoolAddress: topCandidate.pairAddress,
     autoSlippage: true,
     poolLiquidityUsd: topCandidate.liquidityUsd,
     maxAutoSlippageBps: 750,

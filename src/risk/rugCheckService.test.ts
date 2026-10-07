@@ -2,6 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { RugCheckService, RugCheckReport } from './rugCheckService.js';
 
+for (const [name, markets, expected] of [
+  ['rejects unlocked target despite another locked pool', [{ pubkey: 'other', lp: { lpLockedPct: 100 } }, { pubkey: 'target', lp: { lpLockedPct: 0 } }], false],
+  ['accepts burned target despite another unlocked pool', [{ pubkey: 'other', lp: { lpLockedPct: 0 } }, { pubkey: 'target', lp: { lpBurnedPct: 95 } }], true],
+  ['rejects missing target without first-market fallback', [{ pubkey: 'other', lp: { lpLockedPct: 100 } }], false],
+  ['rejects target without LP despite token-level LP', [{ pubkey: 'target' }], false]
+] as const) {
+  test(`RugCheck target pool: ${name}`, async () => {
+    const service = new RugCheckService({ fetchClient: async () => ({ data: {
+      token: { mintAuthority: null, freezeAuthority: null }, totalHolders: 500,
+      topHolders: [{ pct: 10 }], lpLockedPct: 100, markets
+    } }) });
+    const report = await (service.auditToken as any)('mint', 'target');
+    assert.strictEqual(report.isSafe, expected);
+  });
+}
+
 test('RugCheckService: deve aprovar token seguro com score baixo e sem honeypot', async () => {
   const mockFetch = async () => ({
     data: {

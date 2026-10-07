@@ -395,6 +395,47 @@ export class PositionExitEngine {
     // Protecoes de saida total precedem colheitas parciais
     // ==========================================
 
+    // a) Alerta de Drenagem: Se cotação em SOL ou liquidez USD retornar perda súbita > 30% em relação ao snapshot inicial
+    if (context?.currentLiquidityUsd !== undefined && position.entryLiquidityUsd && position.entryLiquidityUsd > 0) {
+      const liquidityDropPct = (position.entryLiquidityUsd - context.currentLiquidityUsd) / position.entryLiquidityUsd;
+      if (liquidityDropPct > 0.30) {
+        return {
+          shouldExit: true,
+          type: 'STOP_LOSS',
+          pnlPct,
+          currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount,
+          shouldCloseAta: true,
+          peakSolValue: newPeak,
+          trailingStopSolValue,
+          reasonDetail: `SOLANA_LIQUIDITY_DRAIN: Liquidez despencou ${(liquidityDropPct * 100).toFixed(1)}% vs entrada`
+        };
+      }
+    }
+
+    if (pnlPct <= -0.30) {
+      return {
+        shouldExit: true,
+        type: 'STOP_LOSS',
+        pnlPct,
+        currentPriceUsd: currentSolValue,
+        exitTokenAmount: position.tokenAmount,
+        shouldCloseAta: true,
+        peakSolValue: newPeak,
+        trailingStopSolValue,
+        reasonDetail: 'SOLANA_SOL_DRAIN'
+      };
+    }
+
+    // Stops protect both initial positions and runners before any trailing classification.
+    if (pnlPct <= position.stopLossPct) {
+      return {
+        shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd: currentSolValue,
+        exitTokenAmount: position.tokenAmount, shouldCloseAta: true,
+        peakSolValue: newPeak, trailingStopSolValue, reasonDetail: 'INITIAL_STOP_LOSS'
+      };
+    }
+
     // Proteção de momentum pré-parcial: depois de atingir +8%, acompanha o topo
     // com folga de 6%. Se a alta perder força antes da parcial de +35%, encerra
     // 100% preservando o ganho em vez de devolver todo o movimento.
@@ -452,38 +493,6 @@ export class PositionExitEngine {
     // ==========================================
     // 🧠 AYLA SENTINELA DE SAÍDA ADAPTATIVA
     // ==========================================
-    // a) Alerta de Drenagem: Se cotação em SOL ou liquidez USD retornar perda súbita > 30% em relação ao snapshot inicial
-    if (context?.currentLiquidityUsd !== undefined && position.entryLiquidityUsd && position.entryLiquidityUsd > 0) {
-      const liquidityDropPct = (position.entryLiquidityUsd - context.currentLiquidityUsd) / position.entryLiquidityUsd;
-      if (liquidityDropPct > 0.30) {
-        return {
-          shouldExit: true,
-          type: 'STOP_LOSS',
-          pnlPct,
-          currentPriceUsd: currentSolValue,
-          exitTokenAmount: position.tokenAmount,
-          shouldCloseAta: true,
-          peakSolValue: newPeak,
-          trailingStopSolValue,
-          reasonDetail: `SOLANA_LIQUIDITY_DRAIN: Liquidez despencou ${(liquidityDropPct * 100).toFixed(1)}% vs entrada`
-        };
-      }
-    }
-
-    if (pnlPct < -0.30) {
-      return {
-        shouldExit: true,
-        type: 'STOP_LOSS',
-        pnlPct,
-        currentPriceUsd: currentSolValue,
-        exitTokenAmount: position.tokenAmount,
-        shouldCloseAta: true,
-        peakSolValue: newPeak,
-        trailingStopSolValue,
-        reasonDetail: `SOLANA_SOL_DRAIN: Queda súbita de ${(Math.abs(pnlPct) * 100).toFixed(1)}% em SOL`
-      };
-    }
-
     const tpStep = position.highestTpStepReached ?? (position.partialTaken ? 1 : 0);
 
     // ==========================================
@@ -632,7 +641,13 @@ export class PositionExitEngine {
       return { shouldExit: false, type: 'HOLD', pnlPct: 0, currentPriceUsd };
     }
 
-    const pnlPct = (currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd;
+    const pnlPct = Math.round(((currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100000) / 100000;
+
+    if (pnlPct <= -0.30 || pnlPct <= position.stopLossPct) {
+      return { shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd,
+        exitTokenAmount: position.tokenAmount, shouldCloseAta: true,
+        reasonDetail: pnlPct <= -0.30 ? 'SOLANA_SOL_DRAIN' : 'INITIAL_STOP_LOSS' };
+    }
 
     // FASE 1: Colheita Parcial em +100%
     if (!position.partialTaken && pnlPct >= position.takeProfitPct) {
