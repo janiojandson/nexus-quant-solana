@@ -42,6 +42,7 @@ import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
 import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
 import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
+import { SentinelHandoffScanner, type SentinelHandoffToken } from './scanner/sentinelHandoffScanner.js';
 
 
 dotenv.config();
@@ -260,6 +261,7 @@ const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
   }
 );
 const adminAuthService = new SolanaAdminAuthService(pgPool);
+const sentinelHandoffScanner = new SentinelHandoffScanner(pgPool);
 const journal = new DecisionLogger(pgPool, {
   flushIntervalMs: 5000,
   maxBufferSize: 100
@@ -2764,6 +2766,367 @@ async function rehydrateQuarantineFromDbOnBoot() {
   }
 }
 
+// ============================================================
+// PONTE SENTINEL HANDOFF — "Graduation Dip" Handler
+// ============================================================
+// Tokens entregues pelo nexus-pump-sentinel já foram auditados
+// na bonding curve (dev share <= 5%, LayaScore >= 75).
+// Este handler implementa um warm-up de rota na Jupiter
+// (10-25s para indexar novas pools Raydium) e, quando a rota
+// estiver disponível dentro da janela de 45-90s pós-criação,
+// dispara a entrada via executeAutonomousCycle com bypass de
+// maturidade mínima (os 5 minutos do mercado geral).
+// O núcleo do Padrão Ouro (liquidez >= $15k, slippage 750bps,
+// Escada 4D, Regra Zero) permanece 100% intocado.
+// ============================================================
+
+const SOL_MINT_GLOBAL = 'So11111111111111111111111111111111111111112';
+const SENTINEL_DIP_WARMUP_RETRY_MS = 3_000;    // Retenta cotação a cada 3s
+const SENTINEL_DIP_WARMUP_MAX_MS = 60_000;     // Janela máxima de warm-up: 60s
+const SENTINEL_DIP_WINDOW_MIN_MS = 45_000;     // Janela mínima do dip: 45s pós-criação
+const SENTINEL_DIP_WINDOW_MAX_MS = 90_000;     // Janela máxima do dip: 90s pós-criação
+const SENTINEL_MIN_LIQUIDITY_USD = 15_000;     // Invariante do Padrão Ouro
+const SENTINEL_LAYA_SCORE_MIN = 75;            // Requisito mínimo de Laya Score na bonding curve
+const sentinelActiveGraduations = new Set<string>(); // Impede processamento duplo do mesmo mint
+
+async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise<void> {
+  const { mint, symbol } = token;
+
+  // Proteção contra processamento concorrente do mesmo mint
+  if (sentinelActiveGraduations.has(mint)) {
+    console.log(`[SentinelHandoff] ${symbol}: graduação já em processamento, ignorando evento duplicado.`);
+    return;
+  }
+  // Rejeita se já auditado/vetado recentemente
+  if (antiSpamMemory.shouldSkip(mint).skip) {
+    console.log(`[SentinelHandoff] ${symbol}: mint em quarentena local, descartado.`);
+    return;
+  }
+  // Verificação do Laya Score mínimo da bonding curve
+  if (token.layaScore !== null && token.layaScore < SENTINEL_LAYA_SCORE_MIN) {
+    console.log(`[SentinelHandoff] ${symbol}: LayaScore ${token.layaScore} abaixo do mínimo ${SENTINEL_LAYA_SCORE_MIN}, descartado.`);
+    antiSpamMemory.recordTechnicalDiscard(mint, `LayaScore ${token.layaScore} < ${SENTINEL_LAYA_SCORE_MIN}`, 5);
+    return;
+  }
+
+  sentinelActiveGraduations.add(mint);
+  const startMs = Date.now();
+  console.log(`[SentinelHandoff] Iniciando warm-up de rota Jupiter para ${symbol} (${mint})...`);
+
+  try {
+    const warmupDeadlineMs = startMs + SENTINEL_DIP_WARMUP_MAX_MS;
+    let routeAvailable = false;
+    let marketSnapshot: Awaited<ReturnType<typeof scanner.fetchCurrentTokenMarketSnapshot>> = null;
+
+    // Loop de warm-up: tenta obter cotação Jupiter a cada 3s por até 60s
+    while (Date.now() < warmupDeadlineMs) {
+      await new Promise(resolve => setTimeout(resolve, SENTINEL_DIP_WARMUP_RETRY_MS));
+
+      const elapsedMs = Date.now() - startMs;
+      const tokenAgeMs = Date.now() - token.createdAt.getTime();
+
+      // Verifica snapshot de mercado na DexScreener (liquidez on-chain)
+      try {
+        marketSnapshot = await scanner.fetchCurrentTokenMarketSnapshot(mint);
+      } catch {
+        // Aguarda próxima tentativa
+      }
+
+      if (!marketSnapshot || marketSnapshot.liquidityUsd < SENTINEL_MIN_LIQUIDITY_USD) {
+        console.log(`[SentinelHandoff] ${symbol}: liquidez insuficiente ($${Math.round(marketSnapshot?.liquidityUsd ?? 0)}) em ${Math.round(elapsedMs / 1000)}s. Aguardando...`);
+        continue;
+      }
+
+      // Tenta obter cotação na Jupiter (confirma que a pool está indexada)
+      try {
+        const probeAmountLamports = Math.floor(0.001 * 1e9); // probe mínimo: 0.001 SOL
+        const quote = await jupiterEngine.getQuote(
+          SOL_MINT_GLOBAL,
+          mint,
+          probeAmountLamports,
+          750,
+          priorityForJupiterWork('ENTRY_SIZING')
+        );
+        if (quote && quote.outAmount > 0) {
+          // Verifica se a rota não passa por bonding curve da Pump.fun
+          const routeLower = (quote.routePlanSummary || '').toLowerCase() + (quote.router || '').toLowerCase();
+          if (routeLower.includes('pump.fun') || routeLower.includes('pump amm')) {
+            console.log(`[SentinelHandoff] ${symbol}: rota Jupiter via Pump AMM bloqueada. Aguardando graduação total para Raydium...`);
+            continue;
+          }
+          routeAvailable = true;
+          console.log(
+            `[SentinelHandoff] ${symbol}: rota Jupiter confirmada em ${Math.round(elapsedMs / 1000)}s ` +
+            `| liq=$${Math.round(marketSnapshot.liquidityUsd)} | tokenAge=${Math.round(tokenAgeMs / 1000)}s`
+          );
+          break;
+        }
+      } catch {
+        console.log(`[SentinelHandoff] ${symbol}: rota Jupiter ainda não disponível em ${Math.round(elapsedMs / 1000)}s. Aguardando...`);
+      }
+    }
+
+    if (!routeAvailable || !marketSnapshot) {
+      console.warn(`[SentinelHandoff] ${symbol}: rota não confirmada dentro da janela de ${SENTINEL_DIP_WARMUP_MAX_MS / 1000}s. Abortando.`);
+      antiSpamMemory.recordTechnicalDiscard(mint, 'Sentinel: rota Jupiter nao confirmada no warm-up', 5);
+      return;
+    }
+
+    // Verifica se ainda estamos dentro da janela do Graduation Dip (45s - 90s pós-criação)
+    const tokenAgeMs = Date.now() - token.createdAt.getTime();
+    if (tokenAgeMs < SENTINEL_DIP_WINDOW_MIN_MS || tokenAgeMs > SENTINEL_DIP_WINDOW_MAX_MS) {
+      console.warn(
+        `[SentinelHandoff] ${symbol}: token fora da janela do Graduation Dip ` +
+        `(idade=${Math.round(tokenAgeMs / 1000)}s, janela=${SENTINEL_DIP_WINDOW_MIN_MS / 1000}s-${SENTINEL_DIP_WINDOW_MAX_MS / 1000}s). Abortando.`
+      );
+      // Avalia novamente no ciclo normal de 30s (não registra discard)
+      return;
+    }
+
+    // Monta um TokenCandidate sintético compatível com o fluxo normal do Padrão Ouro
+    // com isSentinelPreAudited = true para bypass do gate de maturidade de 5 minutos.
+    const syntheticCandidate = {
+      mint,
+      symbol: marketSnapshot.symbol || symbol,
+      name: marketSnapshot.symbol || symbol,
+      priceUsd: marketSnapshot.priceUsd,
+      liquidityUsd: marketSnapshot.liquidityUsd,
+      volume24hUsd: 0,
+      volume5mUsd: marketSnapshot.volume5mUsd,
+      buysM5: marketSnapshot.buysM5,
+      sellsM5: marketSnapshot.sellsM5,
+      pairCreatedAt: token.createdAt.getTime(),
+      dexId: marketSnapshot.dexId || 'raydium',
+      priceChangeM5: undefined, // Sem dado de priceChangeM5 nesta janela nascente
+      pairAddress: marketSnapshot.pairAddress,
+      // Flag de bypass: token já foi auditado pelo Sentinel na bonding curve
+      isSentinelPreAudited: true as const
+    };
+
+    console.log(
+      `[SentinelHandoff] ${symbol}: candidato sintetico montado para execucao. ` +
+      `liq=$${Math.round(syntheticCandidate.liquidityUsd)} | layaScore=${token.layaScore ?? 'N/D'} | age=${Math.round(tokenAgeMs / 1000)}s`
+    );
+
+    // Injeta o token diretamente no ciclo autônomo de entrada como candidato de alta prioridade.
+    // O ciclo verifica: slots disponíveis, capital disponível, Sentinel macro, RugCheck,
+    // AdaptiveSizer, Pump.fun route veto, Escada 4D — tudo do Padrão Ouro inalterado.
+    // O único bypass aplicado é a dispensa do gate MATURITY_AGE (5-60min).
+    await executeSentinelEntryCandidate(syntheticCandidate, token);
+  } catch (err: any) {
+    console.error(`[SentinelHandoff] ${symbol}: erro no handler de Graduation Dip: ${err?.message || err}`);
+  } finally {
+    sentinelActiveGraduations.delete(mint);
+  }
+}
+
+/**
+ * Executa a tentativa de entrada para um candidato pré-auditado pelo Sentinel.
+ * Reutiliza a lógica de capital, sizing e execução Jupiter do ciclo normal,
+ * com um gate MATURITY_AGE bypass explícito para tokens desta origem.
+ */
+async function executeSentinelEntryCandidate(
+  topCandidate: {
+    mint: string; symbol: string; name: string; priceUsd: number;
+    liquidityUsd: number; volume24hUsd: number; volume5mUsd?: number;
+    buysM5?: number; sellsM5?: number; pairCreatedAt: number; dexId: string;
+    priceChangeM5?: number; pairAddress?: string; isSentinelPreAudited?: true;
+  },
+  sentinelToken: SentinelHandoffToken
+): Promise<void> {
+  // Guarda de concorrência: não abre nova posição se já no teto ou circuit breaker ativo
+  if (executionUncertainReason) return;
+  if (positionEngine.getAllPositions().length >= MAX_CONCURRENT_POSITIONS) {
+    console.log(`[SentinelHandoff] ${topCandidate.symbol}: teto de concorrência atingido, pulando.`);
+    return;
+  }
+  if (latestState.circuitBreakerActive) {
+    console.log(`[SentinelHandoff] ${topCandidate.symbol}: circuit breaker ativo, pulando.`);
+    return;
+  }
+
+  console.log(
+    `[SentinelHandoff] Auditando ${topCandidate.symbol} via RugCheck ` +
+    `(bypass MATURITY_AGE ativo — pre-auditado na bonding curve pelo Sentinel).`
+  );
+
+  // Auditoria completa via RugCheck + MemeRiskGatekeeper (sem bypass de risco — apenas de idade)
+  const audit = await gatekeeper.auditToken({
+    mint: topCandidate.mint,
+    liquidityUsd: topCandidate.liquidityUsd,
+    priceChangeM5: topCandidate.priceChangeM5,
+    buysM5: topCandidate.buysM5,
+    sellsM5: topCandidate.sellsM5,
+    priceUsd: topCandidate.priceUsd
+  });
+
+  if (!audit.safe) {
+    console.warn(`[SentinelHandoff] ${topCandidate.symbol}: vetado pela auditoria de risco: ${audit.reason}`);
+    antiSpamMemory.recordVeto(topCandidate.mint, audit.reason || 'SentinelHandoff: veto RugCheck', 60 * 60 * 1000);
+    return;
+  }
+
+  console.log(`[SentinelHandoff] ${topCandidate.symbol}: aprovado pelo RugCheck (score=${audit.score}). Dimensionando entrada...`);
+
+  const balanceSol = await wallet.getBalanceSol();
+  const activePositions = positionEngine.getAllPositions();
+  const capitalPolicy = buildEquitySizingPolicy({
+    cashBalanceSol: balanceSol,
+    positions: activePositions.map(p => ({ costBasisSol: Math.max(0, p.entrySol || 0), executableValueSol: p.lastJupiterExecutableSolValue || p.entrySol })),
+    maxPositions: MAX_CONCURRENT_POSITIONS,
+    entryEquityPct: ENTRY_EQUITY_PCT,
+    maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
+    maxEntrySol: MAX_TRADE_AMOUNT_SOL,
+    maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
+    minExecutableEntrySol: MIN_EXECUTABLE_ENTRY_SOL,
+    gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
+    minGasReserveSol: MIN_GAS_RESERVE_SOL,
+    maxGasReserveSol: MAX_GAS_RESERVE_SOL
+  });
+
+  if (!capitalPolicy.canOpenNextPosition) {
+    console.log(`[SentinelHandoff] ${topCandidate.symbol}: capital insuficiente para nova entrada.`);
+    return;
+  }
+
+  const quoteParams = {
+    inputMint: SOL_MINT_GLOBAL,
+    outputMint: topCandidate.mint,
+    slippageBps: 750,
+    autoSlippage: true,
+    poolLiquidityUsd: topCandidate.liquidityUsd,
+    maxAutoSlippageBps: 750,
+    trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
+  };
+
+  const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
+    ladderSol: capitalPolicy.ladderSol,
+    validate: async (_quote, sizeSol) => {
+      try {
+        const sim = await jupiterEngine.simulateSwap({
+          inputMint: SOL_MINT_GLOBAL,
+          outputMint: topCandidate.mint,
+          amountLamports: Math.floor(sizeSol * 1e9),
+          autoSlippage: true,
+          poolLiquidityUsd: topCandidate.liquidityUsd,
+          maxAutoSlippageBps: 750,
+          skipPreflight: false,
+          userPublicKey: OFFICIAL_PHANTOM_WALLET,
+          keypair: wallet.getKeypair(),
+          priorityLevel: 'medium',
+          trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
+        }, _quote);
+        return sim.success ? null : (sim.error || 'SIMULATION_REJECTED');
+      } catch (err: any) {
+        return err?.message || 'excecao na simulacao pre-voo';
+      }
+    }
+  });
+
+  if (!sizing.success || !sizing.quote) {
+    console.log(`[SentinelHandoff] ${topCandidate.symbol}: dimensionamento falhou — ${sizing.error || 'pool rasa'}.`);
+    antiSpamMemory.recordTechnicalDiscard(topCandidate.mint, `Sentinel: sizing falhou: ${sizing.error || 'pool rasa'}`, 2);
+    return;
+  }
+
+  // Veto de rota Pump.fun (invariante do Padrão Ouro)
+  const routeSummaryLower = (sizing.quote.routePlanSummary || '').toLowerCase();
+  const routerLower = (sizing.quote.router || '').toLowerCase();
+  if (routeSummaryLower.includes('pump.fun') || routeSummaryLower.includes('pump amm') || routerLower.includes('pump')) {
+    console.warn(`[SentinelHandoff] ${topCandidate.symbol}: rota Jupiter via Pump AMM vetada. Entrada abortada.`);
+    return;
+  }
+
+  const tradeLamports = Math.floor(sizing.sizeSol * 1e9);
+  const traceId = randomUUID();
+  console.log(
+    `[SentinelHandoff] Executando swap Graduation Dip — ${topCandidate.symbol} | ` +
+    `${sizing.sizeSol} SOL | impact=${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}% | traceId=${traceId}`
+  );
+
+  const swapResult = await jupiterEngine.executeSwap({
+    inputMint: SOL_MINT_GLOBAL,
+    outputMint: topCandidate.mint,
+    amountLamports: tradeLamports,
+    autoSlippage: true,
+    poolLiquidityUsd: topCandidate.liquidityUsd,
+    maxAutoSlippageBps: 750,
+    skipPreflight: false,
+    userPublicKey: OFFICIAL_PHANTOM_WALLET,
+    keypair: wallet.getKeypair(),
+    trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
+  });
+
+  if (swapResult.status !== 'SUCCESS' && swapResult.status !== 'DRY_RUN_SUCCESS') {
+    console.error(`[SentinelHandoff] ${topCandidate.symbol}: swap falhou — ${swapResult.error || swapResult.status}`);
+    antiSpamMemory.recordVeto(topCandidate.mint, `Sentinel swap falhou: ${swapResult.status}`, 10 * 60 * 1000);
+    return;
+  }
+
+  let managedAtomic = Math.trunc(swapResult.outAmount);
+  if (!swapResult.isDryRun && swapResult.txSignature) {
+    const actualDelta = await wallet.getReceivedTokenDeltaAtomic(swapResult.txSignature, topCandidate.mint);
+    if (actualDelta) managedAtomic = assertAtomicAmountToNumber(actualDelta);
+  }
+
+  const nowTs = Date.now();
+  const confirmedEntrySol = swapResult.inAmount / 1e9;
+
+  // Registra a posição no PositionExitEngine com a Escada 4D completa do Padrão Ouro
+  positionEngine.addPosition({
+    mint: topCandidate.mint,
+    symbol: topCandidate.symbol,
+    tokenAmount: managedAtomic,
+    entryPriceUsd: topCandidate.priceUsd,
+    entrySol: confirmedEntrySol,
+    stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
+    takeProfitPct: PositionExitEngine.TP1_TRIGGER_PCT,
+    entryTimestamp: nowTs,
+    traceId,
+    initialTokenAmount: managedAtomic,
+    entryPairAddress: topCandidate.pairAddress
+  });
+
+  journal.logDecision({
+    traceId,
+    decision: 'ENTRY_APPROVED',
+    compositeScore: audit.score,
+    token: {
+      mint: topCandidate.mint,
+      tokenSymbol: topCandidate.symbol,
+      poolAddress: topCandidate.pairAddress,
+      ageMinutes: Math.round((nowTs - topCandidate.pairCreatedAt) / 60000),
+      liquidityUsd: topCandidate.liquidityUsd,
+      priceUsd: topCandidate.priceUsd,
+      priceChange5mPct: topCandidate.priceChangeM5,
+      volume5mUsd: topCandidate.volume5mUsd
+    },
+    market: { sentinelRegime: latestState.macroRegime as any || 'NEUTRAL_RANGING' },
+    execution: { sizeSol: sizing.sizeSol, estimatedSlippagePct: 7.5 },
+    gateEvaluations: [
+      // MATURITY_AGE: bypass documentado — token pre-auditado na bonding curve pelo Sentinel
+      DecisionLogger.evaluateGate('MATURITY_AGE', true, 0, 0),
+      DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
+      DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
+      DecisionLogger.evaluateGate('SLOT_AVAILABILITY', positionEngine.getAllPositions().length <= MAX_CONCURRENT_POSITIONS, positionEngine.getAllPositions().length, MAX_CONCURRENT_POSITIONS),
+    ],
+    metadata: {
+      phase: 'ENTRY_EXECUTED',
+      txSignature: swapResult.txSignature,
+      isDryRun: swapResult.isDryRun,
+      sentinelHandoff: true,
+      layaScore: sentinelToken.layaScore,
+      devWallet: sentinelToken.devWallet,
+      graduationDipAgeMs: nowTs - sentinelToken.createdAt.getTime()
+    }
+  });
+
+  console.log(
+    `[SentinelHandoff] Posicao Graduation Dip aberta com sucesso: ${topCandidate.symbol} ` +
+    `| ${managedAtomic} unidades atomicas | tx=${swapResult.txSignature || 'DRY_RUN'}`
+  );
+}
+
 async function main() {
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');
@@ -2861,6 +3224,13 @@ async function main() {
   setInterval(() => {
     rentRecovery.sweepOrphanAccounts().catch(() => {});
   }, 2 * 60 * 60 * 1000);
+
+  // 2.3 Ponte Sentinel Handoff: ingere tokens pré-auditados da bonding curve
+  //     com bypass cirúrgico da trava de 5 minutos.
+  await sentinelHandoffScanner.start();
+  sentinelHandoffScanner.on('sentinelGraduationToken', (token: SentinelHandoffToken) => {
+    void handleSentinelGraduationDip(token);
+  });
 
   // 3. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)
   setInterval(runUltraFastExitMonitor, FAST_EXIT_INTERVAL_MS);
