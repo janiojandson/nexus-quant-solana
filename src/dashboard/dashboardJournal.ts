@@ -188,95 +188,6 @@ export function renderJournalSection(): string {
         Aguardando amostras suficientes para análise de correlação entre latência de execução e retorno.
       </div>
     </div>
-
-    <!-- ── CARD 4: FAIXA DE MATURAÇÃO ── -->
-    <div id="card-maturity" class="bg-slate-900/80 rounded-2xl p-5 border border-purple-900/50 shadow-xl backdrop-blur-sm">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-1 mb-2">
-        <h3 class="text-sm font-bold text-purple-300 flex items-center gap-2">
-          <span>⏰ Faixa de Maturação — Qual Janela é Ideal?</span>
-        </h3>
-        <span class="text-xs text-slate-400">5-60 min (atual) vs "Momento Doce" (3-8 min)</span>
-      </div>
-      <div class="text-xs text-slate-500 mb-4">
-        Avaliação empírica: os dados definem qual faixa cronológica entrega maior Expectancy Value (EV).
-      </div>
-
-      <!-- Tabela de Performance por Faixa -->
-      <div class="overflow-x-auto rounded-xl border border-slate-800 mb-4">
-        <table class="w-full text-xs text-left">
-          <thead class="bg-slate-950/90 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800">
-            <tr>
-              <th class="py-2.5 px-3">Faixa de Idade</th>
-              <th class="py-2.5 px-2 text-right">Trades</th>
-              <th class="py-2.5 px-2 text-right">WR%</th>
-              <th class="py-2.5 px-2 text-right">Avg PnL%</th>
-              <th class="py-2.5 px-2 text-right">Avg Win%</th>
-              <th class="py-2.5 px-2 text-right">Avg Loss%</th>
-              <th class="py-2.5 px-3 text-right">Total PnL (SOL)</th>
-            </tr>
-          </thead>
-          <tbody id="dj-maturity-body" class="divide-y divide-slate-800/60 font-mono">
-            <tr>
-              <td colspan="7" class="text-center text-slate-500 py-6 font-sans">
-                Aguardando trades fechados com idade de token registrada no ledger...
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Comparação de Estratégias -->
-      <div class="bg-slate-950/80 rounded-xl p-4 border border-purple-950/60">
-        <div class="text-xs text-slate-300 mb-3 font-bold flex items-center gap-2">
-          <span>📊 COMPARAÇÃO DE ESTRATÉGIAS</span>
-          <span class="text-[10px] text-slate-500 font-normal">(Requisito: N ≥ 30 por faixa)</span>
-        </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <!-- Momento Doce -->
-          <div class="bg-slate-900/90 rounded-xl p-3 border border-amber-500/30">
-            <div class="text-xs text-amber-400 font-bold mb-2 flex items-center gap-1.5">
-              <span>🟡</span>
-              <span>Momento Doce (3-8 min)</span>
-            </div>
-            <div class="space-y-1 text-xs text-slate-400 font-mono">
-              <div class="flex justify-between"><span>N:</span> <strong id="dj-mc-n" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>WR:</span> <strong id="dj-mc-wr" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>EV:</span> <strong id="dj-mc-ev" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>PnL:</span> <strong id="dj-mc-pnl" class="text-white">—</strong></div>
-            </div>
-          </div>
-          <!-- Janela Atual -->
-          <div class="bg-purple-950/30 rounded-xl p-3 border border-purple-500/40">
-            <div class="text-xs text-purple-400 font-bold mb-2 flex items-center gap-1.5">
-              <span>🟣</span>
-              <span>Janela Atual (5-30 min)</span>
-            </div>
-            <div class="space-y-1 text-xs text-slate-400 font-mono">
-              <div class="flex justify-between"><span>N:</span> <strong id="dj-ja-n" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>WR:</span> <strong id="dj-ja-wr" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>EV:</span> <strong id="dj-ja-ev" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>PnL:</span> <strong id="dj-ja-pnl" class="text-white">—</strong></div>
-            </div>
-          </div>
-          <!-- Estendida -->
-          <div class="bg-slate-900/90 rounded-xl p-3 border border-cyan-500/30">
-            <div class="text-xs text-cyan-400 font-bold mb-2 flex items-center gap-1.5">
-              <span>🔵</span>
-              <span>Estendida (30-60 min)</span>
-            </div>
-            <div class="space-y-1 text-xs text-slate-400 font-mono">
-              <div class="flex justify-between"><span>N:</span> <strong id="dj-ee-n" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>WR:</span> <strong id="dj-ee-wr" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>EV:</span> <strong id="dj-ee-ev" class="text-white">—</strong></div>
-              <div class="flex justify-between"><span>PnL:</span> <strong id="dj-ee-pnl" class="text-white">—</strong></div>
-            </div>
-          </div>
-        </div>
-        <div id="dj-maturity-verdict" class="mt-3 text-xs text-center text-slate-400 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
-          Aguardando N ≥ 30 em cada faixa para determinação estatística...
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- ═══════════════════════════════════════════════ -->
@@ -290,8 +201,7 @@ export function renderJournalSection(): string {
         await Promise.all([
           fetchCard1_Funnel(),
           fetchCard2_Gates(),
-          fetchCard3_Latency(),
-          fetchCard4_Maturity()
+          fetchCard3_Latency()
         ]);
       } catch (e) {
         // Silencioso em caso de latência momentânea
@@ -580,74 +490,7 @@ export function renderJournalSection(): string {
       } catch (err) {}
     }
 
-    // ── CARD 4: Faixa de Maturação ──
-    async function fetchCard4_Maturity() {
-      try {
-        const res = await fetch('/api/journal/maturity');
-        if (!res.ok) return;
-        const data = await res.json();
 
-        // Tabela principal
-        const tbody = document.getElementById('dj-maturity-body');
-        if (tbody && data.ageBuckets && data.ageBuckets.length > 0) {
-          tbody.innerHTML = data.ageBuckets.map(function(b) {
-            const pnlColor = (b.avg_pnl_pct || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400';
-            const nColor = (b.n_trades < 30) ? 'text-amber-400' : 'text-white';
-
-            return '<tr class="border-b border-slate-800/60 hover:bg-slate-800/30 transition">' +
-              '<td class="py-2.5 px-3 text-slate-300 font-sans font-medium">' + b.age_bucket + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono ' + nColor + '">' + b.n_trades + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono text-white">' + (b.win_rate_pct != null ? b.win_rate_pct + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono ' + pnlColor + '">' +
-                (b.avg_pnl_pct != null ? (b.avg_pnl_pct > 0 ? '+' : '') + b.avg_pnl_pct + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono text-emerald-400">' + (b.avg_win_pct != null ? '+' + b.avg_win_pct + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-2 text-right font-mono text-rose-400">' + (b.avg_loss_pct != null ? b.avg_loss_pct + '%' : '—') + '</td>' +
-              '<td class="py-2.5 px-3 text-right font-mono ' + pnlColor + '">' +
-                (b.total_net_pnl_sol != null ? Number(b.total_net_pnl_sol).toFixed(6) : '—') + '</td>' +
-            '</tr>';
-          }).join('');
-        }
-
-        // Comparação de estratégias
-        const strategies = data.strategyComparison || [];
-        for (let i = 0; i < strategies.length; i++) {
-          const s = strategies[i];
-          const strat = s.strategy || '';
-          const prefix = strat.indexOf('momento_doce') !== -1 ? 'dj-mc' :
-                         strat.indexOf('janela_atual') !== -1 ? 'dj-ja' :
-                         strat.indexOf('estendida') !== -1 ? 'dj-ee' : null;
-          if (prefix) {
-            const elN = document.getElementById(prefix + '-n');
-            const elWr = document.getElementById(prefix + '-wr');
-            const elEv = document.getElementById(prefix + '-ev');
-            const elPnl = document.getElementById(prefix + '-pnl');
-            if (elN) elN.textContent = s.n || '—';
-            if (elWr) elWr.textContent = s.win_rate != null ? s.win_rate + '%' : '—';
-            if (elEv) elEv.textContent = s.avg_pnl_pct != null ? (s.avg_pnl_pct > 0 ? '+' : '') + s.avg_pnl_pct + '%' : '—';
-            if (elPnl) elPnl.textContent = s.total_pnl_sol != null ? Number(s.total_pnl_sol).toFixed(6) + ' SOL' : '—';
-          }
-        }
-
-        // Veredito
-        const verdict = document.getElementById('dj-maturity-verdict');
-        if (verdict) {
-          if (strategies.length >= 2) {
-            const best = strategies[0];
-            const names = {
-              'momento_doce_3_8min': '🟡 MOMENTO DOCE (3-8 min)',
-              'janela_atual_15_30min': '🟣 JANELA ATUAL (5-30 min)',
-              'janela_estendida_30_60min': '🔵 ESTENDIDA (30-60 min)'
-            };
-            verdict.innerHTML =
-              '<span class="text-emerald-400 font-bold">🏆 Melhor faixa: ' +
-              (names[best.strategy] || best.strategy) +
-              '</span> — EV: +' + best.avg_pnl_pct + '% | WR: ' + best.win_rate + '% | N: ' + best.n;
-          } else {
-            verdict.textContent = data.note || 'Aguardando N ≥ 30 em cada faixa para determinação estatística...';
-          }
-        }
-      } catch (err) {}
-    }
 
     // ── BOTÃO: Executar Calibração / Auditoria Sob Demanda ──
     async function runCalibrationManual(event) {

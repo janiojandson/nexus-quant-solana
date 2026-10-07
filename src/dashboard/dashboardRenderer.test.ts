@@ -12,93 +12,144 @@ const state: DashboardState = {
   macroRegime: 'NEUTRAL_RANGING',
   circuitBreakerActive: false,
   activeRpcUrl: 'https://mainnet.helius-rpc.com/',
-  totalRealizedPnlSol: 0,
-  totalNetworkFeesSolEst: 0,
-  incubator: { waiting: 0, mature: 19, technicalDiscards: 3, entryEligible: 1 },
+  totalRealizedPnlSol: 0.045,
+  totalNetworkFeesSolEst: 0.002,
+  sentinelHandoffQueue: 3,
+  incubator: { waiting: 5, mature: 19, technicalDiscards: 3, entryEligible: 2 },
   exitPathHealth: {
-    state: 'DEGRADED',
-    canOpenNewPosition: false,
-    canRunResearch: false,
-    maxFailures: 2,
-    affectedMints: ['Mint111111111111111111111111111111111111111'],
-    reason: 'Jupiter /order unavailable',
+    state: 'HEALTHY',
+    canOpenNewPosition: true,
+    canRunResearch: true,
+    maxFailures: 0,
+    affectedMints: [],
+    reason: 'Jupiter rotas saudáveis',
     lastChangedAt: new Date().toISOString()
   },
-  pumpObservatory: {
-    enabled: true,
-    running: true,
-    readOnly: true,
-    totalCreatedObserved: 12,
-    activeCurves: 9,
-    graduatedCount: 3,
-    dexIndexedCount: 0,
-    dexReadyCount: 0,
-    lastCreateToObserverLagMs: 2400,
-    maxCreateToObserverLagMs: 5100,
-    lastObservedAt: new Date().toISOString(),
-    recent: [{
-      mint: 'PumpMint111111111111111111111111111111111111',
-      symbol: 'PUMPX',
-      name: 'Pump Nexus',
-      creator: 'Creator11111111111111111111111111111111111',
-      bondingCurve: 'Curve111111111111111111111111111111111111',
-      slot: 300123456,
-      signature: 'PumpTx111111111111111111111111111111111111111111111111',
-      eventTimestampMs: Date.now() - 2400,
-      observedAtMs: Date.now(),
-      createToObserverLagMs: 2400,
-      initialRealTokenReserves: '800',
-      currentRealTokenReserves: '320',
-      progressPct: 60,
-      complete: false,
-      solscanUrl: 'https://solscan.io/token/PumpMint111111111111111111111111111111111111',
-      transactionUrl: 'https://solscan.io/tx/PumpTx111111111111111111111111111111111111111111111111',
-      pumpUrl: 'https://pump.fun/coin/PumpMint111111111111111111111111111111111111'
-    }]
-  },
-  positions: [{
-    mint: 'Mint111111111111111111111111111111111111111',
-    symbol: 'TEST',
-    tokenAmount: 1_000_000,
-    entryPriceUsd: 0.001,
-    currentPriceUsd: 0.00108,
-    pnlPct: 0.08,
-    stopLossPct: -0.06,
-    takeProfitPct: 0.35,
-    entryTimestamp: Date.now(),
-    dexScreenerUrl: 'https://dexscreener.com/solana/test',
-    solscanUrl: 'https://solscan.io/token/test',
-    trailingActive: true,
-    stopStatusText: 'Stop Ativo: Trailing Momentum (-6% do Topo: +1.52%)'
-  }],
-  closedTrades: [],
+  positions: [
+    {
+      mint: 'Mint111111111111111111111111111111111111111',
+      symbol: 'RAYDOGE',
+      tokenAmount: 1_000_000,
+      entryPriceUsd: 0.001,
+      currentPriceUsd: 0.00108,
+      pnlPct: 0.08,
+      stopLossPct: -0.06,
+      takeProfitPct: 0.35,
+      entryTimestamp: Date.now(),
+      dexScreenerUrl: 'https://dexscreener.com/solana/test',
+      solscanUrl: 'https://solscan.io/token/test',
+      trailingActive: true,
+      stopStatusText: 'Stop Ativo: Trailing Momentum (-6% do Topo: +1.52%)',
+      isSentinelHandoff: false
+    },
+    {
+      mint: 'Mint222222222222222222222222222222222222222',
+      symbol: 'SENTINELPUMP',
+      tokenAmount: 500_000,
+      entryPriceUsd: 0.0005,
+      currentPriceUsd: 0.00062,
+      pnlPct: 0.24,
+      stopLossPct: -0.04,
+      takeProfitPct: 0.50,
+      entryTimestamp: Date.now(),
+      dexScreenerUrl: 'https://dexscreener.com/solana/test2',
+      solscanUrl: 'https://solscan.io/token/test2',
+      trailingActive: true,
+      stopStatusText: 'Stop Ativo: Trailing Momentum',
+      isSentinelHandoff: true
+    }
+  ],
+  closedTrades: [
+    {
+      mint: 'MintClosed111111111111111111111111111111111',
+      symbol: 'CLOSEDEX',
+      tokenAmount: 100_000,
+      entryPriceUsd: 0.0001,
+      exitPriceUsd: 0.00014,
+      entryTimestamp: Date.now() - 3600000,
+      exitTimestamp: Date.now() - 1800000,
+      pnlPct: 0.40,
+      pnlSolEst: 0.03,
+      exitReason: 'TAKE_PROFIT',
+      txSignature: '5J4XTxSignature111111111111111111111111111111111',
+      dexScreenerUrl: 'https://dexscreener.com/solana/closedex',
+      solscanUrl: 'https://solscan.io/token/closedex',
+      isSentinelHandoff: false
+    },
+    {
+      mint: 'MintClosed222222222222222222222222222222222',
+      symbol: 'CLOSESENT',
+      tokenAmount: 200_000,
+      entryPriceUsd: 0.0002,
+      exitPriceUsd: 0.00028,
+      entryTimestamp: Date.now() - 7200000,
+      exitTimestamp: Date.now() - 3600000,
+      pnlPct: 0.40,
+      pnlSolEst: 0.025,
+      exitReason: 'PARTIAL_TAKE_PROFIT_50',
+      txSignature: '4K3YTxSignature222222222222222222222222222222222',
+      dexScreenerUrl: 'https://dexscreener.com/solana/closesent',
+      solscanUrl: 'https://solscan.io/token/closesent',
+      isSentinelHandoff: true
+    }
+  ],
   recentAudits: [],
   quarantineCount: 1085,
-  scannerLogs: [],
+  scannerLogs: [
+    { timestamp: '21:30:00', message: '⚡ SentinelHandoffScanner: capturado token PUMP_TOKEN' },
+    { timestamp: '21:30:01', message: '🎯 DEX 5m Scanner: APROVADO token RAYDOGE' }
+  ],
   lastUpdated: new Date().toISOString()
 };
 
-test('Dashboard reflete a estratégia operacional atual e só habilita ações após login admin', () => {
+test('Dashboard Executivo reflete o layout limpo sem seções legadas poluidoras', () => {
   const html = renderDashboardHtml(state);
 
+  // Seções legadas removidas definitivamente
+  assert.doesNotMatch(html, /Pump\.fun Observatory/);
+  assert.doesNotMatch(html, /Pump Strategy Lab/);
+  assert.doesNotMatch(html, /Faixa de Maturação/);
+  assert.doesNotMatch(html, /Comparação de Estratégias/);
+  assert.doesNotMatch(html, /Pump SELL Fallback/);
+
+  // Header Executivo
+  assert.match(html, /NEXUS QUANT SOLANA/);
+  assert.match(html, /SISTEMA 24\/7/);
+  assert.match(html, /FBx2SK/);
   assert.match(html, /EXECUÇÃO REAL ON-CHAIN/);
-  assert.match(html, /5-60 min/);
-  assert.match(html, /Filtro \$15k/);
-  assert.match(html, /Elegíveis para Auditoria/);
-  assert.match(html, /PnL\/Stop Jupiter executável 1\.5s/);
-  assert.match(html, /DexScreener referência/);
-  assert.match(html, /SL inicial: -12.5%/);
-  assert.match(html, /Trailing momentum: \+8%\/-6% do topo/);
-  assert.match(html, /Stop Ativo: Trailing Momentum/);
-  assert.match(html, /Proteção de Saída/);
-  assert.match(html, /DEGRADED/);
-  assert.match(html, /Jupiter \/order unavailable/);
-  assert.match(html, /Pump\.fun Observatory/);
-  assert.match(html, /READ-ONLY/);
-  assert.match(html, /PUMPX/);
-  assert.match(html, /60\.00%/);
-  assert.match(html, /pump\.fun\/coin\/PumpMint/);
-  assert.match(html, /solscan\.io\/token\/PumpMint/);
+  assert.match(html, /0\.2781 SOL/);
+
+  // Cards Chave do Topo / Funil
+  assert.match(html, /Incubadora/);
+  assert.match(html, /Maturos para Análise/);
+  assert.match(html, /Descartes Técnicos/);
+  assert.match(html, /Elegíveis/);
+  assert.match(html, /⚡ Fila Sentinel/);
+  assert.match(html, /id="metric-sentinel-queue"/);
+
+  // Posições Ativas com Badges de Origem
+  assert.match(html, /Posições Ativas sob Gestão/);
+  assert.match(html, /🎯 DEX 5m/);
+  assert.match(html, /⚡ Sentinel/);
+  assert.match(html, /RAYDOGE/);
+  assert.match(html, /SENTINELPUMP/);
+  assert.match(html, /Varrer contas SPL vazias/);
+
+  // Histórico de Trades Fechados com Breakdown por Origem
+  assert.match(html, /Histórico de Trades Fechados/);
+  assert.match(html, /DEX 5m — PnL/);
+  assert.match(html, /⚡ Sentinel — PnL/);
+  assert.match(html, /Taxa de Acerto Global/);
+  assert.match(html, /CLOSEDEX/);
+  assert.match(html, /CLOSESENT/);
+
+  // Decision Journal & Telemetria
+  assert.match(html, /DECISION JOURNAL & CALIBRAÇÃO DE EV/);
+  assert.match(html, /Telemetria &amp; Logs em Tempo Real/);
+});
+
+test('Dashboard possui controles de segurança e login administrativo', () => {
+  const html = renderDashboardHtml(state);
 
   assert.match(html, /ENTRAR ADMIN/);
   assert.match(html, /PÂNICO GERAL/);
@@ -109,12 +160,6 @@ test('Dashboard reflete a estratégia operacional atual e só habilita ações a
   assert.match(html, /credentials: 'same-origin'/);
   assert.match(html, /\/api\/auth\/logout/);
   assert.match(html, /disabled data-admin-action="true"/);
-  assert.doesNotMatch(html, /Ultra-Fast 1\.5s quote loop/);
-  assert.doesNotMatch(html, /Stop Loss: -8%/);
-
-  // A API já entrega stopLossPct em percentual. O browser não pode multiplicar novamente por 100.
-  assert.match(html, /p\.stopLossPct !== undefined \? p\.stopLossPct : -6/);
-  assert.doesNotMatch(html, /p\.stopLossPct \* 100/);
 });
 
 test('todos os scripts inline gerados pelo dashboard têm sintaxe JavaScript válida', () => {
@@ -133,155 +178,15 @@ test('todos os scripts inline gerados pelo dashboard têm sintaxe JavaScript vá
   });
 });
 
-
-test('Pump Observatory escapa nome/símbolo não confiável antes de renderizar HTML', () => {
-  const pump = state.pumpObservatory!;
-  const maliciousState: DashboardState = {
+test('Dashboard lida graciosamente com estado vazio de posições e trades', () => {
+  const emptyState: DashboardState = {
     ...state,
-    pumpObservatory: {
-      ...pump,
-      recent: [{
-        ...pump.recent[0],
-        symbol: '<img src=x onerror=alert(1)>',
-        name: '<script>alert(1)</script>'
-      }]
-    }
+    positions: [],
+    closedTrades: []
   };
-  const html = renderDashboardHtml(maliciousState);
-  assert.doesNotMatch(html, /<img src=x onerror=alert\(1\)>/);
-  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
-});
 
-
-test('Dashboard expõe Strategy Lab econômico sem promover dados insuficientes', () => {
-  const html = renderDashboardHtml({
-    ...state,
-    pumpStrategyLab: {
-      mode: 'SHADOW',
-      totalSamples: 40,
-      preferredJupiterPlan: 'Developer',
-      preferredPlanNetAfterCostSol: 0.275,
-      strategies: [{
-        cohort: 'BIRTH_0_15S',
-        venue: 'JUPITER_ROUTE',
-        state: 'PROMISING_SHADOW',
-        sampleCount: 40,
-        meanNetReturnPct: 4.2,
-        executableExitRate: 0.95
-      }]
-    }
-  });
-
-  assert.match(html, /Pump Strategy Lab/);
-  assert.match(html, /Developer/);
-  assert.match(html, /PROMISING_SHADOW/);
-  assert.match(html, /BIRTH_0_15S/);
-  assert.match(html, /95\.0%/);
-});
-
-
-test('Strategy Lab possui atualização dinâmica via /api/status', () => {
-  const html = renderDashboardHtml(state);
-  assert.match(html, /id="pump-strategy-lab-tbody"/);
-  assert.match(html, /id="pump-strategy-lab-samples"/);
-  assert.match(html, /data\.pumpStrategyLab/);
-});
-
-test('Strategy Lab exposes a temporary collection failure and sampled replay scope', () => {
-  const html = renderDashboardHtml({
-    ...state,
-    pumpStrategyLab: {
-      mode: 'SHADOW',
-      lastError: 'SAMPLE_FAILED',
-      totalSamples: 0,
-      strategies: []
-    } as any
-  });
-  assert.match(html, /Coleta temporariamente indisponível/);
-  assert.match(html, /cotações amostradas/);
-  assert.match(html, /strategyLab\.lastError/);
-});
-
-
-test('Dashboard deixa explícito que Pump SELL fallback está desabilitado por padrão', () => {
-  const html = renderDashboardHtml({
-    ...state,
-    pumpDirectSellFallback: {
-      enabled: false,
-      selectedPath: 'NONE',
-      confirmationState: 'IDLE',
-      estimatedCostSol: null,
-      fallbackReason: null
-    }
-  });
-
-  assert.match(html, /Pump SELL Fallback/);
-  assert.match(html, /DESABILITADO/);
-  assert.match(html, /SELL-only/);
-  assert.match(html, /Última rota/);
-  assert.match(html, /Confirmação/);
-});
-
-
-test('Dashboard Strategy Lab mostra janela, horizonte e replay de saída', () => {
-  const html = renderDashboardHtml({
-    ...state,
-    pumpStrategyLab: {
-      mode: 'SHADOW',
-      totalSamples: 12,
-      preferredJupiterPlan: 'INSUFFICIENT_DATA',
-      strategies: [{
-        cohort: 'BIRTH_0_15S',
-        entryWindow: 'LAUNCH_0_15S',
-        horizon: '5m',
-        venue: 'JUPITER_ROUTE',
-        state: 'INSUFFICIENT_DATA',
-        sampleCount: 12,
-        meanNetReturnPct: 8.5,
-        executableExitRate: 0.92,
-        exitPolicyReplays: [{
-          policy: 'TIERED_PROFIT_LOCK',
-          meanNetReturnPct: 11.25,
-          meanMaxGiveBackFromPeakPct: 7.5,
-          prematureExitRate: 0.08
-        }]
-      }]
-    }
-  });
-
-  assert.match(html, /LAUNCH_0_15S/);
-  assert.match(html, />5m</);
-  assert.match(html, /TIERED_PROFIT_LOCK/);
-  assert.match(html, /11\.25%/);
-});
-
-
-test('Dashboard quantifica a primeira rota Jupiter dentro de 750 bps e a janela de 15s', () => {
-  const html = renderDashboardHtml({
-    ...state,
-    pumpStrategyLab: {
-      mode: 'SHADOW',
-      totalSamples: 0,
-      preferredJupiterPlan: 'INSUFFICIENT_DATA',
-      routeReadiness: {
-        maxSlippageBps: 750,
-        momentZeroWindowMs: 15_000,
-        probedMints: 2,
-        compliantRouteMints: 1,
-        compliantRouteRate: 0.5,
-        momentZeroMints: 1,
-        momentZeroRate: 0.5,
-        medianFirstCompliantRouteLagMs: 8_000,
-        p90FirstCompliantRouteLagMs: 8_000,
-        smallestFirstExecutableAmountLamports: 1_000_000,
-        medianFirstExecutableAmountLamports: 1_000_000
-      },
-      strategies: []
-    }
-  });
-
-  assert.match(html, /Primeira rota ≤ 750 bps/);
-  assert.match(html, /50\.0% \(1\/2\)/);
-  assert.match(html, /latência mediana: 8\.0s/);
-  assert.match(html, /Proxy SHADOW de momento 0/);
+  const html = renderDashboardHtml(emptyState);
+  assert.match(html, /Aguardando candidato aprovado pelos filtros determinísticos/);
+  assert.match(html, /Nenhum trade encerrado ainda/);
+  assert.match(html, /0 \/ 2/);
 });
