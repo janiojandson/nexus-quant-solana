@@ -83,6 +83,17 @@ export interface SolanaLayaFacts {
   volumeSellsM5?: number;
   priceUsd?: number;
   h1HighPriceUsd?: number;
+  symbol?: string;
+  liquidity?: number;
+  volume5m?: number;
+  volume5mUsd?: number;
+  priceChange?: number;
+  holders?: number;
+  devShare?: number;
+  devSharePercent?: number;
+  holderDistribution?: number;
+  topHoldersShare?: number;
+  score?: number;
 }
 
 export interface SolanaLayaPositionFacts {
@@ -99,6 +110,152 @@ export interface SolanaLayaPositionFacts {
   buySellRatio?: number;
   trailingActive?: boolean;
   stopLossPct?: number;
+  liquidityUsd?: number;
+  volume5mUsd?: number;
+}
+
+export function extractLayaErrorMessage(error: any): string {
+  if (error?.response?.data) {
+    const data = error.response.data;
+    if (typeof data === 'string') return data;
+    if (data.detail) {
+      if (typeof data.detail === 'string') return data.detail;
+      if (Array.isArray(data.detail)) {
+        return data.detail
+          .map((d: any) => {
+            const loc = Array.isArray(d.loc) ? d.loc.join('.') : (d.loc || '');
+            const msg = d.msg || d.message || JSON.stringify(d);
+            return loc ? `${loc}: ${msg}` : msg;
+          })
+          .join(' | ');
+      }
+      return JSON.stringify(data.detail);
+    }
+    if (data.error) {
+      return typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+    }
+    if (data.message) {
+      return typeof data.message === 'string' ? data.message : JSON.stringify(data.message);
+    }
+    try {
+      return JSON.stringify(data);
+    } catch {
+      return String(data);
+    }
+  }
+  return error?.message || String(error);
+}
+
+export function sanitizeSolanaLayaFacts(raw: Partial<SolanaLayaFacts> | Record<string, any> | undefined | null): SolanaLayaFacts & Record<string, any> {
+  const f: Record<string, any> = (raw || {}) as Record<string, any>;
+  const num = (v: any, fallback = 0): number => {
+    if (v === null || v === undefined) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const bool = (v: any, fallback = false): boolean => {
+    if (typeof v === 'boolean') return v;
+    if (v === 'true' || v === 1) return true;
+    if (v === 'false' || v === 0) return false;
+    return fallback;
+  };
+  const str = (v: any, fallback = ''): string => {
+    if (typeof v === 'string') return v.trim();
+    if (v === null || v === undefined) return fallback;
+    return String(v).trim();
+  };
+
+  const mint = str(f.mint || f.tokenAddress || f.address, 'UNKNOWN_MINT');
+  const symbol = str(f.symbol || f.tokenSymbol, 'UNKNOWN');
+  const liquidityUsd = Math.max(0, num(f.liquidityUsd ?? f.liquidity, 0));
+  const volume5mUsd = Math.max(0, num(f.volume5mUsd ?? f.volume5m, 0));
+  const priceChangeM5 = num(f.priceChangeM5 ?? f.priceChange5mPct ?? f.priceChange, 0);
+  const holdersCount = Math.max(0, Math.round(num(f.holdersCount ?? f.holders, 0)));
+  const rugCheckScore = Math.max(0, Math.min(100, Math.round(num(f.rugCheckScore ?? f.score, 0))));
+  const devShare = Math.max(0, num(f.devShare ?? f.devSharePercent ?? f.dev_share, 0));
+  const topHoldersPct = Math.max(0, num(f.topHoldersPct ?? f.topHoldersShare ?? f.top5HoldersPct ?? f.holderDistribution, 0));
+  const lpLockedPct = Math.max(0, Math.min(100, num(f.lpLockedPct ?? f.lp_locked_pct, 0)));
+  const buysM5 = Math.max(0, Math.round(num(f.buysM5 ?? f.buysCount5m, 0)));
+  const sellsM5 = Math.max(0, Math.round(num(f.sellsM5 ?? f.sellsCount5m, 0)));
+  const volumeBuysM5 = Math.max(0, num(f.volumeBuysM5, 0));
+  const volumeSellsM5 = Math.max(0, num(f.volumeSellsM5, 0));
+  const priceUsd = Math.max(0, num(f.priceUsd, 0));
+  const h1HighPriceUsd = Math.max(0, num(f.h1HighPriceUsd, priceUsd));
+
+  return {
+    mint,
+    symbol,
+    liquidityUsd,
+    liquidity: liquidityUsd,
+    volume5mUsd,
+    volume5m: volume5mUsd,
+    priceChangeM5,
+    priceChange: priceChangeM5,
+    holdersCount,
+    holders: holdersCount,
+    holderDistribution: topHoldersPct,
+    devShare,
+    devSharePercent: devShare,
+    topHoldersPct,
+    topHoldersShare: topHoldersPct,
+    rugCheckScore,
+    score: rugCheckScore,
+    mintAuthorityRevoked: bool(f.mintAuthorityRevoked, false),
+    freezeAuthorityRevoked: bool(f.freezeAuthorityRevoked, false),
+    lpLockedPct,
+    buysM5,
+    sellsM5,
+    volumeBuysM5,
+    volumeSellsM5,
+    priceUsd,
+    h1HighPriceUsd
+  };
+}
+
+export function sanitizeSolanaLayaPositionFacts(raw: Partial<SolanaLayaPositionFacts> | undefined | null): SolanaLayaPositionFacts & Record<string, any> {
+  const f = raw || {};
+  const num = (v: any, fallback = 0): number => {
+    if (v === null || v === undefined) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const str = (v: any, fallback = ''): string => {
+    if (typeof v === 'string') return v.trim();
+    if (v === null || v === undefined) return fallback;
+    return String(v).trim();
+  };
+
+  const mint = str(f.mint, 'UNKNOWN_MINT');
+  const symbol = str(f.symbol, 'UNKNOWN');
+  const pnlPct = num(f.pnlPct, 0);
+  const peakPnlPct = num(f.peakPnlPct, pnlPct);
+  const holdingSeconds = Math.max(0, Math.round(num(f.holdingSeconds, 0)));
+  const partialTaken = Boolean(f.partialTaken);
+  const entryPriceUsd = num(f.entryPriceUsd, 0);
+  const currentPriceUsd = num(f.currentPriceUsd, entryPriceUsd);
+  const lastKnownLiquidityUsd = Math.max(0, num(f.lastKnownLiquidityUsd, 0));
+  const lastKnownVolume5mUsd = Math.max(0, num(f.lastKnownVolume5mUsd, 0));
+  const buySellRatio = num(f.buySellRatio, 1.0);
+  const trailingActive = Boolean(f.trailingActive);
+  const stopLossPct = num(f.stopLossPct, -0.15);
+
+  return {
+    mint,
+    symbol,
+    pnlPct,
+    peakPnlPct,
+    holdingSeconds,
+    partialTaken,
+    currentPriceUsd,
+    entryPriceUsd,
+    lastKnownLiquidityUsd,
+    liquidityUsd: lastKnownLiquidityUsd,
+    lastKnownVolume5mUsd,
+    volume5mUsd: lastKnownVolume5mUsd,
+    buySellRatio,
+    trailingActive,
+    stopLossPct
+  };
 }
 
 export interface SolanaLayaDecision {
@@ -157,7 +314,7 @@ export class SolanaLayaAdapter {
   constructor(options: SolanaLayaAdapterOptions = {}) {
     this.baseUrl = options.baseUrl || process.env.SOLANA_LAYA_NATIVE_URL || '';
     this.apiKey = options.apiKey || process.env.SOLANA_LAYA_AUTH_TOKEN || process.env.SOLANA_LAYA_API_KEY;
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 4000);
+    this.timeoutMs = options.timeoutMs ?? Number(process.env.SOLANA_LAYA_TIMEOUT_MS || 2500);
     this.privateProxy = options.privateProxy
       ?? (process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true'
         || this.baseUrl.includes('.railway.internal:8001'));
@@ -174,6 +331,18 @@ export class SolanaLayaAdapter {
   ): Promise<SolanaLayaTacticalDecision<TAction>> {
     this.assertConfigured();
 
+    const sanitizedFacts =
+      request.facts && typeof request.facts === 'object' && 'holdingSeconds' in request.facts
+        ? sanitizeSolanaLayaPositionFacts(request.facts as any)
+        : sanitizeSolanaLayaFacts(request.facts as any);
+
+    const contextData = {
+      ...sanitizedFacts,
+      source: 'nexus-quant-solana',
+      contractVersion: request.contractVersion,
+      stage: request.stage
+    };
+
     const payload = {
       state: {
         body: request.body,
@@ -181,71 +350,116 @@ export class SolanaLayaAdapter {
         contractVersion: request.contractVersion,
         stage: request.stage,
         hardSafetyGatesRemainAuthoritative: true,
-        facts: request.facts
+        facts: sanitizedFacts,
+        context: contextData
       },
+      context: contextData,
       questions: {
         [request.questionName]: {
           type: 'choice',
           instructions: request.instructions,
-          criteria: request.criteria
+          criteria: request.criteria,
+          choices: [...request.allowed]
         },
-        ...(request.questionName === 'action' ? {
-          score: {
-            type: 'score',
-            instructions: 'Pontuação de qualidade e segurança do token de 0 a 100',
-            min: 0,
-            max: 100
-          }
-        } : {})
+        ...(request.questionName === 'action'
+          ? {
+              score: {
+                type: 'score',
+                instructions: 'Pontuação de qualidade e segurança do token de 0 a 100',
+                criteria: [
+                  '0 - Risco extremo de rug pull ou contrato malicioso',
+                  '25 - Alto risco, métricas frágeis ou desbalanceamento tóxico',
+                  '50 - Neutro, contexto insuficiente para alocação',
+                  '75 - Aprovado, fundamentos e métricas on-chain seguros',
+                  '100 - Alta convicção, liquidez robusta e forte momentum'
+                ],
+                range: [0, 100]
+              }
+            }
+          : {})
       },
       lang: 'pt',
       min_confidence: request.minConfidence
     };
 
-    const started = Date.now();
-    const response = await this.httpClient.post(
-      `${this.baseUrl.replace(/\/$/, '')}/v1/systemone`,
-      payload,
-      {
-        timeout: this.timeoutMs,
-        headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : undefined
+    const maxAttempts = 2;
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const started = Date.now();
+      try {
+        const response = await this.httpClient.post(
+          `${this.baseUrl.replace(/\/$/, '')}/v1/systemone`,
+          payload,
+          {
+            timeout: this.timeoutMs,
+            headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : undefined
+          }
+        );
+
+        const data = response.data || {};
+        const answer = data.answers?.[request.questionName];
+        const rawAction = String(answer?.choice || '').trim().toUpperCase() as TAction;
+
+        if (!request.allowed.includes(rawAction)) {
+          throw new Error(`Laya nativa retornou ação inválida em ${request.stage}: ${rawAction || 'ausente'}`);
+        }
+
+        const confidence = Number(answer?.answer_confidence);
+        if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+          throw new Error('Laya nativa retornou answer_confidence inválida');
+        }
+
+        const rawScore =
+          answer?.score ??
+          answer?.risk_score ??
+          (data.answers?.score?.value ?? data.answers?.score?.score ?? data.answers?.score);
+        const score = Number.isFinite(Number(rawScore)) ? Number(rawScore) : Math.round(confidence * 100);
+
+        const abstention = typeof answer?.abstention === 'string' ? answer.abstention : undefined;
+        const lowConfidence = answer?.low_confidence === true || abstention === 'abstained';
+        const effectiveAction =
+          lowConfidence && request.allowed.includes('ABSTAIN' as TAction)
+            ? ('ABSTAIN' as TAction)
+            : rawAction;
+
+        return {
+          action: effectiveAction,
+          confidence,
+          score,
+          abstention,
+          lowConfidence,
+          routingModel: typeof data.routing?.model === 'string' ? data.routing.model : undefined,
+          latencyMs: Date.now() - started,
+          raw: data
+        };
+      } catch (err: any) {
+        lastError = err;
+        const errorDetail = extractLayaErrorMessage(err);
+        const statusCode = err?.response?.status ? `HTTP ${err.response.status}` : 'NETWORK_ERROR';
+        console.warn(
+          `[LayaClient] Tentativa ${attempt}/${maxAttempts} falhou para ${request.stage} (${statusCode}): ${errorDetail}`
+        );
+
+        // Se for erro de validação (422) ou erro de autenticação (401/403), não repete
+        if (err?.response?.status && err.response.status >= 400 && err.response.status < 500) {
+          break;
+        }
+
+        // Se for timeout ou erro transitório de rede, aguarda 150ms e retenta uma vez
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+        }
       }
-    );
-
-    const data = response.data || {};
-    const answer = data.answers?.[request.questionName];
-    const rawAction = String(answer?.choice || '').trim().toUpperCase() as TAction;
-
-    if (!request.allowed.includes(rawAction)) {
-      throw new Error(`Laya nativa retornou ação inválida em ${request.stage}: ${rawAction || 'ausente'}`);
     }
 
-    const confidence = Number(answer?.answer_confidence);
-    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
-      throw new Error('Laya nativa retornou answer_confidence inválida');
-    }
-
-    const rawScore = answer?.score ?? answer?.risk_score ?? (data.answers?.score?.value ?? data.answers?.score?.score ?? data.answers?.score);
-    const score = Number.isFinite(Number(rawScore)) ? Number(rawScore) : Math.round(confidence * 100);
-
-    const abstention = typeof answer?.abstention === 'string' ? answer.abstention : undefined;
-    const lowConfidence = answer?.low_confidence === true || abstention === 'abstained';
-    const effectiveAction = (
-      lowConfidence && request.allowed.includes('ABSTAIN' as TAction)
-        ? ('ABSTAIN' as TAction)
-        : rawAction
-    );
-
-    return {
-      action: effectiveAction,
-      confidence,
-      score,
-      abstention,
-      lowConfidence,
-      routingModel: typeof data.routing?.model === 'string' ? data.routing.model : undefined,
-      latencyMs: Date.now() - started,
-      raw: data
-    };
+    const finalDetail = extractLayaErrorMessage(lastError);
+    const finalStatus = lastError?.response?.status ? `HTTP ${lastError.response.status}` : 'NETWORK_ERROR';
+    const enrichedError = new Error(`Laya API Error (${finalStatus}): ${finalDetail}`);
+    (enrichedError as any).response = lastError?.response;
+    (enrichedError as any).status = lastError?.response?.status;
+    (enrichedError as any).detail = finalDetail;
+    throw enrichedError;
   }
 
   /** Probe operacional sem efeito financeiro. Valida conectividade e checkpoint carregado. */

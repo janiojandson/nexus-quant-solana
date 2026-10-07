@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { RugCheckService, type RugCheckReport } from './rugCheckService.js';
-import { SolanaLayaAdapter, type SolanaLayaDecision, type SolanaLayaFacts } from './solanaLayaAdapter.js';
+import { SolanaLayaAdapter, sanitizeSolanaLayaFacts, type SolanaLayaDecision, type SolanaLayaFacts } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
@@ -188,7 +188,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    const layaFacts: SolanaLayaFacts = {
+    const layaFacts: SolanaLayaFacts = sanitizeSolanaLayaFacts({
       mint: token.mint,
       liquidityUsd: token.liquidityUsd,
       holdersCount: rugReport.holdersCount,
@@ -204,7 +204,7 @@ export class MemeRiskGatekeeper {
       volumeSellsM5: token.volumeSellsM5,
       priceUsd: token.priceUsd,
       h1HighPriceUsd: token.h1HighPriceUsd
-    };
+    });
 
     if (this.layaNativeShadowEnabled) {
       try {

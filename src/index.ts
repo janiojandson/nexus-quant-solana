@@ -2116,8 +2116,9 @@ async function executeAutonomousCycle() {
               `score=${layaGate.score} latencyMs=${layaEntry.latencyMs}`
             );
           } catch (layaErr: any) {
-            const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score 0 < 75 - Erro: ${layaErr?.message || layaErr})`;
-            console.warn(`🚨 [Laya:Tactical:LIVE:FAIL-CLOSED] ${topCandidate.symbol} bloqueado por erro na Laya: ${layaErr?.message || layaErr}`);
+            const errDetail = layaErr?.detail || layaErr?.message || String(layaErr);
+            const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score 0 < 75 - Erro: ${errDetail})`;
+            console.warn(`🚨 [Laya:Tactical:LIVE:FAIL-CLOSED] ${topCandidate.symbol} bloqueado por erro na Laya: ${errDetail}`);
             antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, Math.max(SCAN_INTERVAL_MS, 30_000));
             journal.logDecision({
               traceId: currentTraceId,
@@ -2641,16 +2642,7 @@ async function executeAutonomousCycle() {
       console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
     }
 
-    // Ciclo 5: Verificação de Reprodução Darwinista
-    if (reproduction.canReproduce(balanceSol)) {
-      const split = reproduction.calculateSurplusSplit({
-        currentBalanceSol: balanceSol,
-        reserveOperatingBalanceSol: 0.20
-      });
-      console.log(`🎉 PROSPERIDADE! Saque Janio: ${split.profitShareJanioSol} SOL | Alocação Filho: ${split.childInitialStakeSol} SOL`);
-      const child = await reproduction.spawnChildAgent('MEME_HUNTER');
-      console.log(`👶 Subagente Filho Parido: ${child.childPublicKey} (${child.specialty})`);
-    }
+    // Ciclo 5: Reprodução Darwinista legada removida (projeto anterior)
 
     console.log(`✅ [${new Date().toLocaleTimeString()}] Ciclo finalizado com proteção integral.`);
   } catch (error: any) {
@@ -3140,20 +3132,26 @@ async function executeSentinelEntryCandidate(
   }
 
   // 🧠 Laya Live Gatekeeper para tokens do Sentinel
-  if (SOLANA_LAYA_TACTICAL_MODE === 'LIVE' && audit.layaFacts) {
-    try {
-      const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
-      const layaGate = shouldBlockSolanaEntryFromLaya(layaEntry, 'LIVE');
-      if (layaGate.blocked) {
-        const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score ${layaGate.score} < 75)`;
-        console.warn(`[SentinelHandoff] ${topCandidate.symbol} VETADO por Laya LIVE: ${vetoReason}`);
-        antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, 60 * 60 * 1000);
+  if (SOLANA_LAYA_TACTICAL_MODE === 'LIVE') {
+    // Se o token já possui score Laya aprovado pela bonding curve do Sentinel (>= 75), reaproveita a auditoria
+    if (typeof sentinelToken.layaScore === 'number' && sentinelToken.layaScore >= 75) {
+      console.log(`[SentinelHandoff] ${topCandidate.symbol} aprovado via LayaScore pré-auditado na bonding curve: score=${sentinelToken.layaScore}`);
+    } else if (audit.layaFacts) {
+      try {
+        const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
+        const layaGate = shouldBlockSolanaEntryFromLaya(layaEntry, 'LIVE');
+        if (layaGate.blocked) {
+          const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score ${layaGate.score} < 75)`;
+          console.warn(`[SentinelHandoff] ${topCandidate.symbol} VETADO por Laya LIVE: ${vetoReason}`);
+          antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, 60 * 60 * 1000);
+          return;
+        }
+        console.log(`[SentinelHandoff] ${topCandidate.symbol} APROVADO pela Laya LIVE: score=${layaGate.score}`);
+      } catch (layaErr: any) {
+        const errDetail = layaErr?.detail || layaErr?.message || String(layaErr);
+        console.warn(`[SentinelHandoff] Falha na Laya LIVE para ${topCandidate.symbol}: ${errDetail}`);
         return;
       }
-      console.log(`[SentinelHandoff] ${topCandidate.symbol} APROVADO pela Laya LIVE: score=${layaGate.score}`);
-    } catch (layaErr: any) {
-      console.warn(`[SentinelHandoff] Falha na Laya LIVE para ${topCandidate.symbol}: ${layaErr?.message || layaErr}`);
-      return;
     }
   }
 

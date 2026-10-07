@@ -286,7 +286,14 @@ export class PumpObservatory {
     try {
       if (this.rpc.getMultipleAccountsInfo) {
         const addresses = active.map(item => new PublicKey(item.bondingCurve));
-        const accounts = await this.rpc.getMultipleAccountsInfo(addresses, 'confirmed');
+        // QuickNode Discover plan e outros RPCs com limite estrito aceitam no maximo 5 contas por chamada (erro 413)
+        const BATCH_SIZE = 5;
+        const accounts: Array<{ data: Buffer | Uint8Array } | null> = [];
+        for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
+          const chunk = addresses.slice(i, i + BATCH_SIZE);
+          const chunkAccounts = await this.rpc.getMultipleAccountsInfo(chunk, 'confirmed');
+          accounts.push(...(chunkAccounts || []));
+        }
         active.forEach((observation, index) => {
           this.applyCurveAccount(observation, accounts[index] ?? null);
         });

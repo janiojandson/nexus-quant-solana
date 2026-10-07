@@ -30,14 +30,14 @@ export function createResilientConnection(urls: string[]): Connection {
   return new Proxy(connections[0], {
     get(target, prop, receiver) {
       if (typeof (target as any)[prop] === 'function') {
-        return async (...args: any[]) => {
+        const executeWithFailover = async (...callArgs: any[]) => {
           let lastErr: any;
           const startIdx = (counter++) % connections.length;
           for (let attempt = 0; attempt < connections.length; attempt++) {
             const idx = (startIdx + attempt) % connections.length;
             const conn = connections[idx];
             try {
-              const res = await (conn as any)[prop](...args);
+              const res = await (conn as any)[prop](...callArgs);
               activeIndex = idx;
               return res;
             } catch (err: any) {
@@ -50,6 +50,26 @@ export function createResilientConnection(urls: string[]): Connection {
             }
           }
           throw lastErr;
+        };
+
+        return async (...args: any[]) => {
+          // QuickNode Discover plan e RPCs gratuitos limitam getMultipleAccountsInfo a no maximo 5 chaves por chamada (erro 413)
+          if (prop === 'getMultipleAccountsInfo' && Array.isArray(args[0]) && args[0].length > 5) {
+            const keys: any[] = args[0];
+            const otherArgs = args.slice(1);
+            const CHUNK_SIZE = 5;
+            const allResults: any[] = [];
+            for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+              const chunk = keys.slice(i, i + CHUNK_SIZE);
+              const chunkRes = await executeWithFailover(chunk, ...otherArgs);
+              if (Array.isArray(chunkRes)) {
+                allResults.push(...chunkRes);
+              }
+            }
+            return allResults;
+          }
+
+          return executeWithFailover(...args);
         };
       }
       return Reflect.get(connections[activeIndex], prop, receiver);
