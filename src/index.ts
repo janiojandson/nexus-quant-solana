@@ -36,7 +36,7 @@ import { runMaintenance } from './database/maintenanceJob.js';
 import { DailyPnlTracker } from './risk/dailyPnlTracker.js';
 import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './execution/atomicAmount.js';
 import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
-import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode, shouldBlockSolanaEntryFromLaya } from './risk/solanaLayaAdapter.js';
+import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
@@ -172,11 +172,8 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
 
 const scanner = new DexScreenerScanner();
 const exitTelemetry = new NonBlockingTelemetry<Awaited<ReturnType<typeof scanner.fetchCurrentTokenMarketSnapshot>>>();
-const gatekeeper = new MemeRiskGatekeeper({
-  macroSentinelUrl: MACRO_SENTINEL_URL
-});
-// DEX entry triage is scheduled below; native shadow must not delay hard gates.
-const dexEntryGatekeeper = new MemeRiskGatekeeper({
+// DEX e Sentinel agendam advisory separadamente; shadow nativo não atrasa os hard gates.
+const entryGatekeeper = new MemeRiskGatekeeper({
   macroSentinelUrl: MACRO_SENTINEL_URL,
   layaNativeShadowEnabled: false
 });
@@ -1803,7 +1800,7 @@ async function executeAutonomousCycle() {
 
         // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
         console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
-        const audit = await dexEntryGatekeeper.auditToken({
+        const audit = await entryGatekeeper.auditToken({
         mint: topCandidate.mint,
         liquidityUsd: topCandidate.liquidityUsd,
         priceChangeM5: topCandidate.priceChangeM5,
@@ -2806,7 +2803,7 @@ const SENTINEL_DIP_WARMUP_MAX_MS = 60_000;     // Janela máxima de warm-up: 60s
 const SENTINEL_DIP_WINDOW_MIN_MS = 45_000;     // Janela mínima do dip: 45s pós-criação
 const SENTINEL_DIP_WINDOW_MAX_MS = 90_000;     // Janela máxima do dip: 90s pós-criação
 const SENTINEL_MIN_LIQUIDITY_USD = 15_000;     // Invariante do Padrão Ouro
-const SENTINEL_LAYA_SCORE_MIN = 75;            // Requisito mínimo de Laya Score na bonding curve
+const SENTINEL_DIP_DIRECT_LIQUIDITY_USD = 25_000; // Rota confirmada permite entrada antes de 45s
 const sentinelActiveGraduations = new Set<string>(); // Impede processamento duplo do mesmo mint
 
 async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise<void> {
@@ -2822,12 +2819,8 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     console.log(`[SentinelHandoff] ${symbol}: mint em quarentena local, descartado.`);
     return;
   }
-  // Verificação do Laya Score mínimo da bonding curve
-  if (token.layaScore !== null && token.layaScore < SENTINEL_LAYA_SCORE_MIN) {
-    console.log(`[SentinelHandoff] ${symbol}: LayaScore ${token.layaScore} abaixo do mínimo ${SENTINEL_LAYA_SCORE_MIN}, descartado.`);
-    antiSpamMemory.recordTechnicalDiscard(mint, `LayaScore ${token.layaScore} < ${SENTINEL_LAYA_SCORE_MIN}`, 5);
-    return;
-  }
+  // O score recebido é telemetria advisory, inclusive quando ausente ou baixo.
+  console.log(`[SentinelHandoff] ${symbol}: LayaScore advisory=${token.layaScore ?? 'N/D'} (sem veto).`);
 
   sentinelActiveGraduations.add(mint);
   const startMs = Date.now();
@@ -2844,8 +2837,13 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
 
       const elapsedMs = Date.now() - startMs;
       const tokenAgeMs = Date.now() - token.createdAt.getTime();
+      if (tokenAgeMs > SENTINEL_DIP_WINDOW_MAX_MS) {
+        console.warn(`[SentinelHandoff] ${symbol}: janela máxima do Graduation Dip expirada. Abortando.`);
+        return;
+      }
 
       // Verifica snapshot de mercado na DexScreener (liquidez on-chain)
+      marketSnapshot = null;
       try {
         marketSnapshot = await scanner.fetchCurrentTokenMarketSnapshot(mint);
       } catch {
@@ -2873,6 +2871,20 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
             console.log(`[SentinelHandoff] ${symbol}: contrato Bonding Curve bloqueado. Aguardando migração...`);
             continue;
           }
+          const confirmedAgeMs = Date.now() - token.createdAt.getTime();
+          if (confirmedAgeMs > SENTINEL_DIP_WINDOW_MAX_MS) {
+            console.warn(`[SentinelHandoff] ${symbol}: janela máxima expirou durante a cotação. Abortando.`);
+            return;
+          }
+          if (confirmedAgeMs < SENTINEL_DIP_WINDOW_MIN_MS && marketSnapshot.liquidityUsd < SENTINEL_DIP_DIRECT_LIQUIDITY_USD) {
+            const waitMs = SENTINEL_DIP_WINDOW_MIN_MS - confirmedAgeMs;
+            if (waitMs > 0 && waitMs <= 45_000) {
+              console.log(`[SentinelHandoff] ${symbol}: rota confirmada; aguardando ${waitMs}ms para abertura da janela do Dip.`);
+              await new Promise(resolve => setTimeout(resolve, waitMs));
+            }
+            // Renova liquidez e rota após a espera; não reutiliza a cotação antiga.
+            continue;
+          }
           routeAvailable = true;
           console.log(
             `[SentinelHandoff] ${symbol}: rota Jupiter confirmada em ${Math.round(elapsedMs / 1000)}s ` +
@@ -2891,14 +2903,13 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       return;
     }
 
-    // Verifica se ainda estamos dentro da janela do Graduation Dip (45s - 90s pós-criação)
+    // Liquidez robusta dispensa apenas a idade mínima; o teto de 90s permanece.
     const tokenAgeMs = Date.now() - token.createdAt.getTime();
-    if (tokenAgeMs < SENTINEL_DIP_WINDOW_MIN_MS || tokenAgeMs > SENTINEL_DIP_WINDOW_MAX_MS) {
+    if (tokenAgeMs > SENTINEL_DIP_WINDOW_MAX_MS) {
       console.warn(
         `[SentinelHandoff] ${symbol}: token fora da janela do Graduation Dip ` +
         `(idade=${Math.round(tokenAgeMs / 1000)}s, janela=${SENTINEL_DIP_WINDOW_MIN_MS / 1000}s-${SENTINEL_DIP_WINDOW_MAX_MS / 1000}s). Abortando.`
       );
-      // Avalia novamente no ciclo normal de 30s (não registra discard)
       return;
     }
 
@@ -2970,7 +2981,7 @@ async function executeSentinelEntryCandidate(
   );
 
   // Auditoria completa via RugCheck + MemeRiskGatekeeper (sem bypass de risco — apenas de idade)
-  const audit = await gatekeeper.auditToken({
+  const audit = await entryGatekeeper.auditToken({
     mint: topCandidate.mint,
     liquidityUsd: topCandidate.liquidityUsd,
     priceChangeM5: topCandidate.priceChangeM5,
@@ -3008,28 +3019,17 @@ async function executeSentinelEntryCandidate(
     return;
   }
 
-  // 🧠 Laya Live Gatekeeper para tokens do Sentinel
-  if (SOLANA_LAYA_TACTICAL_MODE === 'LIVE') {
-    // Se o token já possui score Laya aprovado pela bonding curve do Sentinel (>= 75), reaproveita a auditoria
-    if (typeof sentinelToken.layaScore === 'number' && sentinelToken.layaScore >= 75) {
-      console.log(`[SentinelHandoff] ${topCandidate.symbol} aprovado via LayaScore pré-auditado na bonding curve: score=${sentinelToken.layaScore}`);
-    } else if (audit.layaFacts) {
-      try {
-        const layaEntry = await solanaLayaAdapter.evaluateEntry(audit.layaFacts);
-        const layaGate = shouldBlockSolanaEntryFromLaya(layaEntry, 'LIVE');
-        if (layaGate.blocked) {
-          const vetoReason = `MOTIVO: Veto por IA Laya Sentinel (Score ${layaGate.score} < 75)`;
-          console.warn(`[SentinelHandoff] ${topCandidate.symbol} VETADO por Laya LIVE: ${vetoReason}`);
-          antiSpamMemory.recordVeto(topCandidate.mint, vetoReason, 60 * 60 * 1000);
-          return;
-        }
-        console.log(`[SentinelHandoff] ${topCandidate.symbol} APROVADO pela Laya LIVE: score=${layaGate.score}`);
-      } catch (layaErr: any) {
-        const errDetail = layaErr?.detail || layaErr?.message || String(layaErr);
-        console.warn(`[SentinelHandoff] Falha na Laya LIVE para ${topCandidate.symbol}: ${errDetail}`);
-        return;
-      }
-    }
+  // Laya é advisory também na ponte Sentinel, mesmo configurada como LIVE/ACTIVE.
+  if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF' || process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true') {
+    scheduleEntryAdvisory({
+      facts: audit.layaFacts,
+      evaluate: facts => solanaLayaAdapter.evaluateEntry(facts),
+      report: telemetry => console.log(
+        `🧠 [Laya:Tactical:SHADOW:SENTINEL_ENTRY] ${topCandidate.symbol} ` +
+        `status=${telemetry.status} action=${telemetry.action ?? 'N/D'} ` +
+        `score=${telemetry.score ?? 'N/D'} error=${telemetry.error ?? 'none'}`
+      )
+    });
   }
 
   const quoteParams = {
