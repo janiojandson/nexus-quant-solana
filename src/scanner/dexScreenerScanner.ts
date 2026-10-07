@@ -38,11 +38,14 @@ export interface IncubatorScanStats {
   mature: number;
   expired: number;
   technicalDiscards: number;
+  upstreamFailures?: number;
+  retrying?: number;
 }
 
 export interface ScannerOptions {
   fetchClient?: (url: string) => Promise<{ data: any }>;
   incubator?: MaturityIncubator;
+  now?: () => number;
 }
 
 export class DexScreenerScanner {
@@ -55,8 +58,12 @@ export class DexScreenerScanner {
   private static readonly GECKOTERMINAL_POOLS_URL = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 
   private lastGeckoFetchTime = 0;
+  private readonly now: () => number;
+  private readonly enrichmentRetryAt = new Map<string, number>();
+  private static readonly ENRICHMENT_BACKOFF_MS = 15_000;
 
   constructor(options?: ScannerOptions) {
+    this.now = options?.now || Date.now;
     this.cooldownCache = new MintCooldownCache(5);
     this.incubator = options?.incubator || new MaturityIncubator({ minMaturityMinutes: 5, maxMaturityMinutes: 60 });
     this.fetchClient = options?.fetchClient || (async (url: string) => {
@@ -96,7 +103,12 @@ export class DexScreenerScanner {
       let rawPairs: any[] = [];
 
       // Controla taxa do GeckoTerminal (máximo 1 chamada a cada 60s para respeitar rate limits públicos)
-      const nowTs = Date.now();
+      const nowTs = this.now();
+      let upstreamFailures = 0;
+      const extractPairs = (data: any): any[] => {
+        const pairs = Array.isArray(data) ? data : data?.pairs;
+        return Array.isArray(pairs) ? pairs : [];
+      };
       const canFetchGecko = (nowTs - this.lastGeckoFetchTime) >= 60000;
       if (canFetchGecko) {
         this.lastGeckoFetchTime = nowTs;
@@ -116,6 +128,7 @@ export class DexScreenerScanner {
         const fetched = Array.isArray(data) ? data : (data?.pairs || []);
         if (Array.isArray(fetched)) {
           rawPairs.push(...fetched);
+          if (fetched.length === 0) upstreamFailures++;
         }
       }
 
@@ -126,6 +139,7 @@ export class DexScreenerScanner {
         const fetched = Array.isArray(data) ? data : (data?.pairs || []);
         if (Array.isArray(fetched)) {
           rawPairs.push(...fetched);
+          if (fetched.length === 0) upstreamFailures++;
         }
       }
 
@@ -156,22 +170,8 @@ export class DexScreenerScanner {
           } else if (ageMinutes <= 60) {
             // Se já tiver entre 5 e 60 minutos na captura: avalia imediatamente
             discoveredMints.add(mint);
-            rawPairs.push({
-              chainId: 'solana',
-              dexId: 'geckoterminal',
-              baseToken: {
-                address: mint,
-                symbol: attr.name ? attr.name.split(' / ')[0] : 'UNKNOWN',
-                name: attr.name || 'Unknown'
-              },
-              priceUsd: Number(attr.base_token_price_usd || 0),
-              liquidity: { usd: Number(attr.reserve_in_usd || 0) },
-              volume: {
-                h24: Number(attr.volume_usd?.h24 || 0),
-                m5: Number(attr.volume_usd?.m5 || 0)
-              },
-              pairCreatedAt: poolCreatedAt
-            });
+            this.incubator.add({ mint, poolAddress: attr.address || gp.id || '', pairCreatedAt: poolCreatedAt }, nowTs);
+            // Gecko discovers the mint; only real DEX pairs may pass entry filters.
           }
         }
       }
@@ -186,36 +186,65 @@ export class DexScreenerScanner {
       };
 
       for (const matureToken of incubatorSweep.mature) {
-        // A incubadora é uma fila de espera, não um backlog permanente:
-        // ao atingir maturidade, o mint é liberado uma única vez para avaliação.
-        this.incubator.remove(matureToken.mint);
+        // Só consome depois de receber pares reais para este mint.
         if (this.cooldownCache.shouldProcess(matureToken.mint)) {
           discoveredMints.add(matureToken.mint);
         }
       }
 
       // Enriquece mints descobertos (incluindo maturos da incubadora) em lotes de até 30 na DexScreener API
-      const mintsArray = Array.from(discoveredMints).filter(m => this.cooldownCache.shouldProcess(m));
+      const queuedMints = new Set(this.incubator.getAll().map(token => token.mint));
+      for (const mint of this.enrichmentRetryAt.keys()) {
+        if (!queuedMints.has(mint)) this.enrichmentRetryAt.delete(mint);
+      }
+      const mintsArray = Array.from(discoveredMints).filter(m =>
+        this.cooldownCache.shouldProcess(m) && nowTs >= (this.enrichmentRetryAt.get(m) || 0)
+      );
       if (mintsArray.length > 0) {
         const batchSize = 30;
         for (let i = 0; i < Math.min(mintsArray.length, 60); i += batchSize) {
-          const chunk = mintsArray.slice(i, i + batchSize).join(',');
+          const chunkMints = mintsArray.slice(i, i + batchSize);
+          let fetchedPairs: any[] = [];
           try {
-            const tokensRes = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${chunk}`);
-            const fetchedPairs = Array.isArray(tokensRes.data)
-              ? tokensRes.data
-              : (tokensRes.data?.pairs || (Array.isArray(tokensRes.data?.pairs) ? tokensRes.data.pairs : []));
-            if (Array.isArray(fetchedPairs)) {
-              rawPairs.push(...fetchedPairs);
+            const tokensRes = await this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${chunkMints.join(',')}`);
+            fetchedPairs = extractPairs(tokensRes.data);
+          } catch { upstreamFailures++; }
+          // Lote vazio é upstream temporário, nunca veto técnico do mint.
+          if (fetchedPairs.length === 0) {
+            upstreamFailures++;
+            if (chunkMints.length > 1) {
+              // Limita concorrência para não serializar 30 timeouts nem disparar uma rajada sem limite.
+              for (let offset = 0; offset < chunkMints.length; offset += 5) {
+                const singles = await Promise.allSettled(chunkMints.slice(offset, offset + 5).map(mint =>
+                  this.fetchClient(`https://api.dexscreener.com/latest/dex/tokens/${mint}`)
+                ));
+                for (const single of singles) {
+                  if (single.status === 'fulfilled') fetchedPairs.push(...extractPairs(single.value.data));
+                  else upstreamFailures++;
+                }
+              }
             }
-          } catch {}
+          }
+          rawPairs.push(...fetchedPairs);
+          for (const mint of chunkMints) {
+            const hasPairs = fetchedPairs.some(pair => pair?.baseToken?.address === mint && (!pair.chainId || pair.chainId === 'solana'));
+            if (hasPairs) {
+              this.incubator.remove(mint);
+              this.enrichmentRetryAt.delete(mint);
+            } else {
+              this.enrichmentRetryAt.set(mint, this.now() + DexScreenerScanner.ENRICHMENT_BACKOFF_MS);
+              console.warn(`[DEX_UPSTREAM_WAIT] ${mint}: pares ausentes; retentativa após 15000ms.`);
+            }
+          }
         }
       }
 
       // 3. Log de Diagnóstico: Tokens brutos extraídos antes dos filtros
       console.log(`📡 [Descoberta] ${rawPairs.length} tokens brutos extraídos de ${sourcesCount} fontes (${discoveredMints.size} mints únicos | Incubadora: ${incubatorSweep.waiting.length} aguardando, ${incubatorSweep.mature.length} maturos)`);
 
-      const now = Date.now();
+      this.lastIncubatorStats.upstreamFailures = upstreamFailures;
+      this.lastIncubatorStats.retrying = this.enrichmentRetryAt.size;
+      const now = this.now();
       const candidates: TokenCandidate[] = [];
       const seenMints = new Set<string>();
       const rejectedMints = new Set<string>();

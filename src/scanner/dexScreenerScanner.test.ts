@@ -2,6 +2,103 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { DexScreenerScanner, TokenCandidate } from './dexScreenerScanner.js';
 
+for (const emptyPairs of [[], null]) {
+  test(`empty enrichment (${JSON.stringify(emptyPairs)}) retains mature mints and retries after 15s`, async () => {
+    let now = Date.now();
+    let recovered = false;
+    const calls: string[] = [];
+    const scanner = new DexScreenerScanner({
+      now: () => now,
+      fetchClient: async url => {
+        calls.push(url);
+        if (url.includes('geckoterminal')) return { data: { data: [] } };
+        if (recovered && url.endsWith('/RetryMint')) return { data: { pairs: [{
+          chainId: 'solana', baseToken: { address: 'RetryMint', symbol: 'RETRY' },
+          priceUsd: '1', liquidity: { usd: 25000 }, pairCreatedAt: now - 600000
+        }] } };
+        return { data: { pairs: emptyPairs } };
+      }
+    });
+    scanner.incubator.add({ mint: 'RetryMint', poolAddress: 'Pool', pairCreatedAt: now - 600000 }, now);
+    assert.deepStrictEqual(await scanner.scanSolanaTrends(), []);
+    assert.strictEqual(scanner.incubator.size(), 1);
+    assert.strictEqual(scanner.cooldownCache.shouldProcess('RetryMint'), true);
+    const attempts = calls.filter(u => u.includes('/tokens/')).length;
+    now += 14999;
+    await scanner.scanSolanaTrends();
+    assert.strictEqual(calls.filter(u => u.includes('/tokens/')).length, attempts);
+    now += 1;
+    recovered = true;
+    assert.strictEqual((await scanner.scanSolanaTrends())[0]?.mint, 'RetryMint');
+    assert.strictEqual(scanner.incubator.size(), 0);
+  });
+}
+
+test('empty batch falls back per mint and retains only unresolved mature candidates', async () => {
+  const now = Date.now();
+  const calls: string[] = [];
+  const scanner = new DexScreenerScanner({ fetchClient: async url => {
+    calls.push(url);
+    if (url.includes('geckoterminal')) return { data: { data: [] } };
+    if (url.endsWith('/Resolved')) return { data: { pairs: [{
+      chainId: 'solana', baseToken: { address: 'Resolved', symbol: 'OK' },
+      priceUsd: '1', liquidity: { usd: 25000 }, pairCreatedAt: now - 600000
+    }] } };
+    return { data: { pairs: null } };
+  } });
+  for (const mint of ['Resolved', 'Pending']) scanner.incubator.add({ mint, poolAddress: mint, pairCreatedAt: now - 600000 }, now);
+  assert.deepStrictEqual((await scanner.scanSolanaTrends()).map(t => t.mint), ['Resolved']);
+  assert.ok(calls.some(u => u.endsWith('/Resolved,Pending')));
+  assert.ok(calls.some(u => u.endsWith('/Resolved')));
+  assert.ok(calls.some(u => u.endsWith('/Pending')));
+  assert.deepStrictEqual(scanner.incubator.getAll().map(t => t.mint), ['Pending']);
+});
+
+test('network failure retains mature mint without rejection cooldown', async () => {
+  const now = Date.now();
+  const scanner = new DexScreenerScanner({ fetchClient: async url => {
+    if (url.includes('geckoterminal')) return { data: { data: [] } };
+    if (url.includes('/tokens/')) throw new Error('upstream timeout');
+    return { data: { pairs: [] } };
+  } });
+  scanner.incubator.add({ mint: 'TimeoutMint', poolAddress: 'Pool', pairCreatedAt: now - 600000 }, now);
+  await scanner.scanSolanaTrends();
+  assert.strictEqual(scanner.incubator.size(), 1);
+  assert.strictEqual(scanner.cooldownCache.shouldProcess('TimeoutMint'), true);
+});
+
+test('Gecko discovery with empty DEX enrichment never poisons cooldown or yields incomplete candidates', async () => {
+  const now = Date.now();
+  for (const reserve of ['0', '30000']) {
+    const scanner = new DexScreenerScanner({ now: () => now, fetchClient: async url => {
+      if (url.includes('geckoterminal')) return { data: { data: [{
+        attributes: { name: 'WAIT / SOL', reserve_in_usd: reserve, base_token_price_usd: '1', pool_created_at: new Date(now - 600000).toISOString() },
+        relationships: { base_token: { data: { id: 'solana_GeckoWait' } } }
+      }] } };
+      return { data: { pairs: [] } };
+    } });
+    assert.deepStrictEqual(await scanner.scanSolanaTrends(), []);
+    assert.equal(scanner.incubator.size(), 1);
+    assert.equal(scanner.cooldownCache.shouldProcess('GeckoWait'), true);
+    assert.equal(scanner.lastIncubatorStats.technicalDiscards, 0);
+  }
+});
+
+test('partial batch keeps only missing mints for retry', async () => {
+  const now = Date.now();
+  const scanner = new DexScreenerScanner({ now: () => now, fetchClient: async url => {
+    if (url.includes('geckoterminal')) return { data: { data: [] } };
+    return { data: { pairs: url.includes('/tokens/') ? [{
+      chainId: 'solana', baseToken: { address: 'Present', symbol: 'OK' },
+      priceUsd: '1', liquidity: { usd: 25000 }, pairCreatedAt: now - 600000
+    }] : [] } };
+  } });
+  for (const mint of ['Present', 'Missing']) scanner.incubator.add({ mint, poolAddress: mint, pairCreatedAt: now - 600000 }, now);
+  assert.deepStrictEqual((await scanner.scanSolanaTrends()).map(t => t.mint), ['Present']);
+  assert.deepStrictEqual(scanner.incubator.getAll().map(t => t.mint), ['Missing']);
+  assert.equal(scanner.cooldownCache.shouldProcess('Missing'), true);
+});
+
 test('DexScreenerScanner: deve filtrar e retornar tokens com liquidez acima do mínimo exigido', async () => {
   const mockFetch = async () => ({
     data: [

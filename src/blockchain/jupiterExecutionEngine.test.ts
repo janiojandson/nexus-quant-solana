@@ -3,10 +3,13 @@ import assert from 'node:assert';
 import axios from 'axios';
 import {
   Connection,
+  AddressLookupTableAccount,
   Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
+  TransactionInstruction,
+  TransactionMessage,
   VersionedTransaction
 } from '@solana/web3.js';
 import { JupiterExecutionEngine, SwapExecutionRequest } from './jupiterExecutionEngine.js';
@@ -14,6 +17,7 @@ import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const TOKEN_MINT = '9GtBRgzUybm5GLk7ZGjpG88aVpZcvLuTdbwNkRraTK7H';
+const BONDING_CURVE_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 const V2_BASE = 'https://fake.invalid';
 
 function buildSwapTransactionB64(wallet: Keypair, feePayer: Keypair = wallet): string {
@@ -145,6 +149,55 @@ function mockExecuteSuccess(
     };
   }) as any;
 }
+
+test('entry program restriction rejects the explicit bonding curve program before sending', async () => {
+  mockOrder(testSigner, { routePlan: [{ swapInfo: { programId: BONDING_CURVE_PROGRAM } }] });
+  let sends = 0;
+  axios.post = (async () => { sends++; throw new Error('must not send'); }) as any;
+  const { conn } = makeConnection({ err: null });
+  const result = await makeEngine(conn).executeSwap({ ...baseRequest, forbiddenProgramIds: [BONDING_CURVE_PROGRAM] });
+  assert.equal(result.status, 'FAILED');
+  assert.match(result.error || '', /forbidden.*program/i);
+  assert.equal(sends, 0);
+});
+
+test('entry program restriction permits migrated Pump AMM labels and preserves validated size', async () => {
+  mockOrder(testSigner, { router: 'pump amm', routePlan: [{ swapInfo: { label: 'Pump.fun AMM' } }] });
+  mockExecuteSuccess();
+  const { conn, state } = makeConnection({ err: null });
+  const result = await makeEngine(conn).executeSwap({ ...baseRequest, forbiddenProgramIds: [BONDING_CURVE_PROGRAM] });
+  assert.equal(result.status, 'SUCCESS');
+  assert.equal(result.inAmount, baseRequest.amountLamports);
+  assert.equal(state.simulateCalls, 1);
+});
+
+test('entry restriction checks serialized static and lookup-table CPI programs without trusting route labels', async () => {
+  const program = new PublicKey(BONDING_CURVE_PROGRAM);
+  const lookup = new AddressLookupTableAccount({ key: Keypair.generate().publicKey, state: {
+    deactivationSlot: 18446744073709551615n, lastExtendedSlot: 0,
+    lastExtendedSlotStartIndex: 0, authority: testSigner.publicKey, addresses: [program]
+  } });
+  for (const useLookup of [false, true]) {
+    const message = new TransactionMessage({
+      payerKey: testSigner.publicKey, recentBlockhash: Keypair.generate().publicKey.toBase58(),
+      instructions: [new TransactionInstruction({
+        programId: SystemProgram.programId, data: Buffer.alloc(0),
+        keys: [{ pubkey: program, isSigner: false, isWritable: false }]
+      })]
+    }).compileToV0Message(useLookup ? [lookup] : []);
+    const tx = new VersionedTransaction(message);
+    mockOrder(testSigner, { transaction: Buffer.from(tx.serialize()).toString('base64'), routePlan: [] });
+    let sends = 0;
+    axios.post = (async () => { sends++; throw new Error('must not send'); }) as any;
+    const { conn, state } = makeConnection({ err: null });
+    (conn as any).getAddressLookupTable = async () => ({ value: lookup });
+    const result = await makeEngine(conn).executeSwap({ ...baseRequest, forbiddenProgramIds: [BONDING_CURVE_PROGRAM] });
+    assert.equal(result.status, 'FAILED');
+    assert.match(result.error || '', /forbidden.*program/i);
+    assert.equal(state.simulateCalls, 0);
+    assert.equal(sends, 0);
+  }
+});
 test('Jupiter V2 uses injected coordinator for general order and separate execute bucket', async () => {
   mockOrder();
   mockExecuteSuccess();

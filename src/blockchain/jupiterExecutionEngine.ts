@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
+import { referencesProgram } from '../execution/entryRoutePolicy.js';
 import {
   JupiterTrafficCoordinator,
   type JupiterPriority
@@ -25,6 +26,8 @@ export interface SwapExecutionRequest {
   skipPreflight?: boolean;
   maxPriorityFeeLamports?: number;
   trafficPriority?: JupiterPriority;
+  /** Entry-only venue restriction; exits remain unrestricted unless requested. */
+  forbiddenProgramIds?: readonly string[];
 }
 
 export interface SwapExecutionResponse {
@@ -197,6 +200,9 @@ export class JupiterExecutionEngine {
     }
 
     const order = response.data as JupiterV2OrderResponse;
+    for (const program of req.forbiddenProgramIds || []) {
+      if (referencesProgram(order.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
+    }
     if (!order?.requestId || !order?.transaction) {
       throw new Error(
         `Jupiter V2 /order sem transação: router=${order?.router || 'unknown'} ` +
@@ -230,6 +236,25 @@ export class JupiterExecutionEngine {
     const expiresAt = Date.parse(order.expireAt);
     if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
       throw new Error('Jupiter V2: expired or invalid expireAt; obtain a fresh order before signing/submission.');
+    }
+  }
+
+  private async assertEntryProgramsAllowed(order: JupiterV2OrderResponse, req: SwapExecutionRequest): Promise<void> {
+    if (!req.forbiddenProgramIds?.length) return;
+    const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction!, 'base64'));
+    const addresses = transaction.message.staticAccountKeys.map(key => key.toBase58());
+    // CPI programs may be loaded through a v0 address lookup table.
+    for (const lookup of transaction.message.addressTableLookups) {
+      const table = (await this.connection.getAddressLookupTable(lookup.accountKey)).value;
+      if (!table) throw new Error('Entry route lookup table unavailable');
+      for (const index of [...lookup.writableIndexes, ...lookup.readonlyIndexes]) {
+        const key = table.state.addresses[index];
+        if (!key) throw new Error('Entry route lookup table index unavailable');
+        addresses.push(key.toBase58());
+      }
+    }
+    for (const program of req.forbiddenProgramIds) {
+      if (addresses.includes(program)) throw new Error(`Forbidden entry program: ${program}`);
     }
   }
 
@@ -300,6 +325,7 @@ export class JupiterExecutionEngine {
         return { success: false, error: 'Keypair ausente para simulação V2.' };
       }
       const order = await this.getOrder(req);
+      await this.assertEntryProgramsAllowed(order, req);
       const { transaction } = this.signOrder(order, req);
       return await this.simulateSignedTransaction(transaction);
     } catch (err: any) {
@@ -384,6 +410,10 @@ export class JupiterExecutionEngine {
           trafficPriority: req.trafficPriority ?? 5
         });
 
+        for (const program of req.forbiddenProgramIds || []) {
+          if (referencesProgram(quote.rawQuote?.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
+        }
+
         return {
           txSignature: `dry_run_v2_${Date.now()}_${Math.random().toString(36).slice(2)}`,
           status: 'DRY_RUN_SUCCESS',
@@ -412,6 +442,7 @@ export class JupiterExecutionEngine {
 
     try {
       const order = await this.getOrder(req);
+      await this.assertEntryProgramsAllowed(order, req);
       const { transaction, signedTransaction } = this.signOrder(order, req);
 
       let unitsConsumed: number | undefined;
