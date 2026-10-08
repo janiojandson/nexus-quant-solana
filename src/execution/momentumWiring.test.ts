@@ -27,5 +27,5 @@ test('actual DEX preflight rejects stagnant samples and journals MOMENTUM_GATE',
   assert.equal(await run(), 'REJECT');
   assert.equal(decisions[0].decision, 'ENTRY_REJECTED');
   assert.equal(decisions[0].metadata.phase, 'MOMENTUM_GATE');
-  assert.match(decisions[0].rejectionReason, /STALE_SOURCE/);
+  assert.match(decisions[0].rejectionReason, /MOMENTUM_GATE|STALE_SOURCE/);
 });

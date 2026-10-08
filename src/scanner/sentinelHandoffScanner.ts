@@ -6,6 +6,7 @@
 // ============================================================
 
 import { EventEmitter } from 'events';
+import { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
 import type { Pool } from 'pg';
 
 export interface SentinelHandoffToken {
@@ -36,11 +37,14 @@ export class SentinelHandoffScanner extends EventEmitter {
 
   /** Intervalo de polling em ms (padrão: 3 segundos) */
   private readonly pollingIntervalMs: number;
+  private rpcHub: HeliusRpcHub | null = null;
+  private incubator = new Map<string, { addedAt: number, token: SentinelHandoffToken }>();
 
-  constructor(pgPool: Pool | null, options: { pollingIntervalMs?: number } = {}) {
+  constructor(pgPool: Pool | null, options: { pollingIntervalMs?: number, rpcHub?: HeliusRpcHub } = {}) {
     super();
     this.pgPool = pgPool;
     this.pollingIntervalMs = options.pollingIntervalMs ?? 3_000;
+    if (options.rpcHub) this.rpcHub = options.rpcHub;
   }
 
   /**
@@ -59,7 +63,7 @@ export class SentinelHandoffScanner extends EventEmitter {
     this.pollingTimer.unref?.();
     console.log(
       `[SentinelHandoff] Scanner ativo | polling a cada ${this.pollingIntervalMs}ms | ` +
-      'aguardando tokens GRADUATING_HIGH_STRENGTH da bonding curve.'
+      'aguardando tokens CANDIDATE (Incubadora) da bonding curve.'
     );
   }
 
@@ -107,7 +111,7 @@ export class SentinelHandoffScanner extends EventEmitter {
       }>(`
         SELECT mint, symbol, dev_wallet, laya_score, pnl_percent, created_at
         FROM sentinel_handoff
-        WHERE status = 'GRADUATING_HIGH_STRENGTH'
+        WHERE status = 'CANDIDATE'
           AND consumed_by_quant = FALSE
           AND created_at > NOW() - INTERVAL '15 minutes'
         ORDER BY created_at ASC
@@ -116,8 +120,6 @@ export class SentinelHandoffScanner extends EventEmitter {
 
       for (const row of candidates.rows) {
         try {
-          // Lock atômico: somente quem fizer UPDATE em consumed_by_quant = FALSE
-          // terá rowCount = 1. Garante idempotência em instâncias paralelas.
           const lockResult = await this.pgPool.query(
             `UPDATE sentinel_handoff
              SET consumed_by_quant = TRUE, consumed_at = NOW()
@@ -125,10 +127,7 @@ export class SentinelHandoffScanner extends EventEmitter {
             [row.mint]
           );
 
-          if ((lockResult.rowCount ?? 0) !== 1) {
-            // Outro worker/instância já consumiu este token.
-            continue;
-          }
+          if ((lockResult.rowCount ?? 0) !== 1) continue;
 
           const token: SentinelHandoffToken = {
             mint: row.mint,
@@ -140,26 +139,47 @@ export class SentinelHandoffScanner extends EventEmitter {
             isSentinelPreAudited: true
           };
 
-          console.log(
-            `[SentinelHandoff] Token pre-auditado capturado: ${token.symbol} (${token.mint}) ` +
-            `| LayaScore=${token.layaScore ?? 'N/D'} | PnL%=${token.pnlPercent ?? 'N/D'} ` +
-            `| Criado em ${token.createdAt.toISOString()}`
-          );
-
-          this.emit('sentinelGraduationToken', token);
+          if (this.rpcHub) {
+            this.incubator.set(row.mint, { addedAt: Date.now(), token });
+            console.log(`[SentinelHandoff] Incubando CANDIDATE: ${token.symbol} (${token.mint})`);
+          } else {
+            this.emit('sentinelGraduationToken', token);
+          }
         } catch (lockErr: any) {
-          console.warn(
-            `[SentinelHandoff] Falha ao fazer lock de ${row.mint}: ${lockErr?.message || lockErr}`
-          );
+          console.warn(`[SentinelHandoff] Falha ao fazer lock de ${row.mint}: ${lockErr?.message || lockErr}`);
         }
       }
+      
+      if (this.rpcHub) {
+        await this.verifyRaydiumPools();
+      }
     } catch (err: any) {
-      // Silencioso: tolerante a tabela ausente ou queda de conexao transitoria.
       if (!String(err?.message || '').includes('does not exist')) {
         console.warn(`[SentinelHandoff] Polling erro: ${err?.message || err}`);
       }
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  private async verifyRaydiumPools() {
+    if (!this.rpcHub) return;
+    const now = Date.now();
+    for (const [mint, data] of this.incubator.entries()) {
+      if (now - data.addedAt > 60000) {
+        this.incubator.delete(mint);
+        continue;
+      }
+      try {
+        const response = (await this.rpcHub.call('STATE', 'getAsset', [mint])) as any;
+        if (response.status === 200 && response.body?.token_info?.price_info) {
+          console.log(`[SentinelHandoff] Pool confirmada on-chain para ${mint}. Avançando...`);
+          this.emit('sentinelGraduationToken', data.token);
+          this.incubator.delete(mint);
+        }
+      } catch (err) {
+        // Pool probably doesn't exist yet
+      }
     }
   }
 
@@ -213,7 +233,7 @@ export class SentinelHandoffScanner extends EventEmitter {
 
       const row = res.rows[0];
       const isGraduated =
-        row.status === 'GRADUATING_HIGH_STRENGTH' ||
+        row.status === 'CANDIDATE' || row.status === 'GRADUATING_HIGH_STRENGTH' ||
         row.status === 'GRADUATED' ||
         row.status === 'GRADUATING';
 
