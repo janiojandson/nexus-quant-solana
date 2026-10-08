@@ -184,15 +184,16 @@ export class JupiterExecutionEngine {
     if (slippageBps !== undefined) params.slippageBps = slippageBps;
 
     let response: any;
+    const apiKey = this.apiKeys.next();
     try {
       response = await this.trafficCoordinator.schedule(
         req.trafficPriority ?? 4,
         () => axios.get(`${this.v2BaseUrl}/order`, {
           params,
           timeout: 10_000,
-          headers: { 'x-api-key': this.apiKeys.next() }
+          headers: { 'x-api-key': apiKey }
         }),
-        'general'
+        'general', undefined, apiKey
       );
     } catch (err: any) {
       const detail =
@@ -365,6 +366,7 @@ export class JupiterExecutionEngine {
     // Retry somente do MESMO requestId + MESMA transação assinada.
     // Nunca cria uma segunda ordem em caso de timeout.
     for (let attempt = 0; attempt < 2; attempt++) {
+      const apiKey = this.apiKeys.next();
       try {
         const response = await this.trafficCoordinator.schedule(
           priority,
@@ -375,11 +377,11 @@ export class JupiterExecutionEngine {
               timeout: this.executeTimeoutMs,
               headers: {
                 'Content-Type': 'application/json',
-                ...(this.apiKeys.hasKeys() ? { 'x-api-key': this.apiKeys.next() } : {})
+                ...(apiKey ? { 'x-api-key': apiKey } : {})
               }
             }
           ),
-          'execute'
+          'execute', undefined, apiKey
         );
         return { response: response.data as JupiterV2ExecuteResponse };
       } catch (err: any) {

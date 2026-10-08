@@ -6,13 +6,15 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import { scheduleEntryAdvisory } from './entryAdvisory.js';
 import axios from 'axios';
+import { EntrySlotPolicy } from './entrySlotPolicy.js';
+import { evaluateExitCapacity } from './exitCapacityPolicy.js';
 import { MemeRiskGatekeeper } from '../risk/memeRiskGatekeeper.js';
 
 // Execute the actual handlers without importing index.ts and starting production services.
 const source = ts.createSourceFile('index.ts', readFileSync(join(__dirname, '../index.ts'), 'utf8'), ts.ScriptTarget.Latest, true);
 function loadHandler(name: string, dependencies: Record<string, unknown>) {
   const nodes = source.statements.filter(node =>
-    ts.isFunctionDeclaration(node) ? node.name?.text === name :
+    ts.isFunctionDeclaration(node) ? (node.name?.text === name || node.name?.text === 'buildEntryCapitalPolicy') :
       ts.isVariableStatement(node) && node.declarationList.declarations.some(d =>
         ts.isIdentifier(d.name) && (d.name.text.startsWith('SENTINEL_') || ['SOL_MINT_GLOBAL', 'sentinelActiveGraduations'].includes(d.name.text) ||
           (dependencies.MemeRiskGatekeeper && ['gatekeeper', 'dexEntryGatekeeper', 'entryGatekeeper'].includes(d.name.text)))));
@@ -21,6 +23,8 @@ function loadHandler(name: string, dependencies: Record<string, unknown>) {
   }).outputText;
   return vm.runInNewContext(`${js}\n${name};`, {
     latestState: { sentinelHandoffQueue: 0 },
+    fastExitInFlight: new Set<string>(), entrySlots: new EntrySlotPolicy(), positionEngine: { getAllPositions: () => [] },
+    evaluateExitCapacity, JUPITER_GENERAL_RPS: 3, FAST_EXIT_INTERVAL_MS: 1500,
     sentinelHandoffScanner: { recordHandoffOutcome: async () => {} },
     ENTRY_MOMENTUM_GATE_ENABLED: false,
     console: { log() {}, warn() {}, error(e: unknown) { throw new Error(String(e)); } },
@@ -145,7 +149,7 @@ test('actual Sentinel handler records a Jupiter deadline discard and clears queu
 });
 test('actual entry handler records RugCheck, sizing, swap failure and real buy outcomes', async () => {
   for(const stage of ['risk','size','swap','success','dry','uncertain','reconciled']) {
-    const outcomes:any[]=[]; let swapped=0, registered=0;
+    const outcomes:any[]=[]; let swapped=0, registered=0, persistedOpen=0, flushed=0;
     const handler=loadHandler('executeSentinelEntryCandidate',{
       console:{log(){},warn(){},error(){}},
       PositionExitEngine:{DEFAULT_STOP_LOSS_PCT:-.125,TP1_TRIGGER_PCT:.25},
@@ -167,11 +171,38 @@ test('actual entry handler records RugCheck, sizing, swap failure and real buy o
       postgresRepo:{saveQuarantine:async()=>{}},
       reconcileUncertainV2Execution:async()=>stage==='reconciled'?{signature:'confirmed',deltaAtomic:'100'}:null,
       jupiterEngine:{executeSwap:async(req:any)=>{swapped++;assert.equal(req.maxPriceImpactPct,2.5);return {status:stage==='swap'?'FAILED':stage==='dry'?'DRY_RUN_SUCCESS':['uncertain','reconciled'].includes(stage)?'SUBMITTED_UNCONFIRMED':'SUCCESS',error:'failed order',txSignature:'signature',isDryRun:stage==='dry',inAmount:25000000,outAmount:100};}},
-      journal:{logDecision(){}},DecisionLogger:{evaluateGate:()=>({})}
+      journal:{logDecision(){},logOutcome(outcome:any){assert.equal(outcome.status,'OPEN');assert.equal(outcome.entrySizeSol,.025);persistedOpen++;},async flush(){flushed++;}},DecisionLogger:{evaluateGate:()=>({})}
     });
     await handler({mint:'mint',symbol:'S',liquidityUsd:0,priceUsd:0,sentinelJupiterDepthVerified:true},{layaScore:null,createdAt:new Date()});
     const expected:{[key:string]:string}={risk:'DISCARDED_RUGCHECK',size:'DISCARDED_PRICE_IMPACT',swap:'FAILED_SWAP',success:'EXECUTED_BUY_SUCCESS',dry:'DRY_RUN_BUY_SUCCESS',uncertain:'SWAP_SUBMITTED_UNCONFIRMED',reconciled:'EXECUTED_BUY_SUCCESS'};
     assert.equal(outcomes[0][1],expected[stage]);
     assert.equal(swapped,stage==='risk'||stage==='size'?0:1);
+    const successful=['success','dry','reconciled'].includes(stage);
+    assert.equal(persistedOpen,successful?1:0);assert.equal(flushed,successful?1:0);
   }
+});
+
+test('persisted Sentinel entry recovers its source and atomic amount after restart',async()=>{
+  const row={mint:'mint',trace_id:'trace',token_symbol:'S',entry_price_usd:0,entry_size_sol:.025,
+    entry_timestamp:new Date(),status:'OPEN',metadata:{sentinelHandoff:true,outAmountAtomic:'100',txSignature:'tx'}};
+  const read=loadHandler('queryRecoverablePositions',{
+    postgresRepo:{getPool:()=>({query:async()=>({rows:[row]})})},
+    assertAtomicAmountToNumber:(n:string)=>Number(n),PositionExitEngine:{DEFAULT_STOP_LOSS_PCT:-.125}
+  });
+  const positions:any=await read();assert.equal(positions.get('mint').entrySource,'SENTINEL');
+  assert.equal(positions.get('mint').initialTokenAmountAtomic,100);
+});
+
+test('slow exit work for one mint does not block the next quote cycle for another mint',async()=>{
+  const quotes:Record<string,number>={slow:0,fast:0};let release!:()=>void;
+  const slow=new Promise<void>(r=>{release=r;});
+  const handler=loadHandler('runUltraFastExitMonitor',{
+    NEXUS_MAINTENANCE_MODE:false,isRunningFastExit:false,
+    positionEngine:{getPeakSolValue:()=>0,getAllPositions:()=>['slow','fast'].map(mint=>({mint,symbol:mint,entrySol:.025,entryPriceUsd:0,tokenAmount:100})),recordQuoteFailure:()=>({failures:1,shouldWarn:false,shouldEmergencyExit:false})},
+    exitTelemetry:{sample(){}},scanner:{},assertStoredAtomicNumberToNumber:(n:number)=>n,
+    priorityForJupiterWork:()=>1,jupiterEngine:{getQuote:async(mint:string)=>{quotes[mint]++;if(mint==='slow')await slow;throw Error('quote test');}},
+    exitPathHealth:{recordFailure(){},snapshot:()=>({})}
+  });
+  const first=handler();await new Promise(r=>setImmediate(r));
+  await handler();assert.equal(quotes.fast,2);assert.equal(quotes.slow,1);release();await first;
 });

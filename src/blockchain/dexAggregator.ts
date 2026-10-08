@@ -12,6 +12,8 @@ import {
 } from './jupiterTrafficCoordinator.js';
 
 export interface SwapQuoteParams {
+  /** Bypass local cache for execution preflight samples. */
+  freshQuote?: boolean;
   signal?: AbortSignal;
   inputMint: string;
   outputMint: string;
@@ -25,6 +27,7 @@ export interface SwapQuoteParams {
 }
 
 export interface SwapQuoteResult {
+  observedAtMs?: number;
   inputMint: string;
   outputMint: string;
   inAmount: number;
@@ -161,7 +164,7 @@ export class DexAggregatorService {
 
     const cacheKey = JSON.stringify({queryParams, slippageCapBps: requestedSlippageBps});
     const cached = this.quoteCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    if (!params.freshQuote && cached && cached.expiresAt > Date.now()) return cached.result;
     if (cached) this.quoteCache.delete(cacheKey);
 
     let response: any;
@@ -169,6 +172,7 @@ export class DexAggregatorService {
 
     for (let attempt = 0; attempt < 2; attempt++) {
       if (params.signal?.aborted) throw new JupiterQuoteException('Jupiter quote aborted');
+      const apiKey = this.apiKeys.next();
       try {
         response = await this.trafficCoordinator.schedule(
           params.trafficPriority ?? 5,
@@ -176,9 +180,9 @@ export class DexAggregatorService {
             params: queryParams,
             timeout: 8000,
             signal: params.signal,
-            headers: this.apiKeys.hasKeys() ? { 'x-api-key': this.apiKeys.next() } : undefined
+            headers: apiKey ? { 'x-api-key': apiKey } : undefined
           }),
-          'general', params.signal
+          'general', params.signal, apiKey
         );
         break;
       } catch (err: any) {
@@ -244,6 +248,7 @@ export class DexAggregatorService {
       : priceImpactFromPercent;
 
     const result: SwapQuoteResult = {
+      observedAtMs: Date.now(),
       inputMint: params.inputMint,
       outputMint: params.outputMint,
       inAmount: Number(data.inAmount),

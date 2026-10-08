@@ -75,3 +75,26 @@ test('aborting queued Jupiter work removes it and never starts its HTTP operatio
   release();await blocker;
   assert.equal(started,false);
 });
+
+test('independent organization lanes progress concurrently while one HTTP request is blocked', async () => {
+  const coordinator = new JupiterTrafficCoordinator({generalIntervalMs:0});
+  let release!:()=>void;
+  const first=coordinator.schedule(6,()=>new Promise<void>(resolve=>{release=resolve;}),'general',undefined,'organization-A');
+  let ran=false;
+  const second=coordinator.schedule(1,async()=>{ran=true;},'general',undefined,'organization-B');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ran,true);
+  release();await Promise.all([first,second]);
+  assert.equal(coordinator.snapshot().general.completed,2);
+});
+
+test('organization cooldown does not delay another organization', async () => {
+  let now=10000;
+  const sleeps:number[]=[];
+  const coordinator=new JupiterTrafficCoordinator({generalIntervalMs:0,now:()=>now,sleep:async ms=>{sleeps.push(ms);now+=ms;}});
+  await assert.rejects(coordinator.schedule(4,async()=>{throw {response:{status:429,headers:{'retry-after':'2'}}};},'general',undefined,'organization-A'));
+  await coordinator.schedule(1,async()=>{},'general',undefined,'organization-B');
+  assert.deepEqual(sleeps,[]);
+  await coordinator.schedule(1,async()=>{},'general',undefined,'organization-A');
+  assert.deepEqual(sleeps,[2000]);
+});

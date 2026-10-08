@@ -25,6 +25,7 @@ interface BucketState {
   rateLimited: number;
   totalWaitMs: number;
   queue: QueueItem<unknown>[];
+  blockedUntil: number;
 }
 
 export interface JupiterTrafficBucketSnapshot {
@@ -46,6 +47,9 @@ export class JupiterTrafficCoordinator {
   private readonly sleep: (ms: number) => Promise<void>;
   private sequence = 0;
   private readonly buckets: Record<JupiterTrafficBucket, BucketState>;
+  // A credential scope represents one independently limited organization.
+  // Scope identifiers stay in memory and are never included in telemetry.
+  private readonly organizationBuckets = new Map<string, Record<JupiterTrafficBucket, BucketState>>();
 
   constructor(options: JupiterTrafficCoordinatorOptions = {}) {
     this.now = options.now ?? Date.now;
@@ -65,7 +69,8 @@ export class JupiterTrafficCoordinator {
       failed: 0,
       rateLimited: 0,
       totalWaitMs: 0,
-      queue: []
+      queue: [],
+      blockedUntil: 0
     };
   }
 
@@ -73,10 +78,11 @@ export class JupiterTrafficCoordinator {
     priority: JupiterPriority,
     op: () => Promise<T>,
     bucket: JupiterTrafficBucket = 'general',
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    organizationScope?: string
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const state = this.buckets[bucket];
+      const state = this.getBuckets(organizationScope)[bucket];
       if (signal?.aborted) { reject(new Error('Jupiter request aborted')); return; }
       const cleanup = () => signal?.removeEventListener('abort', abort);
       const item: QueueItem<unknown> = {
@@ -98,25 +104,35 @@ export class JupiterTrafficCoordinator {
           ? a.sequence - b.sequence
           : a.priority - b.priority
       );
-      void this.drain(bucket);
+      void this.drain(state);
     });
   }
 
-  private async drain(bucket: JupiterTrafficBucket): Promise<void> {
-    const state = this.buckets[bucket];
+  private getBuckets(scope?: string): Record<JupiterTrafficBucket, BucketState> {
+    if (!scope) return this.buckets;
+    let buckets = this.organizationBuckets.get(scope);
+    if (!buckets) {
+      buckets = { general: this.makeBucket(this.buckets.general.intervalMs), execute: this.makeBucket(this.buckets.execute.intervalMs) };
+      this.organizationBuckets.set(scope, buckets);
+    }
+    return buckets;
+  }
+
+  private async drain(state: BucketState): Promise<void> {
     if (state.running) return;
     state.running = true;
 
     try {
       while (state.queue.length > 0) {
-        const next = state.queue.shift()!;
         const elapsed = this.now() - state.lastStartedAt;
-        const waitMs = Math.max(0, state.intervalMs - elapsed);
+        const waitMs = Math.max(0, state.intervalMs - elapsed, state.blockedUntil - this.now());
         if (waitMs > 0) {
           state.totalWaitMs += waitMs;
           await this.sleep(waitMs);
         }
-
+        // Select after waiting so a protective exit can overtake queued research.
+        const next = state.queue.shift();
+        if (!next) continue;
         state.lastStartedAt = this.now();
         try {
           const value = await next.op();
@@ -125,13 +141,21 @@ export class JupiterTrafficCoordinator {
         } catch (error: any) {
           state.failed++;
           const status = Number(error?.status ?? error?.response?.status ?? 0);
-          if (status === 429) state.rateLimited++;
+          if (status === 429) {
+            state.rateLimited++;
+            const retryAfter = error?.response?.headers?.['retry-after'];
+            const seconds = Number(retryAfter);
+            const dateDelay = Date.parse(String(retryAfter)) - this.now();
+            const delay = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000
+              : Number.isFinite(dateDelay) && dateDelay > 0 ? dateDelay : 1200;
+            state.blockedUntil = Math.max(state.blockedUntil, this.now() + Math.min(delay, 60_000));
+          }
           next.reject(error);
         }
       }
     } finally {
       state.running = false;
-      if (state.queue.length > 0) void this.drain(bucket);
+      if (state.queue.length > 0) void this.drain(state);
     }
   }
 
@@ -144,10 +168,15 @@ export class JupiterTrafficCoordinator {
       rateLimited: state.rateLimited,
       totalWaitMs: state.totalWaitMs
     });
-    return {
-      general: map(this.buckets.general),
-      execute: map(this.buckets.execute)
+    const aggregate = (bucket: JupiterTrafficBucket): JupiterTrafficBucketSnapshot => {
+      const states = [this.buckets, ...this.organizationBuckets.values()].map(b => map(b[bucket]));
+      return states.reduce((sum, state) => ({
+        queued: sum.queued + state.queued, running: sum.running + state.running,
+        completed: sum.completed + state.completed, failed: sum.failed + state.failed,
+        rateLimited: sum.rateLimited + state.rateLimited, totalWaitMs: sum.totalWaitMs + state.totalWaitMs
+      }));
     };
+    return {general: aggregate('general'), execute: aggregate('execute')};
   }
 }
 

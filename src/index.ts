@@ -23,6 +23,7 @@ import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
 import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
+import { EntrySlotPolicy } from './execution/entrySlotPolicy.js';
 import { ExitPathHealth } from './execution/exitPathHealth.js';
 import { buildWatchdogExitPlan } from './execution/watchdogExitPolicy.js';
 import { ExitRouter, type RoutedExitAttempt } from './execution/exitRouter.js';
@@ -36,7 +37,7 @@ import { startCalibrationCron, runCalibrationNow } from './calibration/calibrati
 import { runMaintenance } from './database/maintenanceJob.js';
 import { DailyPnlTracker } from './risk/dailyPnlTracker.js';
 import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './execution/atomicAmount.js';
-import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
+import { observeJupiterEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
 import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
@@ -57,8 +58,14 @@ const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
 const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
-const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 1));
-const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
+const jupiterOrganizationKeys = (process.env.JUPITER_API_KEYS || process.env.JUPITER_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+const JUPITER_ORGANIZATION_COUNT = new Set(jupiterOrganizationKeys).size || 1;
+const configuredJupiterInterval = Number(process.env.JUPITER_RATE_LIMIT_MS);
+const JUPITER_HUB_INTERVAL_MS = Number.isFinite(configuredJupiterInterval) && configuredJupiterInterval > 0 ? configuredJupiterInterval : (jupiterOrganizationKeys.length ? 1050 : 2100);
+const JUPITER_HUB_RPS = JUPITER_ORGANIZATION_COUNT * 1000 / JUPITER_HUB_INTERVAL_MS;
+const configuredJupiterRps = Number(process.env.JUPITER_GENERAL_RPS);
+const JUPITER_GENERAL_RPS = Number.isFinite(configuredJupiterRps) && configuredJupiterRps > 0 ? Math.min(JUPITER_HUB_RPS, configuredJupiterRps) : JUPITER_HUB_RPS;
+const MAX_CONCURRENT_POSITIONS = 4; // Two DEX slots plus two exclusive Sentinel slots.
 const ENTRY_EQUITY_PCT = Math.min(0.25, Math.max(0.01, Number(process.env.ENTRY_EQUITY_PCT || 0.10)));
 const MAX_TOTAL_ALLOCATION_PCT = Math.min(0.50, Math.max(ENTRY_EQUITY_PCT, Number(process.env.MAX_TOTAL_ALLOCATION_PCT || 0.20)));
 const MIN_EXECUTABLE_ENTRY_SOL = Math.max(0.0001, Number(process.env.MIN_EXECUTABLE_ENTRY_SOL || 0.001));
@@ -70,8 +77,8 @@ const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 const ENTRY_MOMENTUM_GATE_ENABLED = true; // Mandatory live momentum for conventional DEX entries.
-const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
-const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS || DEFAULT_ENTRY_MOMENTUM_CONFIG.intervalMs));
+const ENTRY_MOMENTUM_SAMPLES = Math.max(2, Number(process.env.ENTRY_JUPITER_SAMPLES || 2));
+const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_JUPITER_INTERVAL_MS || 1000));
 const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.minRisePct);
 const ENTRY_MOMENTUM_MAX_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxRisePct);
 const ENTRY_MOMENTUM_MAX_PULLBACK_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_PULLBACK_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxPullbackPct);
@@ -125,9 +132,25 @@ const PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS = Math.max(
 
 let isRunningScanner = false;
 let isRunningFastExit = false;
+const fastExitInFlight = new Set<string>();
 let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
+const entrySlots = new EntrySlotPolicy();
+function buildEntryCapitalPolicy(balanceSol: number, excludeMint?: string, exactSentinelLot = false) {
+  const positions = positionEngine.getAllPositions();
+  const reservedCount = entrySlots.unfilledReservations(positions, excludeMint).length;
+  return buildEquitySizingPolicy({
+    cashBalanceSol: Math.max(0,balanceSol-reservedCount*BUY_AMOUNT_SOL),
+    positions: [...positions.map(p=>({costBasisSol:Math.max(0,p.entrySol||0),executableValueSol:p.lastJupiterExecutableSolValue||p.entrySol})),
+      ...Array.from({length:reservedCount},()=>({costBasisSol:BUY_AMOUNT_SOL,executableValueSol:BUY_AMOUNT_SOL}))],
+    maxPositions:MAX_CONCURRENT_POSITIONS,entryEquityPct:ENTRY_EQUITY_PCT,maxTotalAllocationPct:MAX_TOTAL_ALLOCATION_PCT,
+    maxEntrySol:BUY_AMOUNT_SOL,maxTotalAllocationSol:MAX_TOTAL_ALLOCATION_SOL,
+    minExecutableEntrySol:exactSentinelLot?BUY_AMOUNT_SOL:MIN_EXECUTABLE_ENTRY_SOL,
+    gasReserveEquityPct:GAS_RESERVE_EQUITY_PCT,minGasReserveSol:MIN_GAS_RESERVE_SOL,maxGasReserveSol:MAX_GAS_RESERVE_SOL
+  });
+}
+console.log('[ENTRY_POLICY] slots=DEX:2,SENTINEL:2 sentinelTimeStop=90/105min jupiterOrganizations=' + JUPITER_ORGANIZATION_COUNT + ' generalRps=' + JUPITER_GENERAL_RPS);
 console.log('[RISK_POLICY] initialStopLossPct=' + PositionExitEngine.DEFAULT_STOP_LOSS_PCT + ' gateEvidenceVersion=2');
 const exitPathHealth = new ExitPathHealth({
   emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
@@ -1285,7 +1308,8 @@ async function runUltraFastExitMonitor() {
       return;
     }
 
-    for (const pos of openPositions) {
+    void Promise.all(openPositions.filter(pos => !fastExitInFlight.has(pos.mint)).map(async pos => {
+      fastExitInFlight.add(pos.mint);
       try {
         // Verdade econômica de saída = valor executável Jupiter Token -> SOL.
         // DexScreener permanece como referência de mercado, mas nunca decide PnL/stop
@@ -1500,8 +1524,10 @@ async function runUltraFastExitMonitor() {
             console.error(`❌ [WATCHDOG ERRO] Falha ao executar liquidação defensiva de ${pos.symbol}:`, emergencyErr?.message || emergencyErr);
           }
         }
+      } finally {
+        fastExitInFlight.delete(pos.mint);
       }
-    }
+    })).catch(err => console.error('⚠️ [Erro Fast Exit Worker]:', err?.message || err));
   } catch (err: any) {
     console.error('⚠️ [Erro Fast Exit Monitor]:', err?.message || err);
   } finally {
@@ -1593,7 +1619,7 @@ async function executeAutonomousCycle() {
 
     updateDashboardViews();
 
-    // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (MAX_CONCURRENT_POSITIONS = 2, máx 0.10 SOL)
+    // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (2 vagas DEX + 2 vagas Sentinel, máx 0.10 SOL)
     const activePositions = positionEngine.getAllPositions();
     exitPathHealth.retainOpenPositions(activePositions.map(position => position.mint));
     const currentExitHealth = exitPathHealth.snapshot();
@@ -1606,8 +1632,8 @@ async function executeAutonomousCycle() {
       );
       return;
     }
-    if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
-      console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
+    if (entrySlots.count('DEX',activePositions) >= 2) {
+      console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${entrySlots.count('DEX', activePositions)}/2 vagas DEX ocupadas; total ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
       return;
     }
 
@@ -1792,6 +1818,11 @@ async function executeAutonomousCycle() {
       
       for (let candidateIndex = 0; candidateIndex < maxCandidatesToTry && !candidateProcessed; candidateIndex++) {
         const topCandidate = eligibleCandidates[candidateIndex];
+        if (!entrySlots.reserve(topCandidate.mint,'DEX',positionEngine.getAllPositions())) continue;
+        try {
+        const slotCapacity=evaluateExitCapacity({generalRps:JUPITER_GENERAL_RPS,monitorIntervalMs:FAST_EXIT_INTERVAL_MS,
+          openPositions:positionEngine.getAllPositions().length+entrySlots.unfilledReservations(positionEngine.getAllPositions()).length,hasLocalExitSensor:false});
+        if (!slotCapacity.admit) continue;
         const classification = TokenClassifier.classify(topCandidate.mint, topCandidate.symbol, topCandidate.liquidityUsd);
 
         console.log(`🔥 Analisando Candidato #${candidateIndex + 1}/${maxCandidatesToTry}: ${topCandidate.symbol} (${topCandidate.name})`);
@@ -1844,7 +1875,7 @@ async function executeAutonomousCycle() {
         DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 85),
         DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.0),
         DecisionLogger.evaluateGate('SENTINEL_REGIME', isSentinelValid),
-        DecisionLogger.evaluateGate('SLOT_AVAILABILITY', openPositions < MAX_CONCURRENT_POSITIONS, openPositions, MAX_CONCURRENT_POSITIONS),
+        DecisionLogger.evaluateGate('SLOT_AVAILABILITY', entrySlots.count('DEX', positionEngine.getAllPositions()) <= 2, entrySlots.count('DEX', positionEngine.getAllPositions()), 2),
         DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
       ];
 
@@ -1913,12 +1944,16 @@ async function executeAutonomousCycle() {
         // antes da seleção; a profundidade da pool escolhe o degrau final.
         const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
-        // Momentum de curtíssimo prazo: usa o micropreço disponível no sensor.
-        // Fonte congelada/indeterminada rejeita o pré-voo. M5 não substitui avanço vivo.
+        // Fresh executable quotes replace indexed DEX prices; positive momentum limits remain.
         if (ENTRY_MOMENTUM_GATE_ENABLED) {
           try {
-            const momentum = await observeEntryMomentum(
-              () => scanner.fetchCurrentTokenPriceUsd(topCandidate.mint),
+            const momentum = await observeJupiterEntryMomentum(
+              () => jupiterEngine.getAggregator().getQuote({
+                inputMint: SOL_MINT, outputMint: topCandidate.mint, amountLamports: 25_000_000,
+                slippageBps: 750, freshQuote: true,
+                trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
+              }),
+              topCandidate.mint, topCandidate.pairAddress,
               {
                 samples: ENTRY_MOMENTUM_SAMPLES,
                 intervalMs: ENTRY_MOMENTUM_INTERVAL_MS,
@@ -1967,7 +2002,7 @@ async function executeAutonomousCycle() {
                 rejectionReason: reason,
                 metadata: {
                   phase: 'MOMENTUM_GATE',
-                  momentumSource: 'DEXSCREENER_PRICE',
+                  momentumSource: 'JUPITER_EXECUTABLE',
                   momentumStatus: momentum.staleSource ? 'REJECTED_STALE_SOURCE' : 'FAIL',
                   momentumRisePct: momentum.risePct,
                   momentumRisingSteps: momentum.risingSteps,
@@ -2005,7 +2040,7 @@ async function executeAutonomousCycle() {
               rejectionReason: reason,
               metadata: {
                 phase: 'MOMENTUM_GATE',
-                momentumSource: 'DEXSCREENER_PRICE',
+                momentumSource: 'JUPITER_EXECUTABLE',
                 momentumStatus: 'SOURCE_FAILED',
                 layaStatus: 'NOT_CALLED_MOMENTUM_SOURCE_FAILED'
               }
@@ -2050,11 +2085,15 @@ async function executeAutonomousCycle() {
         // Cada degrau mantém o mesmo orçamento de risco da banca e reduz o lote
         // até o piso técnico. Isso permite encontrar uma execução <= 750 bps sem
         // relaxar slippage ou inventar liquidez.
-        const economyLadderSol = capitalPolicy.ladderSol;
+        const liveCapitalPolicy = buildEntryCapitalPolicy(await wallet.getBalanceSol(),topCandidate.mint);
+        if (!liveCapitalPolicy.canOpenNextPosition) continue;
+        const economyLadderSol = liveCapitalPolicy.ladderSol;
 
         const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
           ladderSol: economyLadderSol,
+          maxPriceImpactPct: 2.5,
           validate: async (_quote, sizeSol) => {
+            if (!sentinelQuoteImpactAllowed(_quote)) return 'PRICE_IMPACT_EXCEEDS_2_5_OR_UNKNOWN';
             try {
               const sim = await jupiterEngine.simulateSwap({
                 inputMint: SOL_MINT,
@@ -2069,6 +2108,7 @@ async function executeAutonomousCycle() {
                 priorityLevel: 'medium',
                 forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
                 requiredPoolAddress: topCandidate.pairAddress,
+                maxPriceImpactPct: 2.5,
                 trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
               }, _quote);
               if (sim.success) {
@@ -2104,7 +2144,7 @@ async function executeAutonomousCycle() {
             metadata: {
               phase: 'SIZING',
               attempts: sizing.attempts,
-              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'JUPITER_EXECUTABLE' : 'DISABLED',
                   momentumStatus: getMomentumStatus(),
               momentumRisePct: momentumTelemetry?.risePct ?? null,
               momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
@@ -2174,7 +2214,7 @@ async function executeAutonomousCycle() {
           gateEvaluations: gates,
           metadata: {
             phase: 'READY_FOR_JUPITER_SWAP',
-            momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+            momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'JUPITER_EXECUTABLE' : 'DISABLED',
                   momentumStatus: getMomentumStatus(),
             momentumRisePct: momentumTelemetry?.risePct ?? null,
             momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
@@ -2202,6 +2242,7 @@ async function executeAutonomousCycle() {
           skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
           forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
           requiredPoolAddress: topCandidate.pairAddress,
+          maxPriceImpactPct: 2.5,
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
           keypair: wallet.getKeypair(),
           trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
@@ -2383,7 +2424,7 @@ async function executeAutonomousCycle() {
               takeProfitPct: 0.35,
               entryTimestampMs: nowTs,
               isDryRun: swapSim.isDryRun,
-              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'JUPITER_EXECUTABLE' : 'DISABLED',
                   momentumStatus: getMomentumStatus(),
               momentumRisePct: momentumTelemetry?.risePct ?? null,
               momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
@@ -2456,7 +2497,7 @@ async function executeAutonomousCycle() {
               swapStatus: swapSim.status,
               swapError: failReason,
               txSignature: swapSim.txSignature || null,
-              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
+              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'JUPITER_EXECUTABLE' : 'DISABLED',
                   momentumStatus: getMomentumStatus(),
               momentumRisePct: momentumTelemetry?.risePct ?? null,
               momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
@@ -2508,6 +2549,7 @@ async function executeAutonomousCycle() {
         } as any);
         if (latestState.recentAudits.length > 20) latestState.recentAudits.pop();
       } // fecha else do if (!audit.safe)
+        } finally { entrySlots.release(topCandidate.mint); }
       } // fecha for loop
     } else { // fecha if (eligibleCandidates.length > 0)
       console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
@@ -2530,6 +2572,7 @@ async function executeAutonomousCycle() {
  * permanecem visíveis como custódia, mas fora do PositionExitEngine.
  */
 interface RecoverablePositionRecord {
+  entrySource: 'DEX' | 'SENTINEL';
   traceId: string;
   mint: string;
   symbol: string;
@@ -2584,6 +2627,7 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
         const initialAtomic = assertAtomicAmountToNumber(String(metadata.outAmountAtomic || ''));
         positions.set(row.mint, {
           traceId: String(row.trace_id),
+          entrySource: metadata.sentinelHandoff === true || metadata.entrySource === 'SENTINEL' ? 'SENTINEL' : 'DEX',
           mint: String(row.mint),
           symbol: String(row.token_symbol || `${String(row.mint).slice(0, 4)}...${String(row.mint).slice(-4)}`),
           entryPriceUsd: Number(row.entry_price_usd),
@@ -2675,6 +2719,7 @@ async function rehydratePositionsFromWalletOnBoot() {
 
       positionEngine.addPosition({
         mint: spl.mint,
+        entrySource: recovery.entrySource,
         symbol: recovery.symbol,
         tokenAmount: managedAtomic,
         initialTokenAmount: recovery.initialTokenAmountAtomic,
@@ -2803,6 +2848,10 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     await sentinelHandoffScanner.recordHandoffOutcome(mint, 'DISCARDED_ENTRY_GUARD', 'Mint em quarentena local');
     return;
   }
+  if (!entrySlots.reserve(mint,'SENTINEL',positionEngine.getAllPositions())) {
+    await sentinelHandoffScanner.recordHandoffOutcome(mint,'DISCARDED_ENTRY_GUARD','Duas vagas Sentinel ocupadas ou mint já em processamento');
+    return;
+  }
   sentinelActiveGraduations.add(mint);
   latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   try {
@@ -2826,6 +2875,7 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     console.error(`[SentinelHandoff] ${symbol}: erro no fast-track: ${err?.message || err}`);
     await sentinelHandoffScanner.recordHandoffOutcome(mint, 'FAILED_HANDLER', String(err?.message || err));
   } finally {
+    entrySlots.release(mint);
     sentinelActiveGraduations.delete(mint);
     latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   }
@@ -2855,6 +2905,12 @@ async function executeSentinelEntryCandidate(
     await sentinelHandoffScanner.recordHandoffOutcome(topCandidate.mint, 'DISCARDED_ENTRY_GUARD', 'Teto de concorrência atingido');
     return;
   }
+  const exitCapacity = evaluateExitCapacity({generalRps:JUPITER_GENERAL_RPS,monitorIntervalMs:FAST_EXIT_INTERVAL_MS,
+    openPositions:positionEngine.getAllPositions().length+entrySlots.unfilledReservations(positionEngine.getAllPositions()).length,hasLocalExitSensor:false});
+  if (!exitCapacity.admit) {
+    await sentinelHandoffScanner.recordHandoffOutcome(topCandidate.mint,'DISCARDED_ENTRY_GUARD',exitCapacity.reason);
+    return;
+  }
   if (latestState.circuitBreakerActive) {
     console.log(`[SentinelHandoff] ${topCandidate.symbol}: circuit breaker ativo, pulando.`);
     await sentinelHandoffScanner.recordHandoffOutcome(topCandidate.mint, 'DISCARDED_ENTRY_GUARD', 'Circuit breaker ativo');
@@ -2880,8 +2936,9 @@ async function executeSentinelEntryCandidate(
 
   if (!audit.safe) {
     console.warn(`[SentinelHandoff] ${topCandidate.symbol}: vetado pela auditoria de risco: ${audit.reason}`);
-    antiSpamMemory.recordVeto(topCandidate.mint, audit.reason || 'SentinelHandoff: veto RugCheck', 60 * 60 * 1000);
-    await sentinelHandoffScanner.recordHandoffOutcome(topCandidate.mint, 'DISCARDED_RUGCHECK', audit.reason);
+    const unavailable = audit.rugCheckReport?.providerUnavailable === true;
+    antiSpamMemory.recordVeto(topCandidate.mint, audit.reason || 'SentinelHandoff: veto RugCheck', unavailable ? 60_000 : 60 * 60 * 1000);
+    await sentinelHandoffScanner.recordHandoffOutcome(topCandidate.mint, unavailable ? 'DISCARDED_RISK_UNAVAILABLE' : 'DISCARDED_RUGCHECK', audit.reason);
     return;
   }
 
@@ -2889,19 +2946,7 @@ async function executeSentinelEntryCandidate(
 
   const balanceSol = await wallet.getBalanceSol();
   const activePositions = positionEngine.getAllPositions();
-  const capitalPolicy = buildEquitySizingPolicy({
-    cashBalanceSol: balanceSol,
-    positions: activePositions.map(p => ({ costBasisSol: Math.max(0, p.entrySol || 0), executableValueSol: p.lastJupiterExecutableSolValue || p.entrySol })),
-    maxPositions: MAX_CONCURRENT_POSITIONS,
-    entryEquityPct: ENTRY_EQUITY_PCT,
-    maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
-    maxEntrySol: Math.min(BUY_AMOUNT_SOL, 0.025),
-    maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
-    minExecutableEntrySol: Math.min(BUY_AMOUNT_SOL, 0.025),
-    gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
-    minGasReserveSol: MIN_GAS_RESERVE_SOL,
-    maxGasReserveSol: MAX_GAS_RESERVE_SOL
-  });
+  const capitalPolicy = buildEntryCapitalPolicy(balanceSol,topCandidate.mint,true);
 
   if (!capitalPolicy.canOpenNextPosition) {
     console.log(`[SentinelHandoff] ${topCandidate.symbol}: capital insuficiente para nova entrada.`);
@@ -3041,6 +3086,7 @@ async function executeSentinelEntryCandidate(
   // Registra a posição no PositionExitEngine com a Escada 4D completa do Padrão Ouro
   positionEngine.addPosition({
     mint: topCandidate.mint,
+    entrySource: 'SENTINEL',
     symbol: topCandidate.symbol,
     tokenAmount: managedAtomic,
     entryPriceUsd: topCandidate.priceUsd,
@@ -3052,12 +3098,6 @@ async function executeSentinelEntryCandidate(
     initialTokenAmount: managedAtomic,
     entryPairAddress: topCandidate.pairAddress
   });
-
-  await sentinelHandoffScanner.recordHandoffOutcome(
-    topCandidate.mint,
-    swapResult.status === 'SUCCESS' ? 'EXECUTED_BUY_SUCCESS' : 'DRY_RUN_BUY_SUCCESS',
-    swapResult.status === 'SUCCESS' ? `Tx: ${swapResult.txSignature}` : 'Simulacao; nenhuma compra on-chain'
-  );
 
   journal.logDecision({
     traceId,
@@ -3080,13 +3120,20 @@ async function executeSentinelEntryCandidate(
       DecisionLogger.evaluateGate('MATURITY_AGE', true, 0, 0),
       DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
       DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', true, Math.abs(sizing.quote.priceImpactPct), 2.5, 'Jupiter executable depth; USD liquidity unknown'),
-      DecisionLogger.evaluateGate('SLOT_AVAILABILITY', positionEngine.getAllPositions().length <= MAX_CONCURRENT_POSITIONS, positionEngine.getAllPositions().length, MAX_CONCURRENT_POSITIONS),
+      DecisionLogger.evaluateGate('SLOT_AVAILABILITY', entrySlots.count('SENTINEL', positionEngine.getAllPositions()) <= 2, entrySlots.count('SENTINEL', positionEngine.getAllPositions()), 2),
     ],
     metadata: {
       phase: 'ENTRY_EXECUTED',
       txSignature: swapResult.txSignature,
       isDryRun: swapResult.isDryRun,
       sentinelHandoff: true,
+      entrySource: 'SENTINEL',
+      outAmountAtomic: String(managedAtomic),
+      entryTimestampMs: nowTs,
+      stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
+      takeProfitPct: PositionExitEngine.TP1_TRIGGER_PCT,
+      timeStopBaseMs: PositionExitEngine.SENTINEL_BASE_TIME_STOP_MS,
+      timeStopMaxMs: PositionExitEngine.SENTINEL_MAX_TIME_STOP_MS,
       depthSource: 'JUPITER_PRICE_IMPACT',
       liquidityUsdKnown: false,
       layaScore: sentinelToken.layaScore,
@@ -3094,6 +3141,18 @@ async function executeSentinelEntryCandidate(
       graduationDipAgeMs: nowTs - sentinelToken.createdAt.getTime()
     }
   });
+
+  journal.logOutcome({
+    traceId, mint: topCandidate.mint, entryPriceUsd: topCandidate.priceUsd,
+    entrySizeSol: confirmedEntrySol, entryTimestamp: new Date(nowTs), status: 'OPEN'
+  });
+  await journal.flush();
+
+  await sentinelHandoffScanner.recordHandoffOutcome(
+    topCandidate.mint,
+    swapResult.status === 'SUCCESS' ? 'EXECUTED_BUY_SUCCESS' : 'DRY_RUN_BUY_SUCCESS',
+    swapResult.status === 'SUCCESS' ? `Tx: ${swapResult.txSignature}` : 'Simulacao; nenhuma compra on-chain'
+  );
 
   console.log(
     `[SentinelHandoff] Posicao Graduation Dip aberta com sucesso: ${topCandidate.symbol} ` +

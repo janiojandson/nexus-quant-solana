@@ -13,14 +13,17 @@ export interface RugCheckReport {
   factsComplete?: boolean;
   lpLockedPct?: number;
   topHoldersPct?: number;
+  providerUnavailable?: boolean;
 }
 
 export interface RugCheckOptions {
   fetchClient?: (url: string) => Promise<{ data: any }>;
+  retryDelayMs?: number;
 }
 
 export class RugCheckService {
   private fetchClient: (url: string) => Promise<{ data: any }>;
+  private readonly retryDelayMs: number;
   private static readonly RUGCHECK_BASE_URL = 'https://api.rugcheck.xyz/v1/tokens';
   public static readonly DANGER_SCORE_THRESHOLD = 500;
 
@@ -35,6 +38,7 @@ export class RugCheckService {
   ]);
 
   constructor(options?: RugCheckOptions) {
+    this.retryDelayMs = options?.retryDelayMs ?? 1000;
     this.fetchClient = options?.fetchClient || (async (url: string) => axios.get(url, {
       timeout: 8000,
       headers: { 'Accept': 'application/json', 'User-Agent': 'NexusQuantSolana/1.0' }
@@ -44,7 +48,20 @@ export class RugCheckService {
   public async auditToken(mint: string, targetPairAddress?: string): Promise<RugCheckReport> {
     try {
       const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
-      const response = await this.fetchClient(url);
+      let response: {data:any};
+      try { response = await this.fetchClient(url); }
+      catch (error: any) {
+        const status = Number(error?.response?.status);
+        const transient = [429, 502, 503, 504].includes(status) || ['ECONNRESET','ETIMEDOUT','ECONNABORTED'].includes(error?.code);
+        const rawRetryAfter = error?.response?.headers?.['retry-after'];
+        const seconds = Number(rawRetryAfter);
+        const dateDelay = Date.parse(String(rawRetryAfter)) - Date.now();
+        const retryAfter = Math.max(0, Number.isFinite(seconds) ? seconds * 1000 : (Number.isFinite(dateDelay) ? dateDelay : 0));
+        // Bound the retry budget; do not retry before a longer provider cooldown.
+        if (!transient || retryAfter > 5000) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.max(this.retryDelayMs, retryAfter)));
+        response = await this.fetchClient(url);
+      }
       const data = response.data || {};
 
       const rawRisks = Array.isArray(data.risks) ? data.risks : [];
@@ -180,6 +197,7 @@ export class RugCheckService {
         isRugged: false,
         isSafe: false,
         verified: false,
+        providerUnavailable: true,
         factsComplete: false,
         lpLockedPct: undefined,
         topHoldersPct: undefined
