@@ -72,17 +72,27 @@ export class JupiterTrafficCoordinator {
   schedule<T>(
     priority: JupiterPriority,
     op: () => Promise<T>,
-    bucket: JupiterTrafficBucket = 'general'
+    bucket: JupiterTrafficBucket = 'general',
+    signal?: AbortSignal
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const state = this.buckets[bucket];
-      state.queue.push({
+      if (signal?.aborted) { reject(new Error('Jupiter request aborted')); return; }
+      const cleanup = () => signal?.removeEventListener('abort', abort);
+      const item: QueueItem<unknown> = {
         priority,
         sequence: this.sequence++,
-        op,
-        resolve: resolve as (value: unknown) => void,
-        reject
-      });
+        op: async () => { if (signal?.aborted) throw new Error('Jupiter request aborted'); return op(); },
+        resolve: value => { cleanup(); resolve(value as T); },
+        reject: error => { cleanup(); reject(error); }
+      };
+      const abort = () => {
+        const index = state.queue.indexOf(item);
+        if (index >= 0) state.queue.splice(index, 1);
+        item.reject(new Error('Jupiter request aborted'));
+      };
+      signal?.addEventListener('abort', abort, {once:true});
+      state.queue.push(item);
       state.queue.sort((a, b) =>
         a.priority === b.priority
           ? a.sequence - b.sequence
@@ -145,7 +155,7 @@ let globalCoordinator: JupiterTrafficCoordinator | undefined;
 
 export function getGlobalJupiterTrafficCoordinator(): JupiterTrafficCoordinator {
   if (!globalCoordinator) {
-    const hasApiKey = Boolean(process.env.JUPITER_API_KEY);
+    const hasApiKey = Boolean(process.env.JUPITER_API_KEY || process.env.JUPITER_API_KEYS?.split(',').some(key => key.trim()));
     const generalIntervalMs = Number(
       process.env.JUPITER_RATE_LIMIT_MS || (hasApiKey ? 1050 : 2100)
     );

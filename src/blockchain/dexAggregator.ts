@@ -1,3 +1,4 @@
+import { getJupiterApiKeyPool, type JupiterApiKeyPool } from './jupiterApiKeyPool.js';
 import axios from 'axios';
 import {
   computeCollisionUsd,
@@ -11,6 +12,7 @@ import {
 } from './jupiterTrafficCoordinator.js';
 
 export interface SwapQuoteParams {
+  signal?: AbortSignal;
   inputMint: string;
   outputMint: string;
   amountLamports: number;
@@ -67,7 +69,7 @@ export class JupiterQuoteException extends Error {
  */
 export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
-  private apiKey?: string;
+  private apiKeys: JupiterApiKeyPool;
   private rateLimitMs: number;
   private cacheTtlMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
@@ -81,14 +83,14 @@ export class DexAggregatorService {
     config: DexAggregatorConfig = {}
   ) {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl.replace(/\/$/, '');
-    this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+    this.apiKeys = getJupiterApiKeyPool(config.apiKey);
     const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
     const configuredRateLimitMs = config.rateLimitMs ??
-      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 1050 : 2100)));
+      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKeys.hasKeys() ? 1050 : 2100)));
 
     this.rateLimitMs = isTestEndpoint
       ? configuredRateLimitMs
-      : (this.apiKey ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
+      : (this.apiKeys.hasKeys() ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
     this.trafficCoordinator = config.trafficCoordinator ??
       ((isTestEndpoint || config.rateLimitMs !== undefined)
         ? new JupiterTrafficCoordinator({ generalIntervalMs: this.rateLimitMs, executeIntervalMs: 0 })
@@ -166,18 +168,21 @@ export class DexAggregatorService {
     let lastError: any;
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (params.signal?.aborted) throw new JupiterQuoteException('Jupiter quote aborted');
       try {
         response = await this.trafficCoordinator.schedule(
           params.trafficPriority ?? 5,
           () => axios.get(`${this.jupiterApiBaseUrl}/order`, {
             params: queryParams,
             timeout: 8000,
-            headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
+            signal: params.signal,
+            headers: this.apiKeys.hasKeys() ? { 'x-api-key': this.apiKeys.next() } : undefined
           }),
-          'general'
+          'general', params.signal
         );
         break;
       } catch (err: any) {
+        if (params.signal?.aborted) throw new JupiterQuoteException('Jupiter quote aborted');
         lastError = err;
         const status = err?.response?.status;
         if (status === 429 && attempt === 0) {

@@ -5,6 +5,8 @@ import { SolanaLayaAdapter, sanitizeSolanaLayaFacts, type SolanaLayaDecision, ty
 export interface TokenSecurityMetadata {
   mint: string;
   pairAddress?: string;
+  /** Internal Sentinel flag: executable Jupiter depth replaces DEX liquidity/candles only. */
+  sentinelJupiterDepthVerified?: true;
   liquidityUsd: number;
   mintAuthority?: string | null;
   freezeAuthority?: string | null;
@@ -110,7 +112,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    if (token.liquidityUsd < this.minLiquidityUsd) {
+    if (!token.sentinelJupiterDepthVerified && token.liquidityUsd < this.minLiquidityUsd) {
       return {
         safe: false,
         reason: `Liquidez insuficiente: $${token.liquidityUsd} < Mínimo seguro de $${this.minLiquidityUsd}.`,
@@ -132,7 +134,7 @@ export class MemeRiskGatekeeper {
 
     // 1.1 Motor determinístico de Momentum e Order Flow do Solana (Price Action)
     const momentumCheck = this.validatePriceMomentum(token);
-    if (!momentumCheck.valid) {
+    if (!token.sentinelJupiterDepthVerified && !momentumCheck.valid) {
       return {
         safe: false,
         reason: momentumCheck.reason || 'Filtro Solana: Momentum ou Order Flow reprovado',

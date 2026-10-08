@@ -2,6 +2,20 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { SentinelHandoffScanner, type SentinelHandoffToken } from './sentinelHandoffScanner.js';
 
+test('handoff outcome persists exact status and detail without propagating database errors', async () => {
+  const calls: any[] = [];
+  const scanner = new SentinelHandoffScanner({ query: async (config: any) => {
+    calls.push({ sql: config.text, params: config.values, timeout: config.query_timeout }); return { rowCount: 1 };
+  } } as any);
+  await scanner.recordHandoffOutcome('mint', 'DISCARDED_RUGCHECK', 'Top5 81.5%');
+  assert.deepEqual(calls[0].params, ['DISCARDED_RUGCHECK', 'Top5 81.5%', 'mint']);
+  assert.match(calls[0].sql, /outcome_recorded_at = NOW\(\)/);
+  assert.equal(calls[0].timeout, 5000);
+  await new SentinelHandoffScanner(null).recordHandoffOutcome('mint', 'FAILED_SWAP');
+  await new SentinelHandoffScanner({ query: async () => { throw new Error('db unavailable'); } } as any)
+    .recordHandoffOutcome('mint', 'FAILED_SWAP', 'timeout');
+});
+
 // ===========================================================
 // Mocks de Pool Postgres
 // ===========================================================

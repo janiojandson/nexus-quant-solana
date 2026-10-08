@@ -63,3 +63,15 @@ test('general and execute traffic have separate buckets and telemetry', async ()
   assert.equal(snapshot.general.queued, 0);
   assert.equal(snapshot.execute.queued, 0);
 });
+test('aborting queued Jupiter work removes it and never starts its HTTP operation', async () => {
+  const coordinator = new JupiterTrafficCoordinator({generalIntervalMs:0});
+  let release!:()=>void, started=false;
+  const blocker=coordinator.schedule(1,()=>new Promise<void>(resolve=>{release=resolve;}));
+  const controller=new AbortController();
+  const queued=coordinator.schedule(1,async()=>{started=true;},'general',controller.signal);
+  const rejected=assert.rejects(queued,/aborted/);
+  controller.abort(); await rejected;
+  assert.equal(coordinator.snapshot().general.queued,0);
+  release();await blocker;
+  assert.equal(started,false);
+});

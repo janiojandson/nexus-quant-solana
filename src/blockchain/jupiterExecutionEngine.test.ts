@@ -81,6 +81,36 @@ test.afterEach(() => {
 
 const testSigner = Keypair.generate();
 
+test('shared Jupiter keys rotate across quotes, orders and execution requests', async () => {
+  const oldKeys = process.env.JUPITER_API_KEYS;
+  try {
+    process.env.JUPITER_API_KEYS = 'rotate-A,rotate-B';
+    const keys: string[] = [];
+    axios.get = (async (_url: string, config: any) => {
+      keys.push(config.headers['x-api-key']);
+      return {data:{inAmount:'25000000',outAmount:'100',slippageBps:400,priceImpactPct:'0.01',requestId:'request',transaction:'opaque'}};
+    }) as any;
+    axios.post = (async (_url:string,_body:any,config:any)=>{keys.push(config.headers['x-api-key']);return {data:{status:'Success',signature:'signature'}};}) as any;
+    const engine=new JupiterExecutionEngine({connection:makeConnection({err:null}).conn,v2BaseUrl:V2_BASE,dexAggregator:new DexAggregatorService(V2_BASE,{rateLimitMs:0,cacheTtlMs:0})});
+    await engine.getQuote(SOL_MINT,TOKEN_MINT,25000000,400);
+    await (engine as any).getOrder({...baseRequest,maxPriceImpactPct:2.5});
+    await (engine as any).postExecute({signedTransaction:'opaque',requestId:'request'},1);
+    assert.deepEqual(keys,['rotate-A','rotate-B','rotate-A']);
+  }finally{if(oldKeys===undefined)delete process.env.JUPITER_API_KEYS;else process.env.JUPITER_API_KEYS=oldKeys;}
+});
+test('final Jupiter order rejects high or missing impact before signing', async () => {
+  for (const impact of ['0.026',undefined]) {
+    axios.get = (async()=>({data:{inAmount:'25000000',outAmount:'100',slippageBps:400,priceImpactPct:impact,requestId:'request',transaction:'opaque'}})) as any;
+    await assert.rejects(()=> (makeEngine(makeConnection({err:null}).conn) as any).getOrder({...baseRequest,maxPriceImpactPct:2.5}), /price impact/);
+  }
+});
+test('final Sentinel Jupiter order rejects a split destination through an unaudited pool', async () => {
+  axios.get = (async()=>({data:{requestId:'request',transaction:'opaque',slippageBps:400,priceImpactPct:'0.01',routePlan:[
+    {swapInfo:{outputMint:TOKEN_MINT,ammKey:'audited'}},{swapInfo:{outputMint:TOKEN_MINT,ammKey:'other'}}
+  ]}})) as any;
+  await assert.rejects(()=> (makeEngine(makeConnection({err:null}).conn) as any).getOrder({...baseRequest,maxPriceImpactPct:2.5,requiredPoolAddress:'audited'}), /audited pool or is split/);
+});
+
 const baseRequest: SwapExecutionRequest = {
   inputMint: SOL_MINT,
   outputMint: TOKEN_MINT,

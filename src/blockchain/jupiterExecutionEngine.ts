@@ -1,3 +1,4 @@
+import { getJupiterApiKeyPool, type JupiterApiKeyPool } from './jupiterApiKeyPool.js';
 import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
@@ -30,6 +31,7 @@ export interface SwapExecutionRequest {
   forbiddenProgramIds?: readonly string[];
   /** Audited entry pool; every final order must reference it before signing. */
   requiredPoolAddress?: string;
+  maxPriceImpactPct?: number;
 }
 
 export interface SwapExecutionResponse {
@@ -97,7 +99,7 @@ export class JupiterExecutionEngine {
   private connection: Connection;
   private isDryRun: boolean;
   private dexAggregator: DexAggregatorService;
-  private apiKey?: string;
+  private apiKeys: JupiterApiKeyPool;
   private v2BaseUrl: string;
   private executeTimeoutMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
@@ -110,7 +112,7 @@ export class JupiterExecutionEngine {
       : (process.env.DRY_RUN_MODE !== 'false');
     this.dexAggregator = config.dexAggregator || new DexAggregatorService();
     this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
-    this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+    this.apiKeys = getJupiterApiKeyPool(config.apiKey);
     this.v2BaseUrl = (
       config.v2BaseUrl ||
       process.env.JUPITER_V2_BASE_URL ||
@@ -135,14 +137,16 @@ export class JupiterExecutionEngine {
     outputMint: string,
     amountLamports: number,
     slippageBps = 400,
-    trafficPriority: JupiterPriority = 3
+    trafficPriority: JupiterPriority = 3,
+    signal?: AbortSignal
   ) {
     return this.dexAggregator.getQuote({
       inputMint,
       outputMint,
       amountLamports,
       slippageBps,
-      trafficPriority
+      trafficPriority,
+      signal
     });
   }
 
@@ -165,8 +169,8 @@ export class JupiterExecutionEngine {
   }
 
   private async getOrder(req: SwapExecutionRequest): Promise<JupiterV2OrderResponse> {
-    if (!this.apiKey) {
-      throw new Error('JUPITER_API_KEY ausente para Jupiter Swap API V2.');
+    if (!this.apiKeys.hasKeys()) {
+      throw new Error('JUPITER_API_KEYS/JUPITER_API_KEY ausente para Jupiter Swap API V2.');
     }
 
     const params: Record<string, string | number> = {
@@ -186,7 +190,7 @@ export class JupiterExecutionEngine {
         () => axios.get(`${this.v2BaseUrl}/order`, {
           params,
           timeout: 10_000,
-          headers: { 'x-api-key': this.apiKey }
+          headers: { 'x-api-key': this.apiKeys.next() }
         }),
         'general'
       );
@@ -202,6 +206,16 @@ export class JupiterExecutionEngine {
     }
 
     const order = response.data as JupiterV2OrderResponse;
+    if (req.maxPriceImpactPct !== undefined) {
+      const raw = (order as any).priceImpact ?? (order.priceImpactPct == null ? NaN : Number(order.priceImpactPct) * 100);
+      const impact = Number(raw);
+      if (!Number.isFinite(impact) || Math.abs(impact) > req.maxPriceImpactPct) throw new Error('Jupiter order price impact exceeds entry cap or is unknown');
+      if (req.requiredPoolAddress) {
+        const pools = [...new Set((order.routePlan || []).filter((r: any) => r?.swapInfo?.outputMint === req.outputMint)
+          .map((r: any) => r?.swapInfo?.ammKey))];
+        if (pools.length !== 1 || pools[0] !== req.requiredPoolAddress) throw new Error('Jupiter order destination pool differs from audited pool or is split');
+      }
+    }
     for (const program of req.forbiddenProgramIds || []) {
       if (referencesProgram(order.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
     }
@@ -361,7 +375,7 @@ export class JupiterExecutionEngine {
               timeout: this.executeTimeoutMs,
               headers: {
                 'Content-Type': 'application/json',
-                ...(this.apiKey ? { 'x-api-key': this.apiKey } : {})
+                ...(this.apiKeys.hasKeys() ? { 'x-api-key': this.apiKeys.next() } : {})
               }
             }
           ),
@@ -415,6 +429,15 @@ export class JupiterExecutionEngine {
           trafficPriority: req.trafficPriority ?? 5
         });
 
+        if (req.maxPriceImpactPct !== undefined) {
+          const raw = quote.rawQuote;
+          const known = raw?.priceImpact != null && Number.isFinite(Number(raw.priceImpact)) || raw?.priceImpactPct != null && Number.isFinite(Number(raw.priceImpactPct));
+          if (!known || !Number.isFinite(quote.priceImpactPct) || Math.abs(quote.priceImpactPct) > req.maxPriceImpactPct) throw new Error('Jupiter dry-run price impact exceeds cap or is unknown');
+          if (req.requiredPoolAddress) {
+            const pools = [...new Set((raw?.routePlan || []).filter((r:any)=>r?.swapInfo?.outputMint===req.outputMint).map((r:any)=>r.swapInfo.ammKey))];
+            if (pools.length!==1 || pools[0]!==req.requiredPoolAddress) throw new Error('Jupiter dry-run destination pool differs from audited pool');
+          }
+        }
         for (const program of req.forbiddenProgramIds || []) {
           if (referencesProgram(quote.rawQuote?.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
         }
