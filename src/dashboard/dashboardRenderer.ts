@@ -1,3 +1,4 @@
+import { EntrySlotPolicy, type EntrySlotSnapshot } from '../execution/entrySlotPolicy.js';
 import { renderJournalSection } from './dashboardJournal.js';
 import type { PumpObservatorySnapshot } from '../pump/pumpObservatory.js';
 
@@ -30,6 +31,7 @@ export interface WalletHoldingView {
 }
 
 export interface DashboardState {
+  slots?: EntrySlotSnapshot;
   agent: string;
   wallet: string;
   balanceSol: number;
@@ -136,6 +138,7 @@ export interface DashboardState {
     lastChangedAt: string;
   };
   positions: Array<{
+    entrySource?: 'DEX' | 'SENTINEL';
     mint: string;
     symbol: string;
     tokenAmount: number;
@@ -306,6 +309,7 @@ export function renderDashboardHtml(state: DashboardState): string {
   const discardsCount = state.incubator?.technicalDiscards ?? 0;
   const entryEligibleCount = state.incubator?.entryEligible ?? 0;
   const sentinelQueueCount = state.sentinelHandoffQueue ?? 0;
+  const slots = state.slots ?? new EntrySlotPolicy().snapshot(state.positions);
 
   return `<!DOCTYPE html>
 <html lang="pt-BR" class="dark">
@@ -481,8 +485,9 @@ export function renderDashboardHtml(state: DashboardState): string {
         <div>
           <h2 class="text-base md:text-lg font-bold text-white flex items-center gap-2">
             <span>⚡ Posições Ativas sob Gestão</span>
-            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">${state.positions.length} / 2</span>
+            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">${slots.active} / ${slots.total}</span>
           </h2>
+          <p id="position-slots-breakdown" class="text-xs text-slate-300 mt-1">(DEX: ${slots.dex.active}/${slots.dex.max} | Sentinel: ${slots.sentinel.active}/${slots.sentinel.max})</p>
           <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · SL inicial: -12.5% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
         </div>
         <button id="sweep-rent-button" disabled onclick="sweepRentManual()" title="Requer sessão ADMIN." class="admin-action text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
@@ -514,7 +519,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             ` : state.positions.map(p => {
               const pnlVal = Number(p.pnlPct || 0);
               const isProfit = pnlVal >= 0;
-              const originBadge = p.isSentinelHandoff
+              const originBadge = p.entrySource === 'SENTINEL' || p.isSentinelHandoff
                 ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-sans">⚡ Sentinel</span>`
                 : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-sans">🎯 DEX 5m</span>`;
               const breakEvenPct = p.stopLossPct ? (Number(p.stopLossPct) * 100).toFixed(1) + '%' : 'N/D';
@@ -832,7 +837,10 @@ export function renderDashboardHtml(state: DashboardState): string {
         const positions = data.positions || [];
         const posTbody = document.getElementById('positions-tbody');
         const posBadge = document.getElementById('active-positions-badge');
-        if (posBadge) posBadge.textContent = positions.length + ' / 2';
+        const slots = data.slots;
+        if (posBadge && slots) posBadge.textContent = slots.active + ' / ' + slots.total;
+        const slotBreakdown = document.getElementById('position-slots-breakdown');
+        if (slotBreakdown && slots) slotBreakdown.textContent = '(DEX: ' + slots.dex.active + '/' + slots.dex.max + ' | Sentinel: ' + slots.sentinel.active + '/' + slots.sentinel.max + ')';
         if (posTbody) {
           if (positions.length === 0) {
             posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos (DEX 5m) ou Sentinel Handoff (Graduation Dip)...</td></tr>';
@@ -842,7 +850,7 @@ export function renderDashboardHtml(state: DashboardState): string {
               const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
               const isProfit = pnlPct >= 0;
               const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
-              const originBadge = p.isSentinelHandoff
+              const originBadge = p.entrySource === 'SENTINEL' || p.isSentinelHandoff
                 ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-sans">⚡ Sentinel</span>'
                 : '<span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-sans">🎯 DEX 5m</span>';
               return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +

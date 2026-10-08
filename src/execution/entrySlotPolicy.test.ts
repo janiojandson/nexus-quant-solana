@@ -25,3 +25,11 @@ test('capital reservations exclude the current candidate and do not double count
   assert.deepEqual(slots.unfilledReservations([{mint:'sentinel',entrySource:'SENTINEL'}],'dex'),[]);
   assert.equal(slots.count('SENTINEL',[{mint:'sentinel',entrySource:'SENTINEL'}]),1);
 });
+
+test('two active positions of one origin leave both slots of the other origin available',()=>{
+  for(const source of ['DEX','SENTINEL'] as const){
+    const other=source==='DEX'?'SENTINEL':'DEX';const policy=new EntrySlotPolicy();const positions=[{mint:'a',entrySource:source},{mint:'b',entrySource:source}];
+    assert.equal(policy.reserve('c',source,positions),false);assert.equal(policy.reserve('c',other,positions),true);assert.equal(policy.reserve('d',other,positions),true);
+    assert.deepEqual(policy.snapshot(positions),{total:4,active:2,dex:{active:source==='DEX'?2:0,max:2},sentinel:{active:source==='SENTINEL'?2:0,max:2}});
+  }
+});

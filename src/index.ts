@@ -65,7 +65,7 @@ const JUPITER_HUB_INTERVAL_MS = Number.isFinite(configuredJupiterInterval) && co
 const JUPITER_HUB_RPS = JUPITER_ORGANIZATION_COUNT * 1000 / JUPITER_HUB_INTERVAL_MS;
 const configuredJupiterRps = Number(process.env.JUPITER_GENERAL_RPS);
 const JUPITER_GENERAL_RPS = Number.isFinite(configuredJupiterRps) && configuredJupiterRps > 0 ? Math.min(JUPITER_HUB_RPS, configuredJupiterRps) : JUPITER_HUB_RPS;
-const MAX_CONCURRENT_POSITIONS = 4; // Two DEX slots plus two exclusive Sentinel slots.
+const MAX_CONCURRENT_POSITIONS = EntrySlotPolicy.TOTAL; // Two DEX slots plus two exclusive Sentinel slots.
 const ENTRY_EQUITY_PCT = Math.min(0.25, Math.max(0.01, Number(process.env.ENTRY_EQUITY_PCT || 0.10)));
 const MAX_TOTAL_ALLOCATION_PCT = Math.min(0.50, Math.max(ENTRY_EQUITY_PCT, Number(process.env.MAX_TOTAL_ALLOCATION_PCT || 0.20)));
 const MIN_EXECUTABLE_ENTRY_SOL = Math.max(0.0001, Number(process.env.MIN_EXECUTABLE_ENTRY_SOL || 0.001));
@@ -355,6 +355,7 @@ const dailyPnlTracker = new DailyPnlTracker();
 
 // Estado compartilhado em memória para o Dashboard
 const latestState: DashboardState = {
+  slots: entrySlots.snapshot([]),
   sentinelHandoffQueue: 0,
   agent: 'NEXUS_QUANT_SOLANA_V1',
   wallet: OFFICIAL_PHANTOM_WALLET,
@@ -1077,10 +1078,13 @@ async function maybeRunLayaTacticalPositionDecision(
 
 function updateDashboardViews() {
   const currentPositions = positionEngine.getAllPositions();
+  latestState.slots = entrySlots.snapshot(currentPositions);
   latestState.positions = currentPositions.map(p => {
     const existing = latestState.positions.find(prev => prev.mint === p.mint);
     return {
       mint: p.mint,
+      entrySource: p.entrySource ?? 'DEX',
+      isSentinelHandoff: p.entrySource === 'SENTINEL',
       symbol: p.symbol,
       tokenAmount: p.tokenAmount,
       entryPriceUsd: p.entryPriceUsd,
@@ -1124,6 +1128,7 @@ function updateDashboardViews() {
 
 // Inicia servidor HTTP modular para Healthcheck, API REST e Dashboard Web
 const server = http.createServer(async (req, res) => {
+  updateDashboardViews();
   const handled = await handleApiRoutes(req, res, {
     latestState,
     dailyPnlState: dailyPnlTracker.getState(),

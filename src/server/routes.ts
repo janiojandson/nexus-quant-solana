@@ -1,3 +1,4 @@
+import { EntrySlotPolicy } from '../execution/entrySlotPolicy.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
@@ -186,6 +187,8 @@ export async function handleApiRoutes(
     }
     const formattedPositions = (s.positions || []).map(p => ({
       mint: p.mint,
+      entrySource: p.entrySource ?? (p.isSentinelHandoff ? 'SENTINEL' : 'DEX'),
+      isSentinelHandoff: p.entrySource === 'SENTINEL' || Boolean(p.isSentinelHandoff),
       symbol: p.symbol,
       tokenAmount: p.tokenAmount,
       entryPriceUsd: p.entryPriceUsd,
@@ -239,6 +242,7 @@ export async function handleApiRoutes(
     }));
 
     const responsePayload = {
+      slots: s.slots ?? new EntrySlotPolicy().snapshot(s.positions || []),
       sentinelHandoffQueue: s.sentinelHandoffQueue ?? 0,
       // Formato exigido para clientes avançados / ordem de execução
       wallet: {

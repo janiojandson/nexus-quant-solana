@@ -198,5 +198,10 @@ test('Dashboard lida graciosamente com estado vazio de posições e trades', () 
   const html = renderDashboardHtml(emptyState);
   assert.match(html, /Aguardando candidato aprovado pelos filtros determinísticos/);
   assert.match(html, /Nenhum trade encerrado ainda/);
-  assert.match(html, /0 \/ 2/);
+  assert.match(html, /0 \/ 4/);
+});
+
+test('position capacity card shows total and segregated live usage',()=>{
+  const html=renderDashboardHtml(state);assert.match(html,/2 \/ 4/);assert.match(html,/DEX: 1\/2 \| Sentinel: 1\/2/);
+  assert.doesNotMatch(html,/positions.length \+ ' \/ 2'/);
 });
