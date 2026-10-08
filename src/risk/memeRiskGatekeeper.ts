@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { RugCheckService, type RugCheckReport } from './rugCheckService.js';
-import { SolanaLayaAdapter, sanitizeSolanaLayaFacts, type SolanaLayaDecision, type SolanaLayaFacts } from './solanaLayaAdapter.js';
+import type { SolanaLayaAdapter, SolanaLayaDecision, SolanaLayaFacts } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
@@ -55,8 +55,6 @@ export class MemeRiskGatekeeper {
   private minLiquidityUsd: number;
   private minHolders: number;
   private rugCheckService: RugCheckService;
-  private solanaLayaAdapter: SolanaLayaAdapter;
-  private layaNativeShadowEnabled: boolean;
 
   constructor(config?: MemeGatekeeperConfig) {
     this.macroSentinelUrl = config?.macroSentinelUrl || process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
@@ -64,9 +62,7 @@ export class MemeRiskGatekeeper {
     this.minLiquidityUsd = config?.minLiquidityUsd || 15000;
     this.minHolders = config?.minHolders || 100;
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
-    this.solanaLayaAdapter = config?.solanaLayaAdapter || new SolanaLayaAdapter();
-    this.layaNativeShadowEnabled = config?.layaNativeShadowEnabled
-      ?? process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true';
+    // Legacy AI configuration is deliberately ignored.
   }
 
   public async checkMacroCircuitBreaker(): Promise<{ isBreakerActive: boolean; regime?: string }> {
@@ -89,7 +85,6 @@ export class MemeRiskGatekeeper {
 
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
     const startTime = Date.now();
-    let layaNativeShadow: SolanaLayaDecision | undefined;
 
     // 1. Pré-Filtro Local Imediato (0ms): Honeypot e Risco de Rug Pull
     if (typeof token.mintAuthority === 'string' && token.mintAuthority.length > 0) {
@@ -191,46 +186,13 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    const layaFacts: SolanaLayaFacts = sanitizeSolanaLayaFacts({
-      mint: token.mint,
-      liquidityUsd: token.liquidityUsd,
-      holdersCount: rugReport.holdersCount,
-      mintAuthorityRevoked: rugReport.mintAuthority === null,
-      freezeAuthorityRevoked: rugReport.freezeAuthority === null,
-      rugCheckScore: rugReport.score,
-      lpLockedPct: rugReport.lpLockedPct,
-      topHoldersPct: rugReport.topHoldersPct,
-      priceChangeM5: token.priceChangeM5,
-      buysM5: token.buysM5,
-      sellsM5: token.sellsM5,
-      volumeBuysM5: token.volumeBuysM5,
-      volumeSellsM5: token.volumeSellsM5,
-      priceUsd: token.priceUsd,
-      h1HighPriceUsd: token.h1HighPriceUsd
-    });
-
-    if (this.layaNativeShadowEnabled) {
-      try {
-        layaNativeShadow = await this.solanaLayaAdapter.evaluate(layaFacts);
-        console.log(
-          `[LayaNative:SHADOW] mint=${token.mint} route=${layaNativeShadow.route} ` +
-          `confidence=${layaNativeShadow.routeConfidence.toFixed(4)} abstention=${layaNativeShadow.abstention ?? 'none'} ` +
-          `model=${layaNativeShadow.routingModel ?? 'n/a'} latencyMs=${layaNativeShadow.latencyMs}`
-        );
-      } catch (shadowErr: any) {
-        console.warn(`[LayaNative:SHADOW] falha sem impacto na decisão: ${shadowErr?.message || shadowErr}`);
-      }
-    }
-
     return {
         rugCheckReport: rugReport,
       safe: true,
-      reason: 'Filtros determinísticos Solana aprovados. Laya nativa registrada apenas em shadow/advisory.',
+      reason: 'Filtros determinísticos Solana aprovados.',
       score: rugReport.score,
       validatedBy: 'DETERMINISTIC_SOLANA_PIPELINE',
-      latencyMs: Date.now() - startTime,
-      layaNativeShadow,
-      layaFacts
+      latencyMs: Date.now() - startTime
     };
   }
 

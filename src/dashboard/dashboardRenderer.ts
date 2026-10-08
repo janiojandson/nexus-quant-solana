@@ -373,14 +373,8 @@ export function renderDashboardHtml(state: DashboardState): string {
           </div>
         </div>
 
-        <!-- Laya Live Gatekeeper Badge -->
-        <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-2 flex items-center gap-2">
-          <span class="h-2 w-2 rounded-full ${state.laya?.health === 'OK' ? 'bg-cyan-400' : 'bg-amber-400'}"></span>
-          <div class="text-xs">
-            <span class="text-slate-400">Laya:</span>
-            <span id="op-laya-status" class="${state.laya?.health === 'OK' ? 'text-cyan-300' : 'text-amber-300'} ml-1 font-mono font-bold">${(state.laya?.tacticalMode || 'LIVE') === 'LIVE' ? (state.laya?.health === 'OK' ? 'LIVE GATEKEEPER' : 'DEGRADED · LIVE GATEKEEPER') : ((state.laya?.health || 'UNKNOWN') + ' · ' + (state.laya?.tacticalMode || 'OFF'))}</span>
-          </div>
-        </div>
+        <!-- Deterministic strategy badge -->
+        <div class="text-xs text-cyan-300">Regras determinísticas · Jupiter executável</div>
 
         <!-- Admin + Panico -->
         <button id="admin-login-button" onclick="openAdminModal()" class="bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl border border-cyan-500/30 flex items-center gap-2 transition">
@@ -410,9 +404,9 @@ export function renderDashboardHtml(state: DashboardState): string {
         <div id="op-exit-health-detail" class="text-[10px] text-slate-500 mt-1">${escapeDashboardHtml(state.exitPathHealth?.reason || `Falhas: ${state.exitPathHealth?.maxFailures ?? 0} · novas entradas ${state.exitPathHealth?.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'}`)}</div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1 LIVE GATEKEEPER</div>
-        <div id="op-laya-card-status" class="mt-1 font-bold ${state.laya?.health === 'OK' ? 'text-emerald-400' : 'text-amber-400'}">${(state.laya?.tacticalMode || 'LIVE') === 'LIVE' ? (state.laya?.health === 'OK' ? 'LIVE GATEKEEPER' : 'DEGRADED · LIVE GATEKEEPER') : ((state.laya?.health || 'UNKNOWN') + ' · ' + (state.laya?.tacticalMode || 'OFF'))}</div>
-        <div id="op-laya-detail" class="text-[10px] text-slate-500 mt-1">${(state.laya?.loaded || []).join(',') || 'checkpoint nao confirmado'}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Regras determinísticas</div>
+        <div class="mt-1 font-bold text-emerald-400">DEX + Sentinel</div>
+        <div class="text-[10px] text-slate-500 mt-1">DEX: pools 5–60 min · Sentinel: eventos de curva · slots 2+2</div><div id="op-hub-traffic" class="text-[10px] text-cyan-300 mt-1">Hub Jupiter: aguardando telemetria</div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
         <div class="text-[10px] uppercase tracking-wider text-slate-500">Rent Recovery</div>
@@ -784,31 +778,17 @@ export function renderDashboardHtml(state: DashboardState): string {
 
         // 3. Estado operacional
         const operational = data.operational || {};
+        const hub=operational.jupiter || {}, traffic=hub.traffic || {}, general=traffic.general || {}, execute=traffic.execute || {};
+        const hubEl=document.getElementById('op-hub-traffic');
+        if(hubEl)hubEl.textContent='Hub: '+Number(hub.keyCount || 0)+' chaves · fila '+(Number(general.queued || 0)+Number(execute.queued || 0))+' · concluídas '+(Number(general.completed || 0)+Number(execute.completed || 0))+' · 429 '+(Number(general.rateLimited || 0)+Number(execute.rateLimited || 0));
         const auth = operational.adminAuth || {};
         const rent = operational.rentRecovery || {};
-        const laya = operational.laya || {};
         const exitHealth = operational.exitPathHealth || {};
         adminAuthStatus.configured = Boolean(auth.configured);
         adminAuthStatus.needsBootstrap = Boolean(auth.needsBootstrap);
 
         const execEl = document.getElementById('op-execution-mode');
         if (execEl) { execEl.textContent = operational.maintenanceMode ? 'MODO MANUTENÇÃO' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'REAL ON-CHAIN' : 'DRY-RUN'); execEl.className = 'mt-1 font-bold ' + (operational.maintenanceMode ? 'text-amber-300' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'text-emerald-400' : 'text-amber-400')); }
-        const layaEl = document.getElementById('op-laya-status');
-        const layaCardEl = document.getElementById('op-laya-card-status');
-        const layaDetail = document.getElementById('op-laya-detail');
-        const isLayaLive = (laya.tacticalMode || 'LIVE') === 'LIVE';
-        const layaText = isLayaLive
-          ? (laya.health === 'OK' ? 'LIVE GATEKEEPER' : ((laya.health || 'UNKNOWN') + ' · LIVE GATEKEEPER'))
-          : ((laya.health || 'UNKNOWN') + ' · ' + (laya.tacticalMode || 'OFF'));
-        if (layaEl) {
-          layaEl.textContent = layaText;
-          layaEl.className = 'text-xs ' + (laya.health === 'OK' ? 'text-cyan-300 font-bold' : 'text-amber-300 font-bold');
-        }
-        if (layaCardEl) {
-          layaCardEl.textContent = layaText;
-          layaCardEl.className = 'mt-1 font-bold ' + (laya.health === 'OK' ? 'text-emerald-400' : 'text-amber-400');
-        }
-        if (layaDetail) layaDetail.textContent = (laya.loaded || []).join(',') || 'checkpoint nao confirmado';
         const exitHealthEl = document.getElementById('op-exit-health-status');
         const exitHealthDetail = document.getElementById('op-exit-health-detail');
         if (exitHealthEl) { const s = exitHealth.state || 'HEALTHY'; exitHealthEl.textContent = s; exitHealthEl.className = 'mt-1 font-bold ' + (s === 'HEALTHY' ? 'text-emerald-400' : s === 'EMERGENCY' ? 'text-rose-400' : 'text-amber-400'); }

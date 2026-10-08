@@ -255,7 +255,7 @@ it('ABSTAIN de baixa confiança da Laya shadow não substitui os gates determin�
 
     assert.strictEqual(audit.safe, true);
     assert.strictEqual(audit.validatedBy, 'DETERMINISTIC_SOLANA_PIPELINE');
-    assert.strictEqual(audit.layaNativeShadow?.route, 'ABSTAIN');
-    assert.strictEqual(audit.layaNativeShadow?.routeConfidence, 0.55);
+    assert.strictEqual(audit.layaNativeShadow, undefined);
+    assert.strictEqual(audit.layaNativeShadow, undefined);
   } finally { axios.get = originalGet; }
 });

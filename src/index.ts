@@ -38,7 +38,6 @@ import { runMaintenance } from './database/maintenanceJob.js';
 import { DailyPnlTracker } from './risk/dailyPnlTracker.js';
 import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './execution/atomicAmount.js';
 import { observeJupiterEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
-import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode } from './risk/solanaLayaAdapter.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
@@ -46,7 +45,6 @@ import { PumpDexTimingRuntime } from './pump/pumpDexTimingRuntime.js';
 import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
 import { SentinelHandoffScanner, type SentinelHandoffToken, type SentinelCrossMemoryResult } from './scanner/sentinelHandoffScanner.js';
 import { BUY_AMOUNT_SOL } from './config/env.js';
-import { scheduleEntryAdvisory } from './execution/entryAdvisory.js';
 import { referencesProgram } from './execution/entryRoutePolicy.js';
 import { PUMP_PROGRAM_ID } from './pump/pumpBondingCurve.js';
 
@@ -83,9 +81,6 @@ const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_P
 const ENTRY_MOMENTUM_MAX_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxRisePct);
 const ENTRY_MOMENTUM_MAX_PULLBACK_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_PULLBACK_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxPullbackPct);
 
-const SOLANA_LAYA_TACTICAL_MODE =
-  normalizeSolanaLayaTacticalMode(process.env.SOLANA_LAYA_TACTICAL_MODE);
-const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLANA_LAYA_POSITION_INTERVAL_MS || 10_000));
 const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
 const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
 const NEXUS_MAINTENANCE_MODE = process.env.NEXUS_MAINTENANCE_MODE === 'true';
@@ -196,14 +191,11 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
 
 const scanner = new DexScreenerScanner();
 const exitTelemetry = new NonBlockingTelemetry<Awaited<ReturnType<typeof scanner.fetchCurrentTokenMarketSnapshot>>>();
-// DEX e Sentinel agendam advisory separadamente; shadow nativo não atrasa os hard gates.
+// DEX and Sentinel use deterministic risk gates; legacy AI settings are ignored.
 const entryGatekeeper = new MemeRiskGatekeeper({
   macroSentinelUrl: MACRO_SENTINEL_URL,
   layaNativeShadowEnabled: false
 });
-const solanaLayaAdapter = new SolanaLayaAdapter();
-const layaPositionLastCheck = new Map<string, number>();
-const layaPositionInFlight = new Set<string>();
 /** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
 const exitOrderInFlight = new Set<string>();
 /** Mints cujo /execute V2 ficou inconclusivo: bloqueia nova ordem até reinício/reconciliação. */
@@ -382,12 +374,6 @@ const latestState: DashboardState = {
     totalReclaimedSolActual: 0,
     lastErrors: []
   },
-  laya: {
-    tacticalMode: SOLANA_LAYA_TACTICAL_MODE,
-    privateService: process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true',
-    health: 'UNKNOWN',
-    loaded: []
-  },
   positions: [],
   walletHoldings: [],
   closedTrades: [],
@@ -430,33 +416,7 @@ void adminAuthService.initSchema()
     console.warn(`⚠️ [AdminAuth] inicialização falhou: ${err?.message || err}`);
   });
 
-async function refreshLayaHealth(): Promise<void> {
-  try {
-    const health = await solanaLayaAdapter.checkHealth();
-    latestState.laya = {
-      tacticalMode: SOLANA_LAYA_TACTICAL_MODE,
-      privateService: process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true',
-      health: health.ok ? 'OK' : 'DEGRADED',
-      loaded: health.loaded,
-      latencyMs: health.latencyMs,
-      lastCheckedAt: new Date().toISOString()
-    };
-    console.log(
-      `🧠 [Laya:Health] ok=${health.ok} loaded=${health.loaded.join(',') || 'none'} latencyMs=${health.latencyMs}`
-    );
-  } catch (err: any) {
-    if (latestState.laya) {
-      latestState.laya.health = 'DEGRADED';
-      latestState.laya.lastCheckedAt = new Date().toISOString();
-    }
-    console.warn(`⚠️ [Laya:Health] probe falhou: ${err?.message || err}`);
-  }
-}
-
-void refreshLayaHealth();
-setInterval(() => {
-  void refreshLayaHealth();
-}, 60_000);
+// Decisions and operational health have no AI service dependency.
 
 let rentRecoverySweepInFlight = false;
 async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<ReturnType<RentRecoveryService['sweepOrphanAccounts']>>> {
@@ -1021,61 +981,6 @@ async function executeExitOrderUnlocked(
   return { success: true, txSignature: exitSwap.txSignature };
 }
 
-async function maybeRunLayaTacticalPositionDecision(
-  pos: PositionTracking,
-  currentSolValue: number,
-  pnlPct: number,
-  currentPriceUsd: number
-): Promise<void> {
-  if (SOLANA_LAYA_TACTICAL_MODE === 'OFF') return;
-
-  const now = Date.now();
-  const lastCheck = layaPositionLastCheck.get(pos.mint) || 0;
-  if (now - lastCheck < SOLANA_LAYA_POSITION_INTERVAL_MS) return;
-  if (layaPositionInFlight.has(pos.mint)) return;
-
-  layaPositionLastCheck.set(pos.mint, now);
-  layaPositionInFlight.add(pos.mint);
-
-  try {
-    const entrySol = pos.entrySol || 0.015;
-    const peakSol = positionEngine.getPeakSolValue(pos.mint) || entrySol;
-    const peakPnlPct = entrySol > 0 ? (peakSol - entrySol) / entrySol : pnlPct;
-    const layaPosition = await solanaLayaAdapter.evaluatePosition({
-      mint: pos.mint,
-      symbol: pos.symbol,
-      pnlPct,
-      peakPnlPct,
-      holdingSeconds: Math.max(0, Math.floor((Date.now() - pos.entryTimestamp) / 1000)),
-      partialTaken: Boolean(pos.partialTaken),
-      currentPriceUsd,
-      entryPriceUsd: pos.entryPriceUsd,
-      lastKnownLiquidityUsd: pos.entryLiquidityUsd,
-      lastKnownVolume5mUsd: pos.entryVolume5m,
-      trailingActive: Boolean(pos.trailingActive),
-      stopLossPct: pos.stopLossPct
-    });
-
-    console.log(
-      `🧠 [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:POSITION] ${pos.symbol} ` +
-      `action=${layaPosition.action} confidence=${layaPosition.confidence.toFixed(4)} ` +
-      `abstention=${layaPosition.abstention ?? 'none'} latencyMs=${layaPosition.latencyMs}`
-    );
-
-    // A resposta da Laya é telemetria advisory. Stops, trailing e saídas
-    // permanecem exclusivamente sob o motor determinístico.
-
-  } catch (err: any) {
-    // Falha da Laya nunca desarma os hard exits do motor determinístico.
-    console.warn(
-      `⚠️ [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:POSITION] ${pos.symbol}: ` +
-      `${err?.message || err}`
-    );
-  } finally {
-    layaPositionInFlight.delete(pos.mint);
-  }
-}
-
 function updateDashboardViews() {
   const currentPositions = positionEngine.getAllPositions();
   latestState.slots = entrySlots.snapshot(currentPositions);
@@ -1450,12 +1355,6 @@ async function runUltraFastExitMonitor() {
           // Antes isto ocorria ANTES da cotação executável de saída e mascarava
           // falhas consecutivas justamente no caminho crítico de liquidação.
           positionEngine.recordQuoteSuccess(pos.mint);
-          void maybeRunLayaTacticalPositionDecision(
-            pos,
-            currentSolValue,
-            pnlPct,
-            Number(sensorPriceUsd || pos.entryPriceUsd)
-          );
         }
 
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
@@ -1542,7 +1441,7 @@ async function runUltraFastExitMonitor() {
 
 /**
  * 🔍 SCANNER AUTÔNOMO 24/7 (Ciclo Independente de 30s)
- * Varredura DexScreener, Análise RugCheck + filtros determinísticos + Laya shadow e Execução Sniper
+ * Varredura DexScreener, Análise RugCheck + regras determinísticas e Execução Sniper
  */
 async function executeAutonomousCycle() {
   if (NEXUS_MAINTENANCE_MODE) return;
@@ -1797,12 +1696,12 @@ async function executeAutonomousCycle() {
       for (const candidate of eligibleCandidates) {
         try {
           const cross = await sentinelHandoffScanner.checkCrossMemory(candidate.mint, (candidate as any).devWallet);
-          if (cross.found && (cross.isGraduated || (cross.layaScore !== null && cross.layaScore >= 75))) {
+          if (cross.found && cross.isGraduated) {
             (candidate as any).sentinelCrossMemory = cross;
             (candidate as any).hasSentinelPriorityBonus = true;
             console.log(
               `⚡ [Memória Cruzada Sentinel] Token ${candidate.symbol} (${candidate.mint}) reconhecido no Sentinel Handoff! ` +
-              `Status=${cross.status} LayaScore=${cross.layaScore ?? 'N/D'} | Bonificação heurística de prioridade no pipeline Jupiter concedida.`
+              `Status=${cross.status} Bonificação heurística de prioridade no pipeline Jupiter concedida.`
             );
           }
         } catch {
@@ -1834,7 +1733,7 @@ async function executeAutonomousCycle() {
         console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
         console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
 
-        // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
+        // Ciclo 3: Sentinela de Risco (RugCheck + Price Action Momentum)
         console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
         const audit = await entryGatekeeper.auditToken({
         mint: topCandidate.mint,
@@ -1924,7 +1823,6 @@ async function executeAutonomousCycle() {
           gateEvaluations: gates,
           rejectionReason: vetoReasonText,
           metadata: {
-            layaNativeShadow: audit.layaNativeShadow ?? null,
             rugCheckReport: audit.rugCheckReport ?? null,
             gateEvidenceVersion: 2,
             activeValidator: audit.validatedBy
@@ -1936,7 +1834,6 @@ async function executeAutonomousCycle() {
         continue;
       } else {
         let momentumTelemetry: any = null;
-        let layaEntryTelemetry: any = null;
         const getMomentumStatus = () => {
           if (!ENTRY_MOMENTUM_GATE_ENABLED) return 'DISABLED';
           if (!momentumTelemetry) return 'UNKNOWN';
@@ -2013,7 +1910,6 @@ async function executeAutonomousCycle() {
                   momentumRisingSteps: momentum.risingSteps,
                   momentumMaxPullbackPct: momentum.maxPullbackPct,
                   momentumSamples: momentum.samples,
-                  layaStatus: 'NOT_CALLED_BLOCKED_BY_MOMENTUM'
                 }
               });
               continue;
@@ -2047,25 +1943,10 @@ async function executeAutonomousCycle() {
                 phase: 'MOMENTUM_GATE',
                 momentumSource: 'JUPITER_EXECUTABLE',
                 momentumStatus: 'SOURCE_FAILED',
-                layaStatus: 'NOT_CALLED_MOMENTUM_SOURCE_FAILED'
               }
             });
             continue;
           }
-        }
-
-        // Mercado DEX: Laya é sempre advisory, inclusive com configuração LIVE/ACTIVE.
-        // Nenhuma resposta ou falha da IA altera o fluxo financeiro.
-        if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF' || process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true') {
-          layaEntryTelemetry = scheduleEntryAdvisory({
-            facts: audit.layaFacts,
-            evaluate: facts => solanaLayaAdapter.evaluateEntry(facts),
-            report: telemetry => console.log(
-              `🧠 [Laya:Tactical:SHADOW:ENTRY] ${topCandidate.symbol} ` +
-              `status=${telemetry.status} action=${telemetry.action ?? 'N/D'} ` +
-              `score=${telemetry.score ?? 'N/D'} error=${telemetry.error ?? 'none'}`
-            )
-          });
         }
 
         const quoteParams = {
@@ -2153,12 +2034,6 @@ async function executeAutonomousCycle() {
                   momentumStatus: getMomentumStatus(),
               momentumRisePct: momentumTelemetry?.risePct ?? null,
               momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
-              layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-              layaAction: layaEntryTelemetry?.action ?? null,
-              layaConfidence: layaEntryTelemetry?.confidence ?? null,
-              layaAbstention: layaEntryTelemetry?.abstention ?? null,
-              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
             }
           });
           const sizingRetryMs = sizing.abortReason === 'SIMULATION_REJECTED'
@@ -2224,12 +2099,6 @@ async function executeAutonomousCycle() {
             momentumRisePct: momentumTelemetry?.risePct ?? null,
             momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
             momentumMaxPullbackPct: momentumTelemetry?.maxPullbackPct ?? null,
-            layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-            layaAction: layaEntryTelemetry?.action ?? null,
-            layaConfidence: layaEntryTelemetry?.confidence ?? null,
-            layaAbstention: layaEntryTelemetry?.abstention ?? null,
-            layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null,
             sizingAttempts: sizing.attempts,
             priceImpactPct: sizing.quote.priceImpactPct
           }
@@ -2331,8 +2200,6 @@ async function executeAutonomousCycle() {
                 swapStatus: swapSim.status,
                 swapError: swapSim.error ?? null,
                 momentumRisePct: momentumTelemetry?.risePct ?? null,
-                layaAction: layaEntryTelemetry?.action ?? null,
-                layaConfidence: layaEntryTelemetry?.confidence ?? null
               }
             });
             return;
@@ -2434,12 +2301,6 @@ async function executeAutonomousCycle() {
               momentumRisePct: momentumTelemetry?.risePct ?? null,
               momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
               momentumMaxPullbackPct: momentumTelemetry?.maxPullbackPct ?? null,
-              layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-              layaAction: layaEntryTelemetry?.action ?? null,
-              layaConfidence: layaEntryTelemetry?.confidence ?? null,
-              layaAbstention: layaEntryTelemetry?.abstention ?? null,
-              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
             }
           });
 
@@ -2506,12 +2367,6 @@ async function executeAutonomousCycle() {
                   momentumStatus: getMomentumStatus(),
               momentumRisePct: momentumTelemetry?.risePct ?? null,
               momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
-              layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-              layaAction: layaEntryTelemetry?.action ?? null,
-              layaConfidence: layaEntryTelemetry?.confidence ?? null,
-              layaAbstention: layaEntryTelemetry?.abstention ?? null,
-              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
             }
           });
           // Persistência ativa no banco por 1 hora
@@ -2833,7 +2688,7 @@ async function rehydrateQuarantineFromDbOnBoot() {
 // PONTE SENTINEL HANDOFF — "Graduation Dip" Handler
 // ============================================================
 // Tokens entregues pelo nexus-pump-sentinel já foram auditados
-// na bonding curve (dev share <= 5%, LayaScore >= 75).
+// na bonding curve (dev share <=5%); a compra depende dos gates locais do Quant.
 // Este handler implementa um warm-up de rota na Jupiter
 // (10-25s para indexar novas pools Raydium) e, quando a rota
 // estiver disponível dentro da janela de 45-90s pós-criação,
@@ -2860,7 +2715,7 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
   sentinelActiveGraduations.add(mint);
   latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   try {
-    console.log(`[SentinelHandoff] ${symbol}: fast-track Jupiter 2000ms/45s; Laya advisory=${token.layaScore ?? 'N/D'}`);
+    console.log(`[SentinelHandoff] ${symbol}: fast-track Jupiter 2000ms/45s; deterministic risk policy`);
     const route = await waitForSentinelJupiterRoute(mint, async signal => {
       const quote = await jupiterEngine.getQuote(SOL_MINT_GLOBAL, mint, 25_000_000, 750, priorityForJupiterWork('ENTRY_SIZING'), signal);
       if (quote && referencesProgram(quote.rawQuote?.routePlan, PUMP_PROGRAM_ID.toBase58())) return null;
@@ -2924,7 +2779,7 @@ async function executeSentinelEntryCandidate(
 
   console.log(
     `[SentinelHandoff] Auditando ${topCandidate.symbol} via RugCheck ` +
-    `(bypass MATURITY_AGE ativo — pre-auditado na bonding curve pelo Sentinel).`
+    `(janela DEX dispensada; candidato observado na curva, risco validado pelo Quant).`
   );
 
   // Auditoria completa via RugCheck + MemeRiskGatekeeper (sem bypass de risco — apenas de idade)
@@ -2957,19 +2812,6 @@ async function executeSentinelEntryCandidate(
     console.log(`[SentinelHandoff] ${topCandidate.symbol}: capital insuficiente para nova entrada.`);
     await sentinelHandoffScanner.recordHandoffOutcome(topCandidate.mint, 'DISCARDED_ENTRY_GUARD', 'Capital insuficiente para nova entrada');
     return;
-  }
-
-  // Laya é advisory também na ponte Sentinel, mesmo configurada como LIVE/ACTIVE.
-  if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF' || process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true') {
-    scheduleEntryAdvisory({
-      facts: audit.layaFacts,
-      evaluate: facts => solanaLayaAdapter.evaluateEntry(facts),
-      report: telemetry => console.log(
-        `🧠 [Laya:Tactical:SHADOW:SENTINEL_ENTRY] ${topCandidate.symbol} ` +
-        `status=${telemetry.status} action=${telemetry.action ?? 'N/D'} ` +
-        `score=${telemetry.score ?? 'N/D'} error=${telemetry.error ?? 'none'}`
-      )
-    });
   }
 
   const quoteParams = {

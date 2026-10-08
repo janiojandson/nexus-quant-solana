@@ -7,6 +7,7 @@ export class JupiterApiKeyPool {
     if (!this.keys.length && fallback?.trim()) this.keys.push(fallback.trim());
   }
   public hasKeys(): boolean { return this.keys.length > 0; }
+  public size(): number { return this.keys.length; }
   public next(): string | undefined {
     if (!this.keys.length) return undefined;
     return this.keys[this.cursor++ % this.keys.length];

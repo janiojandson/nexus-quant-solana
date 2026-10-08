@@ -133,9 +133,9 @@ test('Dashboard Executivo reflete o layout limpo sem seções legadas poluidoras
   assert.match(html, /⚡ Fila Sentinel/);
   assert.match(html, /id="metric-sentinel-queue"/);
 
-  // Laya Live Gatekeeper
-  assert.match(html, /LIVE GATEKEEPER/);
-  assert.match(html, /Laya Sistema 1 LIVE GATEKEEPER/);
+  // Deterministic strategy, without obsolete AI status.
+  assert.doesNotMatch(html, /LIVE GATEKEEPER/);
+  assert.match(html, /Regras determinísticas/);
 
   // Posições Ativas com Badges de Origem
   assert.match(html, /Posições Ativas sob Gestão/);
