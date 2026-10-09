@@ -1,263 +1,146 @@
-// ============================================================
-// sentinelHandoffScanner.ts — Nexus Quant Solana
-// Scanner aditivo: consome tokens pré-auditados pelo
-// nexus-pump-sentinel via tabela sentinel_handoff no Postgres
-// compartilhado. Não toca no núcleo do Padrão Ouro.
-// ============================================================
-
-import { EventEmitter } from 'events';
-import { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
+import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
+import { ConfirmedPoolReader, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
+import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
 
-export interface SentinelHandoffToken {
-  mint: string;
-  symbol: string;
-  devWallet: string | null;
-  layaScore: number | null;
-  pnlPercent: number | null;
-  createdAt: Date;
-  /** Marcado como true para bypass do gate de maturidade mínima (já auditado na bonding curve) */
-  isSentinelPreAudited: true;
+export interface CandidateLease {
+  mint:string; symbol:string; devWallet:string|null; layaScore:number|null; pnlPercent:number|null;
+  /** Sentinel observation time, never pool creation time. */
+  createdAt:Date; leaseId:string; poolHints:string[];
 }
-
+export interface SentinelHandoffToken extends CandidateLease {
+  isSentinelPreAudited:true;
+  poolEvidence:ConfirmedPoolEvidence;
+}
 export interface SentinelCrossMemoryResult {
-  found: boolean;
-  isGraduated: boolean;
-  layaScore: number | null;
-  pnlPercent: number | null;
-  status: string | null;
-  devWallet: string | null;
+  found:boolean; isGraduated:boolean; layaScore:number|null; pnlPercent:number|null; status:string|null; devWallet:string|null;
+}
+export interface CandidateStore {
+  claim():Promise<CandidateLease[]>;
+  confirm(mint:string,leaseId:string,evidence:ConfirmedPoolEvidence):Promise<boolean>;
+  renew(mint:string,leaseId:string):Promise<boolean>;
+  acknowledgeAccepted(mint:string,leaseId:string):Promise<boolean>;
+  release(mint:string,leaseId:string,reason:string):Promise<void>;
+}
+const finite = (n:unknown):number|null => n===null||n===undefined||!Number.isFinite(Number(n))?null:Number(n);
+const LEASE_MS=120_000;
+/** Requires additive schema_sentinel_handoff.sql migration; no implicit production migration. */
+export class PostgresCandidateStore implements CandidateStore {
+  constructor(private readonly pool:Pool) {}
+  async claim():Promise<CandidateLease[]> {
+    const result=await this.pool.query(`
+      WITH eligible AS (
+        SELECT mint FROM sentinel_handoff
+        WHERE consumed_by_quant = FALSE
+          AND status IN ('CANDIDATE','PENDING_POOL','POOL_CONFIRMED')
+          AND next_check_at <= NOW()
+          AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+        ORDER BY next_check_at, created_at
+        FOR UPDATE SKIP LOCKED LIMIT 5
+      )
+      UPDATE sentinel_handoff h
+      SET lease_id = $1, lease_expires_at = NOW() + INTERVAL '120 seconds',
+          retry_count = retry_count + 1
+      FROM eligible e WHERE h.mint = e.mint RETURNING h.*`,[randomUUID()]);
+    return result.rows.map(row=>({mint:row.mint,symbol:row.symbol||row.mint.slice(0,6),devWallet:row.dev_wallet,
+      layaScore:finite(row.laya_score),pnlPercent:finite(row.pnl_percent),createdAt:new Date(row.created_at),
+      leaseId:row.lease_id,poolHints:Array.isArray(row.pool_hints)?row.pool_hints.filter((h:unknown)=>typeof h==='string').slice(0,4):[]}));
+  }
+  async confirm(mint:string,leaseId:string,evidence:ConfirmedPoolEvidence):Promise<boolean> {
+    const result=await this.pool.query(`UPDATE sentinel_handoff
+      SET status = 'POOL_CONFIRMED', pool_proof = $3::jsonb, pool_confirmed_at = NOW(), last_error = NULL
+      WHERE mint = $1 AND lease_id = $2 AND consumed_by_quant = FALSE AND lease_expires_at > NOW()`,
+      [mint,leaseId,JSON.stringify(evidence)]);
+    return result.rowCount===1;
+  }
+  async renew(mint:string,leaseId:string):Promise<boolean> {
+    const result=await this.pool.query(`UPDATE sentinel_handoff SET lease_expires_at = NOW() + INTERVAL '120 seconds'
+      WHERE mint = $1 AND lease_id = $2 AND consumed_by_quant = FALSE AND lease_expires_at > NOW()`,[mint,leaseId]);
+    return result.rowCount===1;
+  }
+  async acknowledgeAccepted(mint:string,leaseId:string):Promise<boolean> {
+    const result=await this.pool.query(`UPDATE sentinel_handoff
+      SET consumed_by_quant = TRUE, consumed_at = COALESCE(consumed_at,NOW()), status = 'ACCEPTED', lease_expires_at = NULL
+      WHERE mint = $1 AND lease_id = $2 AND pool_proof IS NOT NULL
+        AND ((status = 'POOL_CONFIRMED' AND consumed_by_quant = FALSE AND lease_expires_at > NOW())
+          OR (status = 'ACCEPTED' AND consumed_by_quant = TRUE))`,[mint,leaseId]);
+    return result.rowCount===1;
+  }
+  async release(mint:string,leaseId:string,reason:string):Promise<void> {
+    await this.pool.query(`UPDATE sentinel_handoff
+      SET status = CASE WHEN pool_proof IS NULL THEN 'PENDING_POOL' ELSE 'POOL_CONFIRMED' END,
+          lease_id = NULL, lease_expires_at = NULL,
+          next_check_at = NOW() + LEAST(60, GREATEST(3, retry_count * 3)) * INTERVAL '1 second', last_error = $3
+      WHERE mint = $1 AND lease_id = $2 AND consumed_by_quant = FALSE`,
+      [mint,leaseId,/^[A-Z_]+$/.test(reason)?reason:'HANDOFF_RETRY']);
+  }
 }
 
 export class SentinelHandoffScanner extends EventEmitter {
-  private readonly pgPool: Pool | null;
-  private pollingTimer: ReturnType<typeof setInterval> | null = null;
-  private isPolling = false;
-  private schemaReady = false;
-
-  /** Intervalo de polling em ms (padrão: 3 segundos) */
-  private readonly pollingIntervalMs: number;
-  private rpcHub: HeliusRpcHub | null = null;
-  private incubator = new Map<string, { addedAt: number, token: SentinelHandoffToken }>();
-
-  constructor(pgPool: Pool | null, options: { pollingIntervalMs?: number, rpcHub?: HeliusRpcHub } = {}) {
-    super();
-    this.pgPool = pgPool;
-    this.pollingIntervalMs = options.pollingIntervalMs ?? 3_000;
-    if (options.rpcHub) this.rpcHub = options.rpcHub;
+  private readonly store:CandidateStore|null;
+  private readonly reader:PoolEvidenceReader|null;
+  private readonly pollingIntervalMs:number;
+  private pollingTimer:ReturnType<typeof setInterval>|null=null;
+  private isPolling=false;
+  constructor(private readonly pgPool:Pool|null,options:{pollingIntervalMs?:number;rpcHub?:HeliusRpcHub;reader?:PoolEvidenceReader;store?:CandidateStore}={}) {
+    super();this.store=options.store??(pgPool?new PostgresCandidateStore(pgPool):null);
+    this.reader=options.reader??(options.rpcHub?new ConfirmedPoolReader(options.rpcHub):null);
+    this.pollingIntervalMs=options.pollingIntervalMs??3000;
   }
-
-  /**
-   * Inicializa o schema de compatibilidade de forma idempotente e
-   * inicia o loop de polling não-bloqueante.
-   */
-  public async start(): Promise<void> {
-    if (!this.pgPool) {
-      console.warn('[SentinelHandoff] Sem pool Postgres — scanner desabilitado.');
-      return;
-    }
-    await this.ensureSchema();
-    this.pollingTimer = setInterval(() => {
-      void this.poll();
-    }, this.pollingIntervalMs);
-    this.pollingTimer.unref?.();
-    console.log(
-      `[SentinelHandoff] Scanner ativo | polling a cada ${this.pollingIntervalMs}ms | ` +
-      'aguardando tokens CANDIDATE (Incubadora) da bonding curve.'
-    );
+  async start():Promise<void> {
+    if(!this.store||!this.reader||this.pollingTimer)return;
+    this.pollingTimer=setInterval(()=>{void this.poll();},this.pollingIntervalMs);this.pollingTimer.unref?.();
   }
-
-  public stop(): void {
-    if (this.pollingTimer) {
-      clearInterval(this.pollingTimer);
-      this.pollingTimer = null;
-    }
-  }
-
-  /**
-   * Adiciona a coluna consumed_at de forma idempotente — seguro em
-   * múltiplos reinícios simultâneos.
-   */
-  private async ensureSchema(): Promise<void> {
-    if (!this.pgPool || this.schemaReady) return;
+  stop():void {if(this.pollingTimer)clearInterval(this.pollingTimer);this.pollingTimer=null;}
+  /** Explicit single poll also supports supervised callers without starting a timer. */
+  async poll():Promise<void> {
+    if(this.isPolling||!this.store||!this.reader)return;
+    this.isPolling=true;
     try {
-      await this.pgPool.query(`
-        ALTER TABLE sentinel_handoff
-        ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMP WITH TIME ZONE;
-      `);
-      this.schemaReady = true;
-      console.log('[SentinelHandoff] Schema validado (consumed_at idempotente).');
-    } catch (err: any) {
-      // Tolerante: se a tabela não existir ainda, o scanner aguarda silenciosamente.
-      console.warn(`[SentinelHandoff] Schema check: ${err?.message || err}`);
-    }
+      const leases=await this.store.claim();
+      await Promise.allSettled(leases.map(lease=>this.processLease(lease)));
+    } catch {console.warn('[SentinelHandoff] HANDOFF_STORE_UNAVAILABLE');}
+    finally {this.isPolling=false;}
   }
-
-  /**
-   * Ciclo de polling: busca até 5 tokens elegíveis e tenta
-   * fazer o lock atômico via UPDATE ... WHERE consumed_by_quant = FALSE.
-   */
-  private async poll(): Promise<void> {
-    if (this.isPolling || !this.pgPool) return;
-    this.isPolling = true;
+  async acknowledgeAccepted(mint:string,leaseId:string):Promise<boolean> {
+    return this.store?this.store.acknowledgeAccepted(mint,leaseId):false;
+  }
+  async release(mint:string,leaseId:string,reason='ENTRY_NOT_ACCEPTED'):Promise<void> {
+    await this.store?.release(mint,leaseId,reason);
+  }
+  private async processLease(lease:CandidateLease):Promise<void> {
+    let reason='ENTRY_NOT_ACCEPTED';
+    // The lease survives a process crash; renewal prevents duplicate dispatch during a slow handler.
+    const renewal=setInterval(()=>{void this.store!.renew(lease.mint,lease.leaseId).catch(()=>{});},LEASE_MS/3);
+    renewal.unref?.();
     try {
-      const candidates = await this.pgPool.query<{
-        mint: string;
-        symbol: string;
-        dev_wallet: string | null;
-        laya_score: string | null;
-        pnl_percent: string | null;
-        created_at: Date;
-      }>(`
-        SELECT mint, symbol, dev_wallet, laya_score, pnl_percent, created_at
-        FROM sentinel_handoff
-        WHERE status = 'CANDIDATE'
-          AND consumed_by_quant = FALSE
-          AND created_at > NOW() - INTERVAL '15 minutes'
-        ORDER BY created_at ASC
-        LIMIT 5;
-      `);
-
-      for (const row of candidates.rows) {
-        try {
-          const lockResult = await this.pgPool.query(
-            `UPDATE sentinel_handoff
-             SET consumed_by_quant = TRUE, consumed_at = NOW()
-             WHERE mint = $1 AND consumed_by_quant = FALSE`,
-            [row.mint]
-          );
-
-          if ((lockResult.rowCount ?? 0) !== 1) continue;
-
-          const token: SentinelHandoffToken = {
-            mint: row.mint,
-            symbol: row.symbol || row.mint.slice(0, 6),
-            devWallet: row.dev_wallet,
-            layaScore: row.laya_score !== null ? Number(row.laya_score) : null,
-            pnlPercent: row.pnl_percent !== null ? Number(row.pnl_percent) : null,
-            createdAt: row.created_at,
-            isSentinelPreAudited: true
-          };
-
-          if (this.rpcHub) {
-            this.incubator.set(row.mint, { addedAt: Date.now(), token });
-            console.log(`[SentinelHandoff] Incubando CANDIDATE: ${token.symbol} (${token.mint})`);
-          } else {
-            this.emit('sentinelGraduationToken', token);
-          }
-        } catch (lockErr: any) {
-          console.warn(`[SentinelHandoff] Falha ao fazer lock de ${row.mint}: ${lockErr?.message || lockErr}`);
-        }
-      }
-      
-      if (this.rpcHub) {
-        await this.verifyRaydiumPools();
-      }
-    } catch (err: any) {
-      if (!String(err?.message || '').includes('does not exist')) {
-        console.warn(`[SentinelHandoff] Polling erro: ${err?.message || err}`);
-      }
-    } finally {
-      this.isPolling = false;
+      const result=await this.reader!.read(lease.mint,lease.poolHints);
+      if(!result.ok){reason=result.code;return;}
+      if(!await this.store!.confirm(lease.mint,lease.leaseId,result.evidence)){reason='LEASE_LOST';return;}
+      const token:SentinelHandoffToken={...lease,isSentinelPreAudited:true,poolEvidence:result.evidence};
+      // Await async consumers. emit() alone cannot acknowledge execution or observe early returns.
+      const handlers=this.rawListeners('sentinelGraduationToken');
+      if(!handlers.length){reason='NO_ACCEPTING_HANDLER';return;}
+      for(const handler of handlers)await handler.call(this,token);
+    } catch {reason='HANDOFF_PROCESSING_FAILED';}
+    finally {
+      clearInterval(renewal);
+      try {await this.release(lease.mint,lease.leaseId,reason);}
+      catch {console.warn('[SentinelHandoff] HANDOFF_RELEASE_FAILED');}
     }
   }
-
-  private async verifyRaydiumPools() {
-    if (!this.rpcHub) return;
-    const now = Date.now();
-    for (const [mint, data] of this.incubator.entries()) {
-      if (now - data.addedAt > 60000) {
-        this.incubator.delete(mint);
-        continue;
-      }
-      try {
-        const response = (await this.rpcHub.call('STATE', 'getAsset', [mint])) as any;
-        if (response.status === 200 && response.body?.token_info?.price_info) {
-          console.log(`[SentinelHandoff] Pool confirmada on-chain para ${mint}. Avançando...`);
-          this.emit('sentinelGraduationToken', data.token);
-          this.incubator.delete(mint);
-        }
-      } catch (err) {
-        // Pool probably doesn't exist yet
-      }
-    }
-  }
-
-  /**
-   * Consulta de Memória Cruzada:
-   * Verifica se o token ou sua dev_wallet constam no histórico da bonding curve (sentinel_handoff).
-   * Identifica se graduou com recomendação prévia do Sentinel.
-   */
-  public async checkCrossMemory(
-    mint: string,
-    devWallet?: string | null
-  ): Promise<SentinelCrossMemoryResult> {
-    if (!this.pgPool) {
-      return {
-        found: false,
-        isGraduated: false,
-        layaScore: null,
-        pnlPercent: null,
-        status: null,
-        devWallet: null
-      };
-    }
-
+  async checkCrossMemory(mint:string,devWallet?:string|null):Promise<SentinelCrossMemoryResult> {
+    const missing:SentinelCrossMemoryResult={found:false,isGraduated:false,layaScore:null,pnlPercent:null,status:null,devWallet:null};
+    if(!this.pgPool)return missing;
     try {
-      const res = await this.pgPool.query<{
-        mint: string;
-        symbol: string;
-        dev_wallet: string | null;
-        status: string | null;
-        laya_score: string | null;
-        pnl_percent: string | null;
-      }>(
-        `SELECT mint, symbol, dev_wallet, status, laya_score, pnl_percent
-         FROM sentinel_handoff
-         WHERE mint = $1 OR ($2::text IS NOT NULL AND dev_wallet = $2::text)
-         ORDER BY created_at DESC
-         LIMIT 1`,
-        [mint, devWallet || null]
-      );
-
-      if (res.rows.length === 0) {
-        return {
-          found: false,
-          isGraduated: false,
-          layaScore: null,
-          pnlPercent: null,
-          status: null,
-          devWallet: null
-        };
-      }
-
-      const row = res.rows[0];
-      const isGraduated =
-        row.status === 'CANDIDATE' || row.status === 'GRADUATING_HIGH_STRENGTH' ||
-        row.status === 'GRADUATED' ||
-        row.status === 'GRADUATING';
-
-      return {
-        found: true,
-        isGraduated,
-        layaScore: row.laya_score !== null ? Number(row.laya_score) : null,
-        pnlPercent: row.pnl_percent !== null ? Number(row.pnl_percent) : null,
-        status: row.status,
-        devWallet: row.dev_wallet
-      };
-    } catch (err: any) {
-      if (!String(err?.message || '').includes('does not exist')) {
-        console.warn(`[SentinelHandoff:CrossMemory] Erro na consulta de ${mint}: ${err?.message || err}`);
-      }
-      return {
-        found: false,
-        isGraduated: false,
-        layaScore: null,
-        pnlPercent: null,
-        status: null,
-        devWallet: null
-      };
-    }
+      const result=await this.pgPool.query(`SELECT mint,dev_wallet,status,laya_score,pnl_percent,pool_proof
+        FROM sentinel_handoff WHERE mint = $1 OR ($2::text IS NOT NULL AND dev_wallet = $2::text)
+        ORDER BY CASE WHEN mint = $1 THEN 0 ELSE 1 END, created_at DESC LIMIT 1`,[mint,devWallet||null]);
+      const row=result.rows[0];if(!row)return missing;
+      return {found:true,isGraduated:['POOL_CONFIRMED','ACCEPTED'].includes(row.status)&&row.pool_proof?.kind==='PHYSICAL_POOL_CONFIRMED',
+        layaScore:finite(row.laya_score),pnlPercent:finite(row.pnl_percent),status:row.status,devWallet:row.dev_wallet};
+    } catch {return missing;}
   }
 }
 

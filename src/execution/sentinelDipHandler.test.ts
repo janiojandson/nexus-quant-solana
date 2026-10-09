@@ -26,56 +26,41 @@ function loadHandler(name: string, dependencies: Record<string, unknown>) {
   }) as (...args: any[]) => Promise<void>;
 }
 
-test('Sentinel queue tracks overlapping handlers and clears on expiry', async () => {
-  let now = 0;
-  const latestState = { sentinelHandoffQueue: 0 };
-  const releases: Array<() => void> = [];
-  const handler = loadHandler('handleSentinelGraduationDip', {
-    latestState, Date: { now: () => now }, setTimeout: (resolve: () => void) => releases.push(resolve),
-    antiSpamMemory: { shouldSkip: () => ({ skip: false }) },
-    scanner: { fetchCurrentTokenMarketSnapshot: async () => { throw new Error('upstream failed'); } },
-    console: { log() {}, warn() {}, error() {} }
+test('physical handoff fails explicitly without Task3 metadata and preserves candidate for retry', async () => {
+  const released:any[]=[];const warnings:string[]=[];let executed=0;
+  const handler=loadHandler('handleSentinelGraduationDip',{
+    sentinelHandoffScanner:{release:async(...args:any[])=>{released.push(args);}},
+    executeSentinelEntryCandidate:async()=>{executed++;},
+    console:{log(){},warn:(s:string)=>warnings.push(s),error(){}},
+    antiSpamMemory:{shouldSkip:()=>({skip:false})},
+    setTimeout:(resolve:()=>void)=>resolve(),Date:{now:()=>200000}
   });
-  const first = handler({ mint: 'one', symbol: 'ONE', createdAt: new Date(0) });
-  const second = handler({ mint: 'two', symbol: 'TWO', createdAt: new Date(0) });
-  assert.equal(latestState.sentinelHandoffQueue, 2);
-  await handler({ mint: 'one', symbol: 'ONE', createdAt: new Date() });
-  assert.equal(latestState.sentinelHandoffQueue, 2);
-  now = 91_000;
-  releases[0](); await first;
-  assert.equal(latestState.sentinelHandoffQueue, 1);
-  releases[1](); await second;
-  assert.equal(latestState.sentinelHandoffQueue, 0);
+  await handler({mint:'mint',symbol:'SYM',leaseId:'lease',createdAt:new Date(0),
+    poolEvidence:{kind:'PHYSICAL_POOL_CONFIRMED',poolAddress:'pool',poolCreatedAt:null}});
+  assert.equal(executed,0);assert.deepEqual(released,[['mint','lease','DADOS_INSUFICIENTES']]);
+  assert.ok(warnings.some(s=>s.includes('DADOS_INSUFICIENTES')));
 });
-
-function dipHarness(options: { liquidity?: number; now?: number; score?: number | null; refreshLiquidity?: number; refreshFails?: boolean } = {}) {
-  let now = options.now ?? 3_000;
-  const waits: number[] = [], executions: any[] = [], discards: string[] = [];
-  let snapshots = 0, quotes = 0;
-  const handler = loadHandler('handleSentinelGraduationDip', {
-    Date: { now: () => now },
-    setTimeout: (resolve: () => void, ms: number) => { waits.push(ms); now += ms; resolve(); },
-    antiSpamMemory: { shouldSkip: () => ({ skip: false }), recordTechnicalDiscard: (_mint: string, reason: string) => discards.push(reason) },
-    scanner: { fetchCurrentTokenMarketSnapshot: async () => {
-      snapshots++;
-      if (snapshots > 1 && options.refreshFails) throw new Error('DEX unavailable');
-      return { symbol: 'BLANK', liquidityUsd: snapshots > 1 ? (options.refreshLiquidity ?? options.liquidity ?? 562_491) : (options.liquidity ?? 562_491), priceUsd: 1, volume5mUsd: 1000, buysM5: 50, sellsM5: 20, pairAddress: 'pair', dexId: 'raydium' };
-    } },
-    jupiterEngine: { getQuote: async () => { quotes++; return { outAmount: 100, rawQuote: { routePlan: [] } }; } },
-    referencesProgram: () => false, PUMP_PROGRAM_ID: { toBase58: () => 'bonding-curve' },
-    priorityForJupiterWork: (p: string) => p,
-    executeSentinelEntryCandidate: async (candidate: any) => executions.push({ at: now, candidate })
-  });
-  return { run: () => handler({ mint: 'mint', symbol: 'BLANK', createdAt: new Date(0), layaScore: options.score ?? null }), waits, executions, discards, state: () => ({ snapshots, quotes }) };
-}
-
-test('BLANK: confirmed route and robust liquidity enter at six seconds without maturity wait', async () => {
-  const h = dipHarness(); await h.run();
-  assert.equal(h.executions.length, 1);
-  assert.equal(h.executions[0].at, 6_000);
-  assert.deepEqual(h.waits, [3_000]);
+test('only registered entry acknowledges its durable lease; hypothetical execution cannot consume',async()=>{
+  for(const hypothetical of [true,false]){
+    const actions:string[]=[];const handler=loadHandler('executeSentinelEntryCandidate',{
+      executionUncertainReason:null,MAX_CONCURRENT_POSITIONS:2,
+      positionEngine:{getAllPositions:()=>[],addPosition:()=>actions.push('registered')},
+      entryGatekeeper:{auditToken:async()=>({safe:true,score:90})},wallet:{getBalanceSol:async()=>1},
+      buildEquitySizingPolicy:()=>({canOpenNextPosition:true,ladderSol:[0.01]}),
+      ENTRY_EQUITY_PCT:0.1,MAX_TOTAL_ALLOCATION_PCT:0.2,BUY_AMOUNT_SOL:0.025,MAX_TOTAL_ALLOCATION_SOL:0.1,
+      GAS_RESERVE_EQUITY_PCT:0.1,MIN_GAS_RESERVE_SOL:0.01,MAX_GAS_RESERVE_SOL:0.05,
+      priorityForJupiterWork:(p:string)=>p,adaptiveSizer:{findExecutableSize:async()=>({success:true,quote:{rawQuote:{routePlan:[]}},sizeSol:0.01})},
+      referencesProgram:()=>false,PUMP_PROGRAM_ID:{toBase58:()=> 'curve'},randomUUID:()=> 'trace',OFFICIAL_PHANTOM_WALLET:'wallet',getExecutionSigner:()=>undefined,
+      jupiterEngine:{executeSwap:async()=>({status:'SUCCESS',isDryRun:true,outAmount:100,inAmount:10000000})},
+      isHypotheticalExecution:()=>hypothetical,
+      PositionExitEngine:{DEFAULT_STOP_LOSS_PCT:10,TP1_TRIGGER_PCT:20},
+      sentinelHandoffScanner:{acknowledgeAccepted:async(m:string,l:string)=>{assert.equal(m,'mint');assert.equal(l,'lease');actions.push('acknowledged');return true;}},
+      journal:{logDecision(){}},DecisionLogger:{evaluateGate:()=>({})}
+    });
+    await handler({mint:'mint',symbol:'SYM',liquidityUsd:20000,priceUsd:1,pairCreatedAt:Date.now()}, {leaseId:'lease',createdAt:new Date(),layaScore:null});
+    assert.deepEqual(actions,hypothetical?[]:['registered','acknowledged']);
+  }
 });
-
 test('Sentinel composes real deterministic audit without waiting for native shadow enabled by environment', async () => {
   const originalGet = axios.get, originalShadow = process.env.SOLANA_LAYA_SHADOW_ENABLED;
   let completed = false, nativeCalls = 0;
@@ -112,43 +97,6 @@ test('Sentinel composes real deterministic audit without waiting for native shad
     if (originalShadow === undefined) delete process.env.SOLANA_LAYA_SHADOW_ENABLED;
     else process.env.SOLANA_LAYA_SHADOW_ENABLED = originalShadow;
   }
-});
-
-test('liquidity below 25k waits for maturity and refreshes market and route before entry', async () => {
-  const h = dipHarness({ liquidity: 24_999, refreshLiquidity: 20_000 }); await h.run();
-  assert.equal(h.executions.length, 1);
-  assert.ok(h.waits.includes(39_000));
-  assert.ok(h.executions[0].at >= 45_000);
-  assert.equal(h.executions[0].candidate.liquidityUsd, 20_000);
-  assert.ok(h.state().quotes >= 2);
-});
-
-test('25k liquidity includes the immediate-entry threshold', async () => {
-  const h = dipHarness({ liquidity: 25_000 }); await h.run();
-  assert.equal(h.executions[0]?.at, 6_000);
-});
-
-test('maturity wait cannot reuse a snapshot when refreshed DEX requests fail', async () => {
-  const h = dipHarness({ liquidity: 20_000, refreshFails: true }); await h.run();
-  assert.equal(h.executions.length, 0);
-});
-
-test('robust liquidity never bypasses the maximum dip age', async () => {
-  const h = dipHarness({ now: 88_000 }); await h.run();
-  assert.equal(h.executions.length, 0);
-});
-
-test('45 and 90 seconds are inclusive maturity boundaries', async () => {
-  for (const now of [42_000, 87_000]) {
-    const h = dipHarness({ now, liquidity: 20_000 }); await h.run();
-    assert.equal(h.executions.length, 1);
-  }
-});
-
-test('low upstream Laya score is advisory and cannot discard the handoff', async () => {
-  const h = dipHarness({ score: 2 }); await h.run();
-  assert.equal(h.executions.length, 1);
-  assert.deepEqual(h.discards, []);
 });
 
 test('null-score Sentinel entries reach sizing despite LIVE Laya veto, abstention, failure or pending response', async () => {
