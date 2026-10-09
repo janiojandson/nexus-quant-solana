@@ -374,25 +374,6 @@ export function renderDashboardHtml(state: DashboardState): string {
           <div id="wallet-balance" class="text-lg md:text-xl font-bold font-mono text-emerald-400">${Number(state.balanceSol || 0).toFixed(4)} SOL</div>
         </div>
 
-        <!-- Sentinel State Badge -->
-        <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-2 flex items-center gap-2">
-          <span id="sentinel-dot" class="h-2.5 w-2.5 rounded-full ${state.circuitBreakerActive ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500 animate-pulse'}"></span>
-          <div class="text-xs">
-            <span class="text-slate-400 font-medium">Sentinel:</span>
-            <strong id="sentinel-text" class="${state.circuitBreakerActive ? 'text-rose-400' : 'text-emerald-400'} ml-1 font-mono">${state.circuitBreakerActive ? 'DISJUNTOR ATIVO' : (state.macroRegime || 'SEGURO')}</strong>
-          </div>
-        </div>
-
-        <!-- Laya Live Gatekeeper Badge -->
-        <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-2 flex items-center gap-2">
-          <span class="h-2 w-2 rounded-full ${state.laya?.health === 'OK' ? 'bg-cyan-400' : 'bg-amber-400'}"></span>
-          <div class="text-xs">
-            <span class="text-slate-400">Laya:</span>
-            <span id="op-laya-status" class="${state.laya?.health === 'OK' ? 'text-cyan-300' : 'text-amber-300'} ml-1 font-mono font-bold">${(state.laya?.tacticalMode || 'LIVE') === 'LIVE' ? (state.laya?.health === 'OK' ? 'LIVE GATEKEEPER' : 'DEGRADED · LIVE GATEKEEPER') : ((state.laya?.health || 'UNKNOWN') + ' · ' + (state.laya?.tacticalMode || 'OFF'))}</span>
-          </div>
-        </div>
-
-
       </div>
     </header>
 
