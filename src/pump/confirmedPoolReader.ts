@@ -8,6 +8,8 @@ export const PUMP_SWAP_PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmS
 export const RAYDIUM_CPMM_PROGRAM = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
 const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
 const PUMP_DISC = Buffer.from([241,154,109,4,17,177,109,188]);
+const PUMP_GLOBAL_DISC = Buffer.from([149,8,156,202,160,252,176,217]);
+const PUMP_GLOBAL_CONFIG = PublicKey.findProgramAddressSync([Buffer.from('global_config')], PUMP_SWAP_PROGRAM)[0];
 const CPMM_DISC = createHash('sha256').update('account:PoolState').digest().subarray(0,8);
 export interface ConfirmedPoolEvidence {
   kind: 'PHYSICAL_POOL_CONFIRMED'; venue: 'PumpSwap' | 'Raydium CPMM';
@@ -35,8 +37,8 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
   private readonly now:()=>number;
   constructor(private readonly hub:Pick<HeliusRpcHub,'call'>, options:{minPoolReserveSol?:string; now?:()=>number}={}) {
     const raw = options.minPoolReserveSol ?? process.env.MIN_POOL_RESERVE_SOL;
-    const value = raw === undefined ? 20 : Number(raw);
-    if(raw?.trim()==='' || !Number.isFinite(value) || value<=0 || !Number.isSafeInteger(Math.ceil(value*1e9)))throw new Error('INVALID_MIN_POOL_RESERVE_SOL');
+    const value = raw ? Number(raw) : 20;
+    if(!Number.isFinite(value) || value<=0 || !Number.isSafeInteger(Math.ceil(value*1e9)))throw new Error('INVALID_MIN_POOL_RESERVE_SOL');
     this.minimum=BigInt(Math.ceil(value*1e9)); this.now=options.now??Date.now;
   }
   async read(mint:string,poolHints:readonly string[]=[]):Promise<PoolReadResult> {
@@ -55,10 +57,11 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
         try {
           const first=this.layout(addresses[i],initial.value[i],token);
           // Re-read the pool with both vaults in one bank snapshot. Never join reserves from unrelated slots.
-          const snapshot=await this.accounts([addresses[i],...first.vaults],initial.context.slot);
+          const snapshot=await this.accounts([addresses[i],...first.vaults,...(first.venue==='PumpSwap'?[PUMP_GLOBAL_CONFIG]:[])],initial.context.slot);
           demand(snapshot.value.every(Boolean),'POOL_ACCOUNT_MISSING');
           const layout=this.layout(addresses[i],snapshot.value[0],token);
           demand(layout.vaults.every((v,j)=>v.equals(first.vaults[j])),'POOL_CHANGED_RETRY');
+          if(layout.venue==='PumpSwap')this.pumpGlobalConfig(snapshot.value[3]);
           const amounts=layout.vaults.map((_,j)=>this.vault(snapshot.value[j+1],layout.mints[j],layout.authority)-layout.fees[j]);
           demand(amounts.every(a=>a>0n),'INVALID_RESERVES');
           const solIndex=layout.mints.findIndex(m=>m.equals(WSOL));
@@ -125,6 +128,13 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
       return {venue:'Raydium CPMM',program:RAYDIUM_CPMM_PROGRAM,mints,vaults,authority,fees};
     }
     throw new Error('UNSUPPORTED_POOL_PROGRAM');
+  }
+  private pumpGlobalConfig(account:Account):void {
+    demand(account.owner===PUMP_SWAP_PROGRAM.toBase58(),'INVALID_GLOBAL_CONFIG_OWNER');
+    const b=bytes(account);
+    // Anchor discriminator + current GlobalConfig fixed Borsh fields (949 bytes).
+    demand(b.length===949&&b.subarray(0,8).equals(PUMP_GLOBAL_DISC),'INVALID_GLOBAL_CONFIG_LAYOUT');
+    demand((b[56]&0b00011000)===0,'POOL_PAUSED');
   }
   private vault(account:Account,mint:PublicKey,authority:PublicKey):bigint {
     demand(account.owner===TOKEN_PROGRAM_ID.toBase58(),'UNSUPPORTED_TOKEN_PROGRAM');

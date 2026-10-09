@@ -51,6 +51,59 @@ test('crashed lease expires and old owner cannot consume new lease',async()=>{
   const s=scanner(store);s.on('sentinelGraduationToken',async(token:SentinelHandoffToken)=>{assert.equal(await s.acknowledgeAccepted('mint',old.leaseId),false);await s.acknowledgeAccepted('mint',token.leaseId);});
   await s.poll();assert.equal(store.consumed,true);
 });
+for(const failure of ['false','error'] as const){
+  test(`renewal ${failure} cancels a slow consumer before acceptance effects`,async()=>{
+    const store=new MemoryStore();
+    const renewals:Array<()=>void>=[];const originalInterval=globalThis.setInterval;
+    (globalThis as any).setInterval=(callback:()=>void)=>{renewals.push(callback);return {unref(){}};};
+    let enter!:()=>void;let resume!:()=>void;
+    const entered=new Promise<void>(resolve=>{enter=resolve;});
+    const waiting=new Promise<void>(resolve=>{resume=resolve;});
+    let firstEffects=0, firstAborted=false, secondEffects=0;
+    const first=scanner(store),second=scanner(store);
+    first.on('sentinelGraduationToken',async(token:SentinelHandoffToken)=>{
+      enter();await waiting;
+      firstAborted=token.leaseSignal.aborted;
+      try {await token.assertLeaseActive();firstEffects++;await first.acknowledgeAccepted(token.mint,token.leaseId);} catch {}
+    });
+    second.on('sentinelGraduationToken',async(token:SentinelHandoffToken)=>{
+      await token.assertLeaseActive();secondEffects++;await second.acknowledgeAccepted(token.mint,token.leaseId);
+    });
+    try {
+      const running=first.poll();await entered;
+      if(failure==='error'){
+        const realRenew=store.renew.bind(store);
+        store.renew=async(mint,lease)=>lease==='1' ? Promise.reject(new Error('DB unavailable')) : realRenew(mint,lease);
+      }
+      store.now=120001;
+      await second.poll();
+      await renewals[0]();
+      for(let i=0;i<4;i++)await Promise.resolve();
+      resume();await running;
+      assert.equal(firstAborted,true);assert.equal(firstEffects,0);assert.equal(secondEffects,1);assert.equal(store.consumed,true);
+    } finally {globalThis.setInterval=originalInterval;resume?.();}
+  });
+}
+test('local lease expiry aborts a stalled consumer even if renewal has not returned',async()=>{
+  const store=new MemoryStore();const originalTimeout=globalThis.setTimeout;
+  let expire!:()=>void;
+  (globalThis as any).setTimeout=(callback:()=>void)=>{expire=callback;return {unref(){}};};
+  let enter!:()=>void;let resume!:()=>void;
+  const entered=new Promise<void>(resolve=>{enter=resolve;});
+  const waiting=new Promise<void>(resolve=>{resume=resolve;});
+  let aborted=false,effects=0;
+  const s=scanner(store);
+  s.on('sentinelGraduationToken',async(token:SentinelHandoffToken)=>{
+    enter();await waiting;aborted=token.leaseSignal.aborted;
+    try {await token.assertLeaseActive();effects++;} catch {}
+  });
+  try {
+    const running=s.poll();await entered;
+    assert.equal(typeof expire,'function');
+    expire();resume();await running;
+    assert.equal(aborted,true);assert.equal(effects,0);
+  } finally {globalThis.setTimeout=originalTimeout;resume?.();}
+});
 test('candidate and legacy graduating labels are not physical graduation',async()=>{
   for(const status of ['CANDIDATE','GRADUATING_HIGH_STRENGTH','PENDING_POOL','POOL_CONFIRMED','ACCEPTED']) {
     const pool={query:async()=>({rows:[{status,laya_score:null,pnl_percent:null,dev_wallet:null,pool_proof:status==='POOL_CONFIRMED'||status==='ACCEPTED'?proof:null}]})};

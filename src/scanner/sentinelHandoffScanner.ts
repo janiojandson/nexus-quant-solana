@@ -12,6 +12,9 @@ export interface CandidateLease {
 export interface SentinelHandoffToken extends CandidateLease {
   isSentinelPreAudited:true;
   poolEvidence:ConfirmedPoolEvidence;
+  /** Consumers must check this before preflight and acceptance effects, and after awaits. */
+  leaseSignal:AbortSignal;
+  assertLeaseActive:()=>Promise<void>;
 }
 export interface SentinelCrossMemoryResult {
   found:boolean; isGraduated:boolean; layaScore:number|null; pnlPercent:number|null; status:string|null; devWallet:string|null;
@@ -111,21 +114,49 @@ export class SentinelHandoffScanner extends EventEmitter {
   }
   private async processLease(lease:CandidateLease):Promise<void> {
     let reason='ENTRY_NOT_ACCEPTED';
-    // The lease survives a process crash; renewal prevents duplicate dispatch during a slow handler.
-    const renewal=setInterval(()=>{void this.store!.renew(lease.mint,lease.leaseId).catch(()=>{});},LEASE_MS/3);
+    const controller=new AbortController();
+    let deadline=Date.now()+LEASE_MS;
+    let expiryTimer:ReturnType<typeof setTimeout>|null=null;
+    const scheduleExpiry=():void=>{
+      if(expiryTimer)clearTimeout(expiryTimer);
+      expiryTimer=setTimeout(()=>controller.abort(),Math.max(0,deadline-Date.now()));
+      expiryTimer.unref?.();
+    };
+    const assertLeaseActive=async():Promise<void>=>{
+      if(controller.signal.aborted||Date.now()>=deadline){controller.abort();throw new Error('LEASE_LOST');}
+      const requestedAt=Date.now();
+      try {
+        if(!await this.store!.renew(lease.mint,lease.leaseId)){
+          controller.abort();throw new Error('LEASE_LOST');
+        }
+        if(controller.signal.aborted)throw new Error('LEASE_LOST');
+        deadline=requestedAt+LEASE_MS;
+        if(Date.now()>=deadline){controller.abort();throw new Error('LEASE_LOST');}
+        scheduleExpiry();
+      } catch(error) {
+        controller.abort();throw error;
+      }
+    };
+    scheduleExpiry();
+    // A failed renewal cancels the cooperative consumer immediately.
+    const renewal=setInterval(()=>{void assertLeaseActive().catch(()=>{});},LEASE_MS/3);
     renewal.unref?.();
     try {
       const result=await this.reader!.read(lease.mint,lease.poolHints);
       if(!result.ok){reason=result.code;return;}
       if(!await this.store!.confirm(lease.mint,lease.leaseId,result.evidence)){reason='LEASE_LOST';return;}
-      const token:SentinelHandoffToken={...lease,isSentinelPreAudited:true,poolEvidence:result.evidence};
+      await assertLeaseActive();
+      const token:SentinelHandoffToken={...lease,isSentinelPreAudited:true,poolEvidence:result.evidence,
+        leaseSignal:controller.signal,assertLeaseActive};
       // Await async consumers. emit() alone cannot acknowledge execution or observe early returns.
       const handlers=this.rawListeners('sentinelGraduationToken');
       if(!handlers.length){reason='NO_ACCEPTING_HANDLER';return;}
-      for(const handler of handlers)await handler.call(this,token);
-    } catch {reason='HANDOFF_PROCESSING_FAILED';}
+      for(const handler of handlers){await assertLeaseActive();await handler.call(this,token);}
+    } catch {reason=controller.signal.aborted?'LEASE_LOST':'HANDOFF_PROCESSING_FAILED';}
     finally {
       clearInterval(renewal);
+      if(expiryTimer)clearTimeout(expiryTimer);
+      controller.abort();
       try {await this.release(lease.mint,lease.leaseId,reason);}
       catch {console.warn('[SentinelHandoff] HANDOFF_RELEASE_FAILED');}
     }

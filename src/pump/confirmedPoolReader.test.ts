@@ -10,6 +10,7 @@ const curve = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 const cpmm = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
 const sol = new PublicKey('So11111111111111111111111111111111111111112');
 const mint = new PublicKey(Buffer.alloc(32, 5));
+const globalConfig = PublicKey.findProgramAddressSync([Buffer.from('global_config')], pump)[0];
 const key = (n: number) => new PublicKey(Buffer.alloc(32, n));
 const put = (b: Buffer, offset: number, value: PublicKey) => value.toBuffer().copy(b, offset);
 function fixture(venue: 'pump' | 'cpmm' = 'pump', reserve = 20_000_000_000n) {
@@ -22,6 +23,8 @@ function fixture(venue: 'pump' | 'cpmm' = 'pump', reserve = 20_000_000_000n) {
   const vaults = venue === 'pump' ? [mint, sol].map(m => getAssociatedTokenAddressSync(m, address, true))
     : [mint, sol].map(m => PublicKey.findProgramAddressSync([Buffer.from('pool_vault'), address.toBuffer(), m.toBuffer()], program)[0]);
   const pool = Buffer.alloc(venue === 'pump' ? 287 : 637);
+  const config = Buffer.alloc(949);
+  Buffer.from([149,8,156,202,160,252,176,217]).copy(config);
   if (venue === 'pump') {
     Buffer.from([241,154,109,4,17,177,109,188]).copy(pool);
     pool[8] = bump; put(pool,11,creator); put(pool,43,mint); put(pool,75,sol);
@@ -43,6 +46,7 @@ function fixture(venue: 'pump' | 'cpmm' = 'pump', reserve = 20_000_000_000n) {
   const account = (owner: PublicKey, data: Buffer, lamports: number) => ({owner:owner.toBase58(),data:[data.toString('base64'),'base64'],executable:false,lamports});
   const refresh = () => {
     accounts.set(address.toBase58(),account(program,pool,1_000_000));
+    if(venue==='pump')accounts.set(globalConfig.toBase58(),account(pump,config,1_000_000));
     vaults.forEach((v,i)=>accounts.set(v.toBase58(),account(TOKEN_PROGRAM_ID,vaultBuffers[i],Number(amounts[i])+2_039_280)));
   };
   refresh();
@@ -55,7 +59,7 @@ function fixture(venue: 'pump' | 'cpmm' = 'pump', reserve = 20_000_000_000n) {
     assert.equal(method,'getMultipleAccounts');
     return {context:{slot},value:params[0].map((a:string)=>accounts.get(a)??null)};
   }};
-  return {pool,vaultBuffers,accounts,address,refresh,calls,hub,setSlot:(s:number)=>{slot=s;}};
+  return {pool,config,vaultBuffers,accounts,address,refresh,calls,hub,setSlot:(s:number)=>{slot=s;}};
 }
 for(const venue of ['pump','cpmm'] as const) {
   test(`${venue}: proves physical reserve at inclusive 20 SOL boundary with fresh coherent slots`, async()=>{
@@ -105,11 +109,35 @@ test('PumpSwap ignores virtual credit and subtracts accrued quote fees',async()=
   const g=fixture();g.pool.writeBigUInt64LE(1n,271);g.refresh();
   assert.equal((await new ConfirmedPoolReader(g.hub as any).read(mint.toBase58())).ok,false);
 });
+test('PumpSwap requires a fresh valid global config with buying and selling enabled',async()=>{
+  const baseline=fixture('pump');
+  assert.equal((await new ConfirmedPoolReader(baseline.hub as any).read(mint.toBase58())).ok,true);
+  assert.ok(baseline.calls.at(-1).params[0].includes(globalConfig.toBase58()));
+  for(const corrupt of ['missing','owner','discriminator','length','buyPaused','sellPaused'] as const){
+    const f=fixture('pump');
+    if(corrupt==='missing')f.accounts.delete(globalConfig.toBase58());
+    if(corrupt==='owner')f.accounts.get(globalConfig.toBase58()).owner=key(99).toBase58();
+    if(corrupt==='discriminator'){f.config[0]^=255;f.refresh();}
+    if(corrupt==='length')f.accounts.get(globalConfig.toBase58()).data=[Buffer.alloc(56).toString('base64'),'base64'];
+    if(corrupt==='buyPaused'){f.config[56]=8;f.refresh();}
+    if(corrupt==='sellPaused'){f.config[56]=16;f.refresh();}
+    assert.equal((await new ConfirmedPoolReader(f.hub as any).read(mint.toBase58())).ok,false,corrupt);
+  }
+});
 test('stale slot or RPC error returns failure',async()=>{
   const f=fixture();f.setSlot(99);assert.equal((await new ConfirmedPoolReader(f.hub as any).read(mint.toBase58())).ok,false);
   const hub={call:async()=>{throw new Error('secret provider error');}};
   assert.deepEqual(await new ConfirmedPoolReader(hub as any).read(mint.toBase58()),{ok:false,code:'RPC_UNAVAILABLE'});
 });
 test('explicit invalid reserve config rejects; absence defaults to 20',()=>{
-  for(const value of ['', '0','-1','NaN','Infinity','nope'])assert.throws(()=>new ConfirmedPoolReader({} as any,{minPoolReserveSol:value}),/MIN_POOL_RESERVE_SOL/);
+  for(const value of ['0','-1','NaN','Infinity','nope',' '])assert.throws(()=>new ConfirmedPoolReader({} as any,{minPoolReserveSol:value}),/MIN_POOL_RESERVE_SOL/);
+  assert.doesNotThrow(()=>new ConfirmedPoolReader({} as any,{minPoolReserveSol:''}));
+  const prior=process.env.MIN_POOL_RESERVE_SOL;
+  try {
+    process.env.MIN_POOL_RESERVE_SOL='';
+    assert.doesNotThrow(()=>new ConfirmedPoolReader({} as any));
+  } finally {
+    if(prior===undefined)delete process.env.MIN_POOL_RESERVE_SOL;
+    else process.env.MIN_POOL_RESERVE_SOL=prior;
+  }
 });
