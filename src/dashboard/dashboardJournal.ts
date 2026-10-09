@@ -156,8 +156,8 @@ export function renderJournalSection(): string {
       </div>
     </div>
 
-    <!-- ── CARD 3: LATÊNCIA VS EV ── -->
-    <div id="card-latency" class="bg-slate-900/80 rounded-2xl p-5 border border-purple-900/30 shadow-xl backdrop-blur-sm">
+    <!-- ── CARD 3: LATÊNCIA VS EV (Oculto - Saneamento) ── -->
+    <div id="card-latency" class="hidden bg-slate-900/80 rounded-2xl p-5 border border-purple-900/30 shadow-xl backdrop-blur-sm">
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-sm font-bold text-slate-200 flex items-center gap-2">
           <span>⏱️ Latência vs EV — Decaimento do Alpha</span>

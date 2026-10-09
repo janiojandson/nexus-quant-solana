@@ -75,6 +75,20 @@ export interface DashboardState {
   };
   /** Handlers Sentinel ativos: warm-up de rota, auditoria e tentativa de entrada. */
   sentinelHandoffQueue?: number;
+  preFlightEngine?: {
+    activeTarget?: string;
+    samplesCollected: number;
+    simulatedSpreadPct?: number;
+    priceVariationPct?: number;
+    verdict?: 'Aprovado' | 'Vetado' | 'Em Análise';
+  };
+  hubHealth?: {
+    org1: { status: 'OK' | 'RATE_LIMITED' | 'ERROR'; requestsLeft: number };
+    org2: { status: 'OK' | 'RATE_LIMITED' | 'ERROR'; requestsLeft: number };
+    org3: { status: 'OK' | 'RATE_LIMITED' | 'ERROR'; requestsLeft: number };
+    org4: { status: 'OK' | 'RATE_LIMITED' | 'ERROR'; requestsLeft: number };
+    helius: { status: 'CRITICAL' | 'STATE' | 'OK'; requestsLeft: number };
+  };
   /** Campos legados mantidos para compatibilidade com /api/status */
   pumpObservatory?: PumpObservatorySnapshot;
   pumpStrategyLab?: {
@@ -215,7 +229,7 @@ function renderClosedTradesSection(state: DashboardState): string {
       : '<span class="text-slate-600 text-[11px]">sem tx</span>';
     const originBadge = t.isSentinelHandoff
       ? `<span class="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono">⚡ Sentinel</span>`
-      : `<span class="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono">🎯 DEX 5m</span>`;
+      : `<span class="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-mono">🎯 Jupiter V2 Discovery</span>`;
 
     return `
       <tr class="border-b border-slate-800/60 hover:bg-slate-800/30">
@@ -249,7 +263,7 @@ function renderClosedTradesSection(state: DashboardState): string {
   const originBreakdown = trades.length > 0 ? `
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
       <div class="bg-slate-950/60 border border-blue-900/30 rounded-xl p-3">
-        <div class="text-[10px] uppercase text-slate-500">DEX 5m — PnL</div>
+        <div class="text-[10px] uppercase text-slate-500">Jupiter V2 Discovery — PnL</div>
         <div class="font-mono text-sm font-bold ${dexPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${dexPnl >= 0 ? '+' : ''}${dexPnl.toFixed(6)} SOL</div>
         <div class="text-[10px] text-slate-500">Acerto: ${dexWins}/${dexTrades.length}</div>
       </div>
@@ -347,7 +361,7 @@ export function renderDashboardHtml(state: DashboardState): string {
           <span class="text-slate-600">|</span>
           <span>Modo: <strong class="${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">${state.dryRun ? 'DRY-RUN (Simulação)' : 'EXECUÇÃO REAL ON-CHAIN'}</strong></span>
           <span class="text-slate-600">|</span>
-          <span>RPC Helius: <span class="font-mono text-slate-300 text-[11px]">${escapeDashboardHtml((state.activeRpcUrl || '').split('/').slice(0, 3).join('/'))}</span></span>
+          <span>Infraestrutura: <span class="font-mono text-slate-300 text-[11px]">Jupiter Multi-Org (4 Orgs) + Helius RPC Hub (6 Chaves)</span></span>
           <span class="text-slate-600">|</span>
           <span>Atualizado: <span id="last-updated" class="font-mono text-slate-300">${new Date(state.lastUpdated || Date.now()).toLocaleTimeString()}</span></span>
         </div>
@@ -378,47 +392,42 @@ export function renderDashboardHtml(state: DashboardState): string {
           </div>
         </div>
 
-        <!-- Admin + Panico -->
-        <button id="admin-login-button" onclick="openAdminModal()" class="bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl border border-cyan-500/30 flex items-center gap-2 transition">
-          <span class="text-base">🔐</span>
-          <span id="admin-login-label">ENTRAR ADMIN</span>
-        </button>
-        <div id="admin-session-controls" class="hidden flex items-center gap-2">
-          <span id="admin-session-name" class="text-xs text-emerald-300 font-mono"></span>
-          <button id="panic-all-button" onclick="panicAll()" class="bg-rose-600 hover:bg-rose-500 text-white font-black text-xs px-4 py-2.5 rounded-xl border border-rose-400/40 shadow-lg shadow-rose-950/30">
-            🚨 PÂNICO GERAL
-          </button>
-          <button onclick="logoutAdmin()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-2.5 rounded-xl border border-slate-700">SAIR</button>
-        </div>
+
       </div>
     </header>
 
-    <!-- ═══════ ESTADO OPERACIONAL REAL (5 badges) ═══════ -->
-    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Execução</div>
-        <div id="op-execution-mode" class="mt-1 font-bold ${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">${state.dryRun ? 'DRY-RUN' : 'REAL ON-CHAIN'}</div>
-        <div class="text-[10px] text-slate-500 mt-1">${escapeDashboardHtml((state.activeRpcUrl || '').split('/').slice(0, 3).join('/'))}</div>
+    <!-- ═══════ TELEMETRIA MULTI-ORG & PRE-FLIGHT ═══════ -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3 col-span-1 lg:col-span-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Hub Health (Quotas)</div>
+        <div class="grid grid-cols-2 gap-2 mt-2">
+          <div class="text-[10px]">Org 1 (Proteção): <span class="font-mono text-emerald-400">${state.hubHealth?.org1?.status || 'OK'}</span></div>
+          <div class="text-[10px]">Org 2 (Entry): <span class="font-mono text-emerald-400">${state.hubHealth?.org2?.status || 'OK'}</span></div>
+          <div class="text-[10px]">Org 3 (Entry): <span class="font-mono text-emerald-400">${state.hubHealth?.org3?.status || 'OK'}</span></div>
+          <div class="text-[10px]">Org 4 (Discovery): <span class="font-mono text-emerald-400">${state.hubHealth?.org4?.status || 'OK'}</span></div>
+        </div>
       </div>
       <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Proteção de Saída</div>
-        <div id="op-exit-health-status" class="mt-1 font-bold ${state.exitPathHealth?.state === 'HEALTHY' ? 'text-emerald-400' : state.exitPathHealth?.state === 'EMERGENCY' ? 'text-rose-400' : 'text-amber-400'}">${state.exitPathHealth?.state || 'HEALTHY'}</div>
-        <div id="op-exit-health-detail" class="text-[10px] text-slate-500 mt-1">${escapeDashboardHtml(state.exitPathHealth?.reason || `Falhas: ${state.exitPathHealth?.maxFailures ?? 0} · novas entradas ${state.exitPathHealth?.canOpenNewPosition === false ? 'PAUSADAS' : 'LIBERADAS'}`)}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Helius RPC</div>
+        <div class="mt-1 font-bold ${state.hubHealth?.helius?.status === 'CRITICAL' ? 'text-rose-400' : 'text-emerald-400'}">${state.hubHealth?.helius?.status || 'OK'}</div>
+        <div class="text-[10px] text-slate-500 mt-1">Pool de 6 chaves</div>
       </div>
-      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Laya Sistema 1 LIVE GATEKEEPER</div>
-        <div id="op-laya-card-status" class="mt-1 font-bold ${state.laya?.health === 'OK' ? 'text-emerald-400' : 'text-amber-400'}">${(state.laya?.tacticalMode || 'LIVE') === 'LIVE' ? (state.laya?.health === 'OK' ? 'LIVE GATEKEEPER' : 'DEGRADED · LIVE GATEKEEPER') : ((state.laya?.health || 'UNKNOWN') + ' · ' + (state.laya?.tacticalMode || 'OFF'))}</div>
-        <div id="op-laya-detail" class="text-[10px] text-slate-500 mt-1">${(state.laya?.loaded || []).join(',') || 'checkpoint nao confirmado'}</div>
-      </div>
-      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Rent Recovery</div>
-        <div id="op-rent-status" class="mt-1 font-bold ${state.rentRecovery?.autoEnabled ? 'text-emerald-400' : 'text-slate-400'}">${state.rentRecovery?.autoEnabled ? 'AUTO ATIVO' : 'AUTO DESLIGADO'}</div>
-        <div id="op-rent-detail" class="text-[10px] text-slate-500 mt-1">${(state.rentRecovery?.totalReclaimedSolActual || 0).toFixed(9)} SOL rent observado</div>
-      </div>
-      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">Admin</div>
-        <div id="op-auth-status" class="mt-1 font-bold ${state.auth?.configured ? 'text-cyan-400' : 'text-rose-400'}">${state.auth?.configured ? (state.auth.needsBootstrap ? 'CADASTRO NECESSÁRIO' : 'LOGIN DISPONÍVEL') : 'AUTH INDISPONÍVEL'}</div>
-        <div id="op-auth-detail" class="text-[10px] text-slate-500 mt-1">Pânico e ações manuais exigem ADMIN</div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3 col-span-1 lg:col-span-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Pre-Flight Engine (Micro-Momentum)</div>
+        <div class="mt-1 grid grid-cols-3 gap-2">
+          <div>
+            <div class="text-[10px] text-slate-400">Alvo Atual</div>
+            <div class="font-mono text-xs text-cyan-400 truncate">${state.preFlightEngine?.activeTarget ? state.preFlightEngine.activeTarget.slice(0, 12) + '...' : 'Aguardando'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-400">Spread / Var</div>
+            <div class="font-mono text-xs text-white">${state.preFlightEngine?.simulatedSpreadPct ? state.preFlightEngine.simulatedSpreadPct.toFixed(2) + '%' : '-'} / ${state.preFlightEngine?.priceVariationPct ? state.preFlightEngine.priceVariationPct.toFixed(2) + '%' : '-'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] text-slate-400">Veredito</div>
+            <div class="font-bold text-xs ${state.preFlightEngine?.verdict === 'Aprovado' ? 'text-emerald-400' : state.preFlightEngine?.verdict === 'Vetado' ? 'text-rose-400' : 'text-amber-400'}">${state.preFlightEngine?.verdict || 'Ocioso'}</div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -441,7 +450,7 @@ export function renderDashboardHtml(state: DashboardState): string {
           <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400">5-60 min</span>
         </div>
         <div id="metric-incubator-mature" class="text-2xl md:text-3xl font-black font-mono text-amber-400 mt-2">${matureCount}</div>
-        <div class="text-[11px] text-slate-500 mt-1">Avaliados via DexScreener 5m</div>
+        <div class="text-[11px] text-slate-500 mt-1">Descoberta Jupiter Tokens V2 (Org 4)</div>
       </div>
 
       <!-- Card 3: Descartes Técnicos -->
@@ -481,14 +490,11 @@ export function renderDashboardHtml(state: DashboardState): string {
         <div>
           <h2 class="text-base md:text-lg font-bold text-white flex items-center gap-2">
             <span>⚡ Posições Ativas sob Gestão</span>
-            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">${state.positions.length} / 2</span>
+            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">${state.positions.length} / 2 (Teto Seguro Org 1)</span>
           </h2>
           <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · SL inicial: -12.5% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
         </div>
-        <button id="sweep-rent-button" disabled onclick="sweepRentManual()" title="Requer sessão ADMIN." class="admin-action text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-900 text-slate-600 border border-slate-800 flex items-center gap-1.5 cursor-not-allowed">
-          <span>🧹</span>
-          <span>Varrer contas SPL vazias</span>
-        </button>
+
       </div>
 
       <div class="overflow-x-auto">
@@ -508,7 +514,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             ${state.positions.length === 0 ? `
               <tr>
                 <td colspan="7" class="py-8 text-center text-slate-500 font-sans">
-                  Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos (DEX 5m) ou Sentinel Handoff (Graduation Dip)...
+                  Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos (Jupiter V2) ou Sentinel Handoff (Graduation Dip)...
                 </td>
               </tr>
             ` : state.positions.map(p => {
@@ -516,7 +522,7 @@ export function renderDashboardHtml(state: DashboardState): string {
               const isProfit = pnlVal >= 0;
               const originBadge = p.isSentinelHandoff
                 ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-sans">⚡ Sentinel</span>`
-                : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-sans">🎯 DEX 5m</span>`;
+                : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-sans">🎯 Jupiter V2</span>`;
               const breakEvenPct = p.stopLossPct ? (Number(p.stopLossPct) * 100).toFixed(1) + '%' : 'N/D';
               return `
               <tr id="pos-row-${p.mint}" class="hover:bg-slate-800/30 transition">
@@ -540,9 +546,7 @@ export function renderDashboardHtml(state: DashboardState): string {
                   </span>
                 </td>
                 <td class="py-4 px-4 md:px-6 text-right font-sans">
-                  <button disabled data-admin-action="true" onclick="panicToken('${p.mint}', '${p.symbol.replace(/'/g, '')}')" title="Requer sessão ADMIN." class="admin-action bg-slate-800 text-slate-600 font-bold text-xs px-3 py-1.5 rounded-lg border border-slate-700 cursor-not-allowed">
-                    LIQUIDAR POSIÇÃO
-                  </button>
+
                 </td>
               </tr>
             `; }).join('')}
