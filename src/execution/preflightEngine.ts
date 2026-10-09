@@ -1,11 +1,12 @@
-import { AddressLookupTableAccount, AddressLookupTableProgram, ComputeBudgetProgram, PublicKey, VersionedTransaction } from '@solana/web3.js';
+import { AddressLookupTableAccount, AddressLookupTableProgram, ComputeBudgetProgram, PublicKey, TransactionInstruction, VersionedTransaction } from '@solana/web3.js';
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import type { JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
 import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
 import { ConfirmedPoolReader, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
 import { PUMP_PROGRAM_ID } from '../pump/pumpBondingCurve.js';
 import { observeEntryMomentum, type EntryMomentumResult } from './entryMomentumGate.js';
-import { assembleV0AccountKeys, hasBoundSwapCpi, isJupiterRouteInstruction, referencesProgram } from './entryRoutePolicy.js';
+import { assembleV0AccountKeys, hasBoundSwapCpi, isJupiterRouteInstruction,
+  referencesProgram, validateEntryAuxiliaries } from './entryRoutePolicy.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const DEADLINE_MS = 10_000;
@@ -169,6 +170,23 @@ export class PreFlightEngine {
       if (request.availableLamports - request.stakeLamports - entryFees.network - entryFees.rent <
           request.reservedGasLamports) return deny('ENTRY_FEE_RENT_CAPITAL');
       if (referencesProgram(final.routePlan, PUMP_PROGRAM_ID.toBase58())) return deny('BONDING_CURVE_ROUTE');
+      await guard();
+      const refresh = await this.reader.read(mint, [pool.poolAddress]);
+      await guard();
+      if (!refresh.ok) return deny(refresh.code);
+      const freshPool = refresh.evidence;
+      const minReserveSol = Number(process.env.MIN_POOL_RESERVE_SOL || 20);
+      const freshAt = Date.parse(freshPool.observedAt);
+      if (freshPool.kind !== 'PHYSICAL_POOL_CONFIRMED' ||
+          freshPool.slot < pool.slot || freshPool.poolAddress !== pool.poolAddress ||
+          freshPool.programId !== pool.programId || freshPool.baseMint !== pool.baseMint ||
+          freshPool.quoteMint !== pool.quoteMint || freshPool.baseVault !== pool.baseVault ||
+          freshPool.quoteVault !== pool.quoteVault || !Number.isFinite(freshAt) ||
+          freshAt > Date.now() + 1000 || Date.now() - freshAt > 15_000 ||
+          !Number.isFinite(minReserveSol) || minReserveSol <= 0 ||
+          !/^[0-9]+$/.test(freshPool.physicalSolLamports) ||
+          BigInt(freshPool.physicalSolLamports) < BigInt(Math.ceil(minReserveSol * 1e9)))
+        return deny('STALE_OR_DRAINED_POOL_PROOF');
       const transaction = VersionedTransaction.deserialize(Buffer.from(final.transaction, 'base64'));
       if (transaction.version !== 0 || transaction.signatures.length !== transaction.message.header.numRequiredSignatures)
         return deny('UNSUPPORTED_TRANSACTION_VERSION');
@@ -180,11 +198,11 @@ export class PreFlightEngine {
       const tables: {writable:string[];readonly:string[]}[] = [];
       for (const lookup of transaction.message.addressTableLookups) {
         const response = await this.rpcHub.call('STATE','getAccountInfo',[lookup.accountKey.toBase58(),{
-          encoding:'base64',commitment:'confirmed',minContextSlot:pool.slot
+          encoding:'base64',commitment:'confirmed',minContextSlot:freshPool.slot
         }],{ bypassCache:true,signal:request.signal });
         await guard();
         const result = response as {context?:{slot?:number};value?:{owner?:string;data?:[string,string]}};
-        if ((result.context?.slot ?? 0) < pool.slot || result.value?.owner !== AddressLookupTableProgram.programId.toBase58() ||
+        if ((result.context?.slot ?? 0) < freshPool.slot || result.value?.owner !== AddressLookupTableProgram.programId.toBase58() ||
             result.value.data?.[1] !== 'base64') return deny('LOOKUP_TABLE_UNAVAILABLE');
         const table = AddressLookupTableAccount.deserialize(Buffer.from(result.value.data[0], 'base64'));
         const loaded = {writable: [] as string[],readonly: [] as string[]};
@@ -204,35 +222,54 @@ export class PreFlightEngine {
       if (!addresses.includes(pool.poolAddress) || !addresses.includes(pool.programId) ||
           addresses.includes(PUMP_PROGRAM_ID.toBase58())) return deny('ROUTE_POOL_MISMATCH');
       const jupiterIndexes: number[] = [];
+      const decodedInstructions: TransactionInstruction[] = [];
       for (const [index,instruction] of transaction.message.compiledInstructions.entries()) {
         const keys = instruction.accountKeyIndexes.map(index => addresses[index]);
         const program = addresses[instruction.programIdIndex];
+        if (!program || keys.some(key=>!key)) return deny('UNSUPPORTED_ROUTE_INSTRUCTION');
+        decodedInstructions.push(new TransactionInstruction({programId:new PublicKey(program),
+          keys:instruction.accountKeyIndexes.map(accountIndex=>({
+            pubkey:new PublicKey(addresses[accountIndex]),
+            isSigner:transaction.message.isAccountSigner(accountIndex),
+            isWritable:transaction.message.isAccountWritable(accountIndex)
+          })),data:Buffer.from(instruction.data)}));
         if (isJupiterRouteInstruction(program,instruction.data,keys,this.walletPublicKey) &&
             keys.includes(pool.poolAddress) && keys.includes(mint) && keys.includes(pool.programId))
           jupiterIndexes.push(index);
-        else if (program !== ComputeBudgetProgram.programId.toBase58())
-          return deny('UNSUPPORTED_ROUTE_INSTRUCTION');
       }
       if (jupiterIndexes.length !== 1) return deny('UNSUPPORTED_ROUTE_INSTRUCTION');
+      const ataCreations = validateEntryAuxiliaries(decodedInstructions,jupiterIndexes[0],
+        this.walletPublicKey,mint,request.stakeLamports,
+        final.prioritizationFeePayer === this.walletPublicKey ? final.prioritizationFeeLamports! : 0);
+      if (ataCreations === null) return deny('UNSUPPORTED_ROUTE_INSTRUCTION');
+      if (ataCreations > 0) {
+        const rentResponse = await this.rpcHub.call('STATE','getMinimumBalanceForRentExemption',
+          [165,{commitment:'confirmed'}],{bypassCache:true,signal:request.signal});
+        await guard();
+        if (!Number.isSafeInteger(rentResponse) || (rentResponse as number) < 0 ||
+            entryFees.rent < (rentResponse as number) * ataCreations)
+          return deny('ENTRY_FEE_RENT_CAPITAL');
+      }
       transaction.signatures = transaction.signatures.map(() => new Uint8Array(64));
       const unsignedBase64 = Buffer.from(transaction.serialize()).toString('base64');
       await guard();
       const simulation = await this.rpcHub.call('CRITICAL','simulateTransaction',[unsignedBase64,{
         sigVerify:false,encoding:'base64',commitment:'confirmed',replaceRecentBlockhash:true,
-        minContextSlot:pool.slot,innerInstructions:true
+        minContextSlot:freshPool.slot,innerInstructions:true
       }],{bypassCache:true,signal:request.signal});
       await guard();
       const simulated = simulation as {context?:{slot?:number};value?:{
         err?:unknown;unitsConsumed?:number;innerInstructions?:unknown}};
       const value = simulated.value;
       if (!value || value.err !== null) return deny('SIMULATION_REJECTED');
-      if (!Number.isSafeInteger(simulated.context?.slot) || simulated.context!.slot! < pool.slot ||
-          !hasBoundSwapCpi(value.innerInstructions,jupiterIndexes[0],pool,mint,
+      if (!Number.isSafeInteger(simulated.context?.slot) || simulated.context!.slot! < freshPool.slot ||
+          !hasBoundSwapCpi(value.innerInstructions,jupiterIndexes[0],freshPool,mint,this.walletPublicKey,
             BigInt(request.stakeLamports),positiveInteger(final.otherAmountThreshold)!))
         return deny('SIMULATION_ROUTE_UNPROVEN');
+      if (Date.now() - freshAt > 15_000) return deny('STALE_OR_DRAINED_POOL_PROOF');
       return { accepted:true, order: { ...final, requestId:final.requestId, transaction:unsignedBase64,
         inAmount:final.inAmount!,outAmount:final.outAmount! }, evidence: {
-        mintSlot:mintSlot as number,pool,momentum,forwardOutAmount:out.toString(),
+        mintSlot:mintSlot as number,pool:freshPool,momentum,forwardOutAmount:out.toString(),
         forwardMinOutAmount:forwardMin.toString(),reverseMinOutLamports:minOut.toString(),
         adverseReverseMinOutLamports:adverseMin.toString(),roundTripLossPct:lossPct,
         takerNetworkFeeLamports:network,entryRentReserveLamports:entryFees.rent,

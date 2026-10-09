@@ -60,3 +60,13 @@ test('accepted admission requires durable SHADOW receipt after the exact allocat
   assert.equal(amount, 25_000_000);
   assert.equal(result.accepted, true);
 });
+
+test('temporary security and preflight exceptions retain their stage-specific denial reasons', async () => {
+  const security = new EntryAdmission({run:async()=>{ throw new Error('SHOULD_NOT_RUN'); }} as any);
+  const input = {candidate,stakeLamports:25_000_000,availableLamports:100_000_000,
+    reservedGasLamports:5_000_000,verifySecurity:async()=>{ throw new Error('NETWORK_FAILURE'); }};
+  assert.deepEqual(await security.attempt(input),{accepted:false,reason:'SECURITY_UNAVAILABLE'});
+  const preflight = new EntryAdmission({run:async()=>{ throw new Error('HUB_TIMEOUT'); }} as any);
+  assert.deepEqual(await preflight.attempt({...input,verifySecurity:async()=>({safe:true})}),
+    {accepted:false,reason:'PREFLIGHT_UNAVAILABLE'});
+});

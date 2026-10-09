@@ -37,6 +37,7 @@ export class EntryAdmission {
 
   async attempt(input: EntryAttempt): Promise<EntryAdmissionResult> {
     const fail = (reason:string):EntryAdmissionResult => ({accepted:false,reason});
+    let stage: 'security'|'preflight'|'persistence' = 'security';
     const guard = async () => {
       if (input.signal?.aborted) throw new Error('LEASE_LOST');
       await input.lease?.assertLeaseActive();
@@ -52,6 +53,7 @@ export class EntryAdmission {
       const security = await input.verifySecurity(input.candidate);
       await guard();
       if (!security.safe) return fail(security.reason || 'SECURITY_VETO');
+      stage = 'preflight';
       const request: PreflightRequest = { mint:input.candidate.mint,stakeLamports:input.stakeLamports,
         availableLamports:input.availableLamports,reservedGasLamports:input.reservedGasLamports,
         poolHints:input.poolHints ?? [input.candidate.pairAddress],
@@ -61,6 +63,7 @@ export class EntryAdmission {
       if (!preflight.accepted) return fail(preflight.reason);
       if (!this.registrar) return fail('PERSISTENCE_UNAVAILABLE');
       await guard();
+      stage = 'persistence';
       const receipt = await this.registrar.register({candidate:input.candidate,
         stakeLamports:input.stakeLamports,accepted:preflight,
         accountingMode:'SHADOW',abortSignal:input.signal,lease:input.lease});
@@ -71,7 +74,8 @@ export class EntryAdmission {
       return {accepted:true,receipt,preflight};
     } catch(error) {
       return fail(input.signal?.aborted || (error instanceof Error && error.message === 'LEASE_LOST')
-        ? 'LEASE_LOST' : 'PERSISTENCE_UNAVAILABLE');
+        ? 'LEASE_LOST' : stage === 'security' ? 'SECURITY_UNAVAILABLE' :
+          stage === 'preflight' ? 'PREFLIGHT_UNAVAILABLE' : 'PERSISTENCE_UNAVAILABLE');
     }
   }
 }

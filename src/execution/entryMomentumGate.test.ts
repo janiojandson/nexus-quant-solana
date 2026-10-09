@@ -101,7 +101,7 @@ test('late or nonpositive quote rejects instead of inventing a momentum pass', a
   let t = 0;
   const clock = { now: () => t, wallNow: () => 1000 + t, sleep: async (ms: number) => { t += ms; } };
   const late = await observeEntryMomentum(async () => {
-    t += 250;
+    t += 401;
     return { inputAmountAtomic: '1000000000', outputAmountAtomic: '1000000', tokenDecimals: 6, observedAtMs: t };
   }, { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 500 }, clock);
   assert.equal(late.pass, false);
@@ -112,4 +112,36 @@ test('late or nonpositive quote rejects instead of inventing a momentum pass', a
   }), { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 500 }, clock);
   assert.equal(zero.pass, false);
   assert.match(zero.reason, /INVALID_QUOTE/);
+});
+
+test('400 ms quote RTT passes at absolute 500 ms starts; 401 ms and late start reject', async () => {
+  const outputs = [1000000,996016,992063,988142];
+  const run = async (rtt: number, sleepOverrun = 0) => {
+    let t = 0; const starts: number[] = []; const deadlines: number[] = [];
+    const result = await observeEntryMomentum(async deadline => {
+      starts.push(t); deadlines.push(deadline); t += rtt;
+      return {inputAmountAtomic:'1000000000',outputAmountAtomic:String(outputs[starts.length-1]),
+        tokenDecimals:6,observedAtMs:t};
+    }, DEFAULT_ENTRY_MOMENTUM_CONFIG, {
+      now:()=>t,wallNow:()=>10_000+t,sleep:async ms=>{t+=ms+(sleepOverrun && starts.length===1 ? sleepOverrun : 0);}
+    });
+    return {result,starts,deadlines,t};
+  };
+  const allowed = await run(400);
+  assert.equal(allowed.result.pass,true);
+  assert.deepEqual(allowed.starts,[0,500,1000,1500]);
+  assert.deepEqual(allowed.deadlines,[10400,10900,11400,11900]);
+  assert.equal(allowed.t,1900);
+  const slow = await run(401);
+  assert.equal(slow.result.reason,'LATE_SAMPLE');
+  const queued = await run(20,101);
+  assert.equal(queued.result.reason,'LATE_SAMPLE');
+});
+
+test('invalid or unbounded momentum timing overrides fail closed', async () => {
+  const result = await observeEntryMomentum(async () => {
+    throw new Error('SHOULD_NOT_QUOTE');
+  }, {...DEFAULT_ENTRY_MOMENTUM_CONFIG,maxQuoteLatencyMs:5000} as any);
+  assert.equal(result.pass,false);
+  assert.equal(result.reason,'INVALID_TIMING_CONFIG');
 });

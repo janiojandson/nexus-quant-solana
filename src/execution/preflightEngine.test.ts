@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
+import { ComputeBudgetProgram, PublicKey, SystemProgram, TransactionInstruction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction,
+  createCloseAccountInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { PreFlightEngine } from './preflightEngine.js';
 import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM } from '../pump/confirmedPoolReader.js';
 import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM } from './entryRoutePolicy.js';
@@ -19,7 +20,8 @@ const evidence = { kind: 'PHYSICAL_POOL_CONFIRMED' as const, venue: 'PumpSwap' a
   baseVault: key(8).toBase58(), quoteVault: key(9).toBase58(),
   physicalSolLamports: '20000000000', tokenReserveAtomic: '1000000000', poolCreatedAt: null };
 function unsignedOrder(options: {payer?: PublicKey; unusedPool?: boolean; wrongDiscriminator?: boolean;
-  wrongAmount?: boolean; unrelatedInstruction?: boolean} = {}) {
+  wrongAmount?: boolean; unrelatedInstruction?: boolean; withSetup?: boolean;
+  setupMalice?: 'owner'|'destination'|'amount'|'cleanup'; expensiveCompute?: boolean} = {}) {
   const route = createHash('sha256').update('global:route').digest().subarray(0,8);
   const data = Buffer.concat([route,Buffer.alloc(24)]);
   const instruction = new TransactionInstruction({ programId: new PublicKey(JUPITER_SWAP_PROGRAM),
@@ -27,6 +29,21 @@ function unsignedOrder(options: {payer?: PublicKey; unusedPool?: boolean; wrongD
       { pubkey: new PublicKey(pool), isSigner: false, isWritable: true },
       { pubkey: new PublicKey(mint), isSigner: false, isWritable: false },
       { pubkey: PUMP_SWAP_PROGRAM, isSigner: false, isWritable: false }], data });
+  const wallet = options.payer ?? new PublicKey(taker);
+  const wsol = new PublicKey('So11111111111111111111111111111111111111112');
+  const wsolAta = getAssociatedTokenAddressSync(wsol,wallet,true);
+  const targetAta = getAssociatedTokenAddressSync(new PublicKey(mint),wallet,true);
+  const setup = options.withSetup ? [
+    createAssociatedTokenAccountIdempotentInstruction(wallet,wsolAta,
+      options.setupMalice === 'owner' ? key(24) : wallet,wsol),
+    createAssociatedTokenAccountIdempotentInstruction(wallet,targetAta,wallet,new PublicKey(mint)),
+    SystemProgram.transfer({fromPubkey:wallet,
+      toPubkey:options.setupMalice === 'destination' ? key(25) : wsolAta,
+      lamports:options.setupMalice === 'amount' ? 25_000_001 : 25_000_000}),
+    createSyncNativeInstruction(wsolAta)
+  ] : [];
+  const cleanup = options.withSetup ? [createCloseAccountInstruction(wsolAta,
+    options.setupMalice === 'cleanup' ? key(26) : wallet,wallet)] : [];
   const instructions = options.unusedPool ? [
     new TransactionInstruction({ programId: key(12), keys: [{pubkey:new PublicKey(pool),isSigner:false,isWritable:false}], data:Buffer.alloc(0) }),
     new TransactionInstruction({ programId: new PublicKey(JUPITER_SWAP_PROGRAM),
@@ -34,7 +51,10 @@ function unsignedOrder(options: {payer?: PublicKey; unusedPool?: boolean; wrongD
         {pubkey:new PublicKey(mint),isSigner:false,isWritable:false},
         {pubkey:PUMP_SWAP_PROGRAM,isSigner:false,isWritable:false}], data })
   ] : options.unrelatedInstruction ? [instruction,
-    new TransactionInstruction({ programId: key(12), keys:[], data:Buffer.alloc(8, 1) })] : [instruction];
+    new TransactionInstruction({ programId: key(12), keys:[], data:Buffer.alloc(8, 1) })] :
+    [...(options.expensiveCompute ? [ComputeBudgetProgram.setComputeUnitLimit({units:1_400_000}),
+      ComputeBudgetProgram.setComputeUnitPrice({microLamports:1_000_000})] : []),
+      ...setup,instruction,...cleanup];
   const message = new TransactionMessage({ payerKey: options.payer ?? new PublicKey(taker),
     recentBlockhash: key(10).toBase58(), instructions }).compileToV0Message();
   return Buffer.from(new VersionedTransaction(message).serialize()).toString('base64');
@@ -44,7 +64,10 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
   reverseNetworkFee?: number; finalNetworkFee?: number; missingFees?: boolean;
   wrongTaker?: boolean; unusedPool?: boolean; wrongDiscriminator?: boolean;
   wrongAmount?: boolean; unrelatedInstruction?: boolean; missingTrace?: boolean;
-  staleSimulation?: boolean; lease?: () => Promise<void> } = {}) {
+  staleSimulation?: boolean; refreshedPoolDrained?: boolean; refreshedPoolStale?: boolean;
+  refreshedPoolChanged?: boolean; withSetup?: boolean;
+  setupMalice?: 'owner'|'destination'|'amount'|'cleanup'; cpiWrongUserAta?: boolean;
+  expensiveCompute?: boolean; finalRentFee?: number; lease?: () => Promise<void> } = {}) {
   const calls: string[] = [];
   const mintData = Buffer.alloc(82);
   mintData[44] = 6;
@@ -72,10 +95,12 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
         outputMint: payload.outputMint, inAmount: payload.amount, outAmount: '988142' } }],
       transaction: unsignedOrder({ payer: overrides.wrongTaker ? key(13) : undefined,
         unusedPool: overrides.unusedPool, wrongDiscriminator: overrides.wrongDiscriminator,
-        wrongAmount: overrides.wrongAmount, unrelatedInstruction: overrides.unrelatedInstruction }), feeBps: 0,
+        wrongAmount: overrides.wrongAmount, unrelatedInstruction: overrides.unrelatedInstruction,
+        withSetup:overrides.withSetup,setupMalice:overrides.setupMalice,
+        expensiveCompute:overrides.expensiveCompute }), feeBps: 0,
       ...(!overrides.missingFees ? { signatureFeeLamports: overrides.finalNetworkFee ?? 5000,
         signatureFeePayer: taker, prioritizationFeeLamports: 0, prioritizationFeePayer: taker,
-        rentFeeLamports: 2039280, rentFeePayer: taker } : {})
+        rentFeeLamports: overrides.finalRentFee ?? (overrides.withSetup ? 4_078_560 : 2039280), rentFeePayer: taker } : {})
     } };
     const outAmount = prices[forward++] ?? '988142';
     return { status: 200, headers: noHeaders, body: {
@@ -91,26 +116,39 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
     if (method === 'getAccountInfo') return { context: { slot: 123 }, value: {
       owner: overrides.mintOwner ?? TOKEN_PROGRAM_ID.toBase58(), data: [mintData.toString('base64'), 'base64'], executable: false
     } };
+    if (method === 'getMinimumBalanceForRentExemption') return 2_039_280;
     if (method === 'simulateTransaction') {
       assert.equal(_params[1].innerInstructions,true);
-      assert.equal(_params[1].minContextSlot,123);
+      assert.equal(_params[1].minContextSlot,124);
       const cpiData = Buffer.alloc(25);
       Buffer.from(overrides.wrongDiscriminator ? [0,0,0,0,0,0,0,0] :
         [198,46,21,82,180,217,232,112]).copy(cpiData);
       cpiData.writeBigUInt64LE(overrides.wrongAmount ? 24_000_000n : 25_000_000n,8);
       cpiData.writeBigUInt64LE(988_142n,16);
-      return { context: {slot: overrides.staleSimulation ? 122 : 123}, value: {
+      return { context: {slot: overrides.staleSimulation ? 122 : 124}, value: {
         err: overrides.simulationError ?? null, unitsConsumed: 1000,
-        innerInstructions: overrides.missingTrace ? null : [{ index:0,instructions:[{
+        innerInstructions: overrides.missingTrace ? null : [{ index:overrides.withSetup ? 4 : 0,instructions:[{
           programId:PUMP_SWAP_PROGRAM.toBase58(), stackHeight:2,
           accounts:[pool,taker,key(14).toBase58(),mint,
-            'So11111111111111111111111111111111111111112',key(15).toBase58(),
-            key(16).toBase58(),evidence.baseVault,evidence.quoteVault], data:bs58.encode(cpiData)
+            'So11111111111111111111111111111111111111112',
+            overrides.cpiWrongUserAta ? key(15).toBase58() :
+              getAssociatedTokenAddressSync(new PublicKey(mint),new PublicKey(taker),true).toBase58(),
+            getAssociatedTokenAddressSync(new PublicKey('So11111111111111111111111111111111111111112'),
+              new PublicKey(taker),true).toBase58(),evidence.baseVault,evidence.quoteVault], data:bs58.encode(cpiData)
         }]}] } };
     }
     throw new Error('UNPLANNED_RPC_METHOD');
   }};
-  const poolReader = { read: async () => ({ ok: true as const, evidence }) };
+  let poolReads = 0;
+  const poolReader = { read: async () => {
+    poolReads++;
+    return { ok: true as const, evidence: { ...evidence,
+      observedAt: new Date(Date.now() - (poolReads > 1 && overrides.refreshedPoolStale ? 16_000 : 0)).toISOString(),
+      physicalSolLamports: poolReads > 1 && overrides.refreshedPoolDrained ? '19000000000' : evidence.physicalSolLamports,
+      poolAddress: poolReads > 1 && overrides.refreshedPoolChanged ? key(23).toBase58() : evidence.poolAddress,
+      slot: poolReads > 1 ? 124 : 123
+    } };
+  } };
   return { preflight: new PreFlightEngine(jupiter as any, rpc as any, taker, poolReader as any), calls };
 }
 
@@ -226,17 +264,66 @@ test('official Raydium CPMM swap_base_input CPI binds pool, vaults, mints, amoun
   data.writeBigUInt64LE(25_000_000n,8);
   data.writeBigUInt64LE(988_142n,16);
   const accounts = [taker,key(17).toBase58(),key(18).toBase58(),pool,
-    key(19).toBase58(),key(20).toBase58(),evidence.quoteVault,evidence.baseVault,
+    getAssociatedTokenAddressSync(new PublicKey('So11111111111111111111111111111111111111112'),
+      new PublicKey(taker),true).toBase58(),
+    getAssociatedTokenAddressSync(new PublicKey(mint),new PublicKey(taker),true).toBase58(),
+    evidence.quoteVault,evidence.baseVault,
     TOKEN_PROGRAM_ID.toBase58(),TOKEN_PROGRAM_ID.toBase58(),
     'So11111111111111111111111111111111111111112',mint,key(21).toBase58()];
   const trace = (payload: Buffer, keys = accounts) => [{index:2,instructions:[{
     programId:RAYDIUM_CPMM_PROGRAM.toBase58(),stackHeight:2,accounts:keys,data:bs58.encode(payload)
   }]}];
-  assert.equal(hasBoundSwapCpi(trace(data),2,rayPool,mint,25_000_000n,988_142n),true);
+  assert.equal(hasBoundSwapCpi(trace(data),2,rayPool,mint,taker,25_000_000n,988_142n),true);
   const wrongAmount = Buffer.from(data); wrongAmount.writeBigUInt64LE(24_000_000n,8);
-  assert.equal(hasBoundSwapCpi(trace(wrongAmount),2,rayPool,mint,25_000_000n,988_142n),false);
-  assert.equal(hasBoundSwapCpi(trace(data),2,rayPool,mint,25_000_000n,988_143n),false);
+  assert.equal(hasBoundSwapCpi(trace(wrongAmount),2,rayPool,mint,taker,25_000_000n,988_142n),false);
+  assert.equal(hasBoundSwapCpi(trace(data),2,rayPool,mint,taker,25_000_000n,988_143n),false);
   assert.equal(hasBoundSwapCpi(trace(data,[...accounts.slice(0,6),key(22).toBase58(),...accounts.slice(7)]),
-    2,rayPool,mint,25_000_000n,988_142n),false);
-  assert.equal(hasBoundSwapCpi(trace(data),1,rayPool,mint,25_000_000n,988_142n),false);
+    2,rayPool,mint,taker,25_000_000n,988_142n),false);
+  assert.equal(hasBoundSwapCpi(trace(data),1,rayPool,mint,taker,25_000_000n,988_142n),false);
+});
+
+test('fresh physical reserve proof is required after quotes before final simulation', async () => {
+  for (const options of [{refreshedPoolDrained:true},{refreshedPoolStale:true},
+    {refreshedPoolChanged:true}]) {
+    const f = fixture(options);
+    const result = await f.preflight.run({mint,stakeLamports:25_000_000,
+      availableLamports:100_000_000,reservedGasLamports:5_000_000});
+    assert.equal(result.accepted,false,JSON.stringify(options));
+    assert.ok(f.calls.every(call=>call!=='CRITICAL:simulateTransaction'));
+  }
+});
+
+test('first buy accepts only canonical funded WSOL and target ATA setup with self-refund cleanup', async () => {
+  assert.equal(VersionedTransaction.deserialize(Buffer.from(unsignedOrder({withSetup:true}),'base64')).version,0);
+  const good = fixture({withSetup:true});
+  const accepted = await good.preflight.run({mint,stakeLamports:25_000_000,
+    availableLamports:100_000_000,reservedGasLamports:5_000_000});
+  assert.equal(accepted.accepted,true,JSON.stringify(accepted));
+  for (const setupMalice of ['owner','destination','amount','cleanup'] as const) {
+    const malicious = fixture({withSetup:true,setupMalice});
+    const denied = await malicious.preflight.run({mint,stakeLamports:25_000_000,
+      availableLamports:100_000_000,reservedGasLamports:5_000_000});
+    assert.equal(denied.accepted,false,setupMalice);
+    assert.equal(denied.reason,'UNSUPPORTED_ROUTE_INSTRUCTION');
+    assert.ok(malicious.calls.every(call=>call!=='CRITICAL:simulateTransaction'));
+  }
+});
+
+test('simulation CPI cannot deliver bought tokens to a foreign user account', async () => {
+  const f = fixture({withSetup:true,cpiWrongUserAta:true});
+  const denied = await f.preflight.run({mint,stakeLamports:25_000_000,
+    availableLamports:100_000_000,reservedGasLamports:5_000_000});
+  assert.equal(denied.accepted,false);
+  assert.equal(denied.reason,'SIMULATION_ROUTE_UNPROVEN');
+});
+
+test('auxiliary ATA rent and compute priority cannot exceed declared capital estimate', async () => {
+  for (const options of [{withSetup:true,finalRentFee:2_039_280},
+    {expensiveCompute:true}]) {
+    const f = fixture(options);
+    const denied = await f.preflight.run({mint,stakeLamports:25_000_000,
+      availableLamports:100_000_000,reservedGasLamports:5_000_000});
+    assert.equal(denied.accepted,false,JSON.stringify(options));
+    assert.ok(f.calls.every(call=>call!=='CRITICAL:simulateTransaction'));
+  }
 });

@@ -4,6 +4,10 @@ export interface EntryMomentumGateConfig {
   minRisePct: number;
   maxRisePct: number;
   maxPullbackPct: number;
+  /** Maximum delay starting a nominal sample, including queue/scheduler delay. */
+  maxStartLatenessMs?: number;
+  /** Maximum response RTT; defaults to 400 ms, below the 500 ms cadence. */
+  maxQuoteLatencyMs?: number;
 }
 
 export interface EntryMomentumSample {
@@ -43,7 +47,9 @@ export const DEFAULT_ENTRY_MOMENTUM_CONFIG: EntryMomentumGateConfig = {
   intervalMs: 500,
   minRisePct: 0.40,
   maxRisePct: 4.00,
-  maxPullbackPct: 0.30
+  maxPullbackPct: 0.30,
+  maxStartLatenessMs: 100,
+  maxQuoteLatencyMs: 400
 };
 
 function sleep(ms: number): Promise<void> {
@@ -125,22 +131,30 @@ export async function observeEntryMomentum(
 ): Promise<EntryMomentumResult> {
   const samples: EntryMomentumSample[] = [];
   const begin = clock.now();
-  const toleranceMs = Math.max(100, config.intervalMs * 0.2);
+  const startLatenessMs = config.maxStartLatenessMs ?? 100;
+  const quoteLatencyMs = config.maxQuoteLatencyMs ?? 400;
   const invalid = (reason: string): EntryMomentumResult => ({
     pass: false, risePct: 0, maxPullbackPct: 0, risingSteps: 0,
     staleSource: reason === 'STALE_SOURCE', reason, samples
   });
+  if (!Number.isSafeInteger(config.samples) || config.samples < 2 ||
+      !Number.isFinite(config.intervalMs) || config.intervalMs <= 0 ||
+      !Number.isFinite(startLatenessMs) || startLatenessMs < 0 ||
+      !Number.isFinite(quoteLatencyMs) || quoteLatencyMs <= 0 ||
+      startLatenessMs + quoteLatencyMs > config.intervalMs)
+    return invalid('INVALID_TIMING_CONFIG');
   for (let i = 0; i < config.samples; i++) {
     if (signal?.aborted) return invalid('ABORTED');
     const target = begin + i * config.intervalMs;
     if (clock.now() < target) await clock.sleep(target - clock.now());
     const started = clock.now();
     if (signal?.aborted) return invalid('ABORTED');
-    if (started > target + toleranceMs) return invalid('LATE_SAMPLE');
-    const quote = await getQuote(clock.wallNow() + Math.max(1, target + toleranceMs - started), signal);
+    if (started > target + startLatenessMs) return invalid('LATE_SAMPLE');
+    const quote = await getQuote(clock.wallNow() + quoteLatencyMs, signal);
     const ended = clock.now();
     if (signal?.aborted) return invalid('ABORTED');
-    if (ended > target + toleranceMs) return invalid('LATE_SAMPLE');
+    if (ended - started > quoteLatencyMs || ended > target + startLatenessMs + quoteLatencyMs)
+      return invalid('LATE_SAMPLE');
     if (!quote || !/^\d+$/.test(quote.inputAmountAtomic) || !/^\d+$/.test(quote.outputAmountAtomic) ||
         !Number.isInteger(quote.tokenDecimals) || quote.tokenDecimals < 0 || quote.tokenDecimals > 18)
       return invalid('INVALID_QUOTE');
@@ -148,7 +162,7 @@ export async function observeEntryMomentum(
     const output = BigInt(quote.outputAmountAtomic);
     if (input <= 0n || output <= 0n || input > BigInt(Number.MAX_SAFE_INTEGER) || output > BigInt(Number.MAX_SAFE_INTEGER))
       return invalid('INVALID_QUOTE');
-    if (!Number.isFinite(quote.observedAtMs) || quote.observedAtMs < started - toleranceMs || quote.observedAtMs > ended)
+    if (!Number.isFinite(quote.observedAtMs) || quote.observedAtMs < started || quote.observedAtMs > ended)
       return invalid('STALE_SOURCE');
     const priceSolPerToken = Number(input) / 1e9 / (Number(output) / 10 ** quote.tokenDecimals);
     if (!Number.isFinite(priceSolPerToken) || priceSolPerToken <= 0) return invalid('INVALID_QUOTE');
