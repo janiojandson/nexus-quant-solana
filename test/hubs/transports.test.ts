@@ -1,0 +1,34 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { PublicKey } from '@solana/web3.js';
+test('official transports encode queries, omit orgId, forward cancellation and return sanitized quota errors', async () => {
+  const {createJupiterTransport, createHeliusTransport} = await import('../../src/hubs/transports.js');
+  const calls: any[]=[];
+  const transportFetch: typeof fetch = async (url, options) => { calls.push({url:String(url),options}); return new Response('Max usage reached secret api-key=secret', {status:429}); };
+  const signal=new AbortController().signal;
+  const jup=createJupiterTransport(transportFetch);
+  await jup({orgId:'private-org',apiKey:'jup-secret',role:'ENTRY'},'/swap/v2/order',{inputMint:'a & b',amount:'12'},signal);
+  assert.equal(calls[0].url,'https://api.jup.ag/swap/v2/order?inputMint=a+%26+b&amount=12');
+  assert.deepEqual(calls[0].options.headers,{'x-api-key':'jup-secret'}); assert.equal(calls[0].options.signal,signal);
+  await jup({orgId:'private-org',apiKey:'jup-secret',role:'ENTRY'},'/swap/v2/execute',{requestId:'id',signedTransaction:'tx'},signal);
+  assert.equal(calls[1].options.method,'POST'); assert.deepEqual(JSON.parse(calls[1].options.body),{requestId:'id',signedTransaction:'tx'});
+  assert.equal(calls[1].options.redirect,'error');
+  await assert.rejects(jup({orgId:'private-org',apiKey:'secret',role:'ENTRY'},'/swap/v2/execute',{orgId:'private-org'},signal),/payload/);
+  assert.doesNotMatch(JSON.stringify(calls),/private-org/);
+  const helius=createHeliusTransport(transportFetch); const key={id:'k',apiKey:'a & b',role:'STATE' as const,quotaGroupId:'g',rps:3};
+  const response=await helius(key,'getBalance',['wallet'],signal); await helius(key,'getBalance',['wallet'],signal);
+  assert.equal(calls[2].url,'https://mainnet.helius-rpc.com/?api-key=a+%26+b'); assert.equal(calls[2].options.signal,signal);
+  assert.notEqual(JSON.parse(calls[2].options.body).id,JSON.parse(calls[3].options.body).id);
+  assert.match(String(response.body),/max usage reached/i); assert.doesNotMatch(String(response.body),/secret|api-key/);
+});
+test('web3 adapter restores envelope, routes reads and critical methods, blocks sends and WS without fallback',async()=>{
+  const {createHubConnection}=await import('../../src/hubs/hubConnection.js');
+  const calls:any[]=[];
+  const hub={call:async(work:string,method:string,params:unknown[])=>{calls.push({work,method,params});return {context:{slot:1},value:123};}};
+  const connection=createHubConnection(hub,{canBroadcast:()=>false});
+  assert.equal(await connection.getBalance(new PublicKey('11111111111111111111111111111111')),123);
+  assert.equal(calls[0].work,'STATE');
+  await assert.rejects(connection.sendRawTransaction(Buffer.from([1,2])),/broadcast/);
+  assert.throws(()=>connection.onLogs('all',()=>{}),/subscriptions/);
+  assert.equal(calls.length,1);
+});

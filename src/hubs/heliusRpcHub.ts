@@ -5,12 +5,12 @@ export interface HeliusQuotaGroup { id: string; rps: number }
 export interface RpcResponse { status: number; headers: { get(name: string): string | null }; body: unknown }
 export type RpcTransport = (key: HeliusKey, method: string, params: unknown[], signal: AbortSignal) => Promise<RpcResponse>;
 export interface RpcRuntime { now(): number; sleep(ms: number): Promise<void>; random(): number }
-export interface RpcCallOptions { deadlineMs?: number; signal?: AbortSignal; bypassCache?: boolean }
-export interface RpcHubOptions { cacheTtlMs?: number }
+export interface RpcCallOptions { deadlineMs?: number; signal?: AbortSignal | undefined; bypassCache?: boolean }
+export interface RpcHubOptions { cacheTtlMs?: number; allowedRoles?: readonly RpcWork[] }
 
 type KeyState = { credential: HeliusKey; times: number[]; cooldownUntil: number; disabled: boolean; inflight: boolean };
 type GroupState = { id: string; rps: number; times: number[]; sends: number[]; disabled: boolean };
-type Job = { work: RpcWork; method: string; params: unknown[]; deadline: number; signal?: AbortSignal;
+type Job = { work: RpcWork; method: string; params: unknown[]; deadline: number; signal?: AbortSignal | undefined;
   resolve(value: unknown): void; reject(error: Fault): void; cleanup(): void; settled: boolean };
 type FaultKind = 'rate' | 'transient' | 'invalid' | 'auth' | 'monthly' | 'deadline' | 'abort';
 type Fault = Error & { kind: FaultKind };
@@ -21,8 +21,8 @@ const fault = (kind: FaultKind, message: string): Fault => {
   return error;
 };
 const isFault = (value: unknown): value is Fault => typeof value === 'object' && value !== null && internalFaults.has(value);
-const common = new Set(['getAccountInfo', 'getMultipleAccounts', 'getBlockTime', 'getTokenSupply', 'getTokenLargestAccounts']);
-const criticalOnly = new Set(['getLatestBlockhash', 'simulateTransaction', 'getSignatureStatuses', 'getTransaction', 'sendTransaction']);
+const common = new Set(['getAccountInfo', 'getMultipleAccounts', 'getBlockTime', 'getTokenSupply', 'getTokenLargestAccounts', 'getBalance', 'getTokenAccountsByOwner', 'getRecentPrioritizationFees', 'getMinimumBalanceForRentExemption']);
+export const criticalRpcMethods = new Set(['getLatestBlockhash', 'simulateTransaction', 'getSignatureStatuses', 'getTransaction', 'getSignaturesForAddress', 'getBlockHeight', 'sendTransaction']);
 const cacheable = new Set(['getAccountInfo', 'getMultipleAccounts', 'getTokenSupply']);
 function knownCacheResult(method: string, result: unknown): boolean {
   if (result === null || result === undefined) return false;
@@ -34,7 +34,7 @@ function knownCacheResult(method: string, result: unknown): boolean {
 }
 const validName = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.trim() === value;
 const validRate = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0;
-const prune = (times: number[], now: number) => { while (times.length && times[0] <= now - 1000) times.shift(); };
+const prune = (times: number[], now: number) => { while (times.length && times[0]! <= now - 1000) times.shift(); };
 function clone<T>(value: T): T {
   try { return JSON.parse(JSON.stringify(value)) as T; }
   catch { throw fault('transient', 'non-JSON provider result'); }
@@ -80,6 +80,7 @@ export class HeliusRpcHub {
   private readonly runtime: RpcRuntime;
   private scheduled = false;
   private wakeAt = Infinity;
+  private readonly allowedRoles: readonly RpcWork[];
 
   constructor(keys: HeliusKey[], groups: HeliusQuotaGroup[], transport: RpcTransport,
     runtime: RpcRuntime, options: RpcHubOptions = {}) {
@@ -89,11 +90,13 @@ export class HeliusRpcHub {
     this.cacheTtlMs = options.cacheTtlMs ?? 3000;
     this.transport = transport;
     this.runtime = runtime;
+    this.allowedRoles = options.allowedRoles ?? ['CRITICAL', 'STATE'];
+    if (!this.allowedRoles.length || this.allowedRoles.some(role => role !== 'CRITICAL' && role !== 'STATE')) throw fault('invalid', 'invalid allowed roles');
     if (!Number.isFinite(this.cacheTtlMs) || this.cacheTtlMs < 2000 || this.cacheTtlMs > 5000)
       throw fault('invalid', 'cache TTL must be 2000–5000 ms');
     const groupIds = new Set<string>();
     this.groups = new Map(groups.map(group => {
-      if (!group || !validName(group.id) || !validRate(group.rps) || groupIds.has(group.id))
+      if (!group || !validName(group.id) || !validRate(group.rps) || group.rps > 10 || groupIds.has(group.id))
         throw fault('invalid', 'invalid or duplicate quota group');
       groupIds.add(group.id);
       return [group.id, { id: group.id, rps: group.rps, times: [], sends: [], disabled: false }];
@@ -102,19 +105,19 @@ export class HeliusRpcHub {
     const roles = { CRITICAL: 0, STATE: 0 };
     this.keys = keys.map(key => {
       if (!key || !validName(key.id) || !validName(key.apiKey) || !validName(key.quotaGroupId) ||
-        !this.groups.has(key.quotaGroupId) || (key.role !== 'CRITICAL' && key.role !== 'STATE') || !validRate(key.rps) ||
+        !this.groups.has(key.quotaGroupId) || !this.allowedRoles.includes(key.role) || !validRate(key.rps) || key.rps > 10 ||
         ids.has(key.id) || apiKeys.has(key.apiKey)) throw fault('invalid', 'invalid or duplicate credential');
       ids.add(key.id); apiKeys.add(key.apiKey); roles[key.role]++;
       return { credential: { ...key }, times: [], cooldownUntil: 0, disabled: false, inflight: false };
     });
-    if (!roles.CRITICAL || !roles.STATE) throw fault('invalid', 'at least one key per role is required');
+    if (this.allowedRoles.some(role => !roles[role])) throw fault('invalid', 'at least one key per allowed role is required');
   }
 
   /** deadlineMs is an absolute runtime.now() timestamp; omitted means now + 10 seconds. */
   call(work: RpcWork, method: string, params: unknown[], options: RpcCallOptions = {}): Promise<unknown> {
     try {
-      if ((work !== 'CRITICAL' && work !== 'STATE') ||
-        !(common.has(method) || (work === 'CRITICAL' && criticalOnly.has(method))))
+      if (!this.allowedRoles.includes(work) ||
+        !(common.has(method) || (work === 'CRITICAL' && criticalRpcMethods.has(method))))
         throw fault('invalid', 'method is not allowed for role');
       if (!Array.isArray(params)) throw fault('invalid', 'params must be an array');
       const normalizedParams = JSON.parse(canonical(params)) as unknown[];
@@ -216,9 +219,9 @@ export class HeliusRpcHub {
     if (key.disabled || group.disabled || key.inflight) return Infinity;
     prune(key.times, now); prune(group.times, now); prune(group.sends, now);
     let at = Math.max(now, key.cooldownUntil);
-    if (key.times.length >= key.credential.rps) at = Math.max(at, key.times[0] + 1000);
-    if (group.times.length >= group.rps) at = Math.max(at, group.times[0] + 1000);
-    if (method === 'sendTransaction' && group.sends.length >= 1) at = Math.max(at, group.sends[0] + 1000);
+    if (key.times.length >= key.credential.rps) at = Math.max(at, key.times[0]! + 1000);
+    if (group.times.length >= group.rps) at = Math.max(at, group.times[0]! + 1000);
+    if (method === 'sendTransaction' && group.sends.length >= 1) at = Math.max(at, group.sends[0]! + 1000);
     return at;
   }
 
@@ -228,7 +231,7 @@ export class HeliusRpcHub {
     for (const role of ['CRITICAL', 'STATE'] as const) {
       const queue = this.queues[role];
       while (queue.length) {
-        const job = queue[0];
+        const job = queue[0]!;
         if (job.signal?.aborted || job.deadline <= now) {
           queue.shift(); job.settled = true; job.cleanup(); job.reject(fault(job.signal?.aborted ? 'abort' : 'deadline', job.signal?.aborted ? 'aborted' : 'deadline exceeded')); continue;
         }
@@ -310,7 +313,7 @@ export class HeliusRpcHub {
     }
     let body: Record<string, unknown> | undefined;
     let rpcError: Record<string, unknown> | undefined;
-    let message = '';
+    let message = typeof response.body === 'string' ? response.body.toLowerCase() : '';
     try {
       if (response.body && typeof response.body === 'object') body = response.body as Record<string, unknown>;
       if (body?.error && typeof body.error === 'object') rpcError = body.error as Record<string, unknown>;

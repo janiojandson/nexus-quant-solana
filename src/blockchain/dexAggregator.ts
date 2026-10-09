@@ -1,4 +1,5 @@
-import axios from 'axios';
+import { JupiterHubError, type JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
+import { hubWorkForPriority } from './jupiterPriorityPolicy.js';
 import {
   computeCollisionUsd,
   describeSlippageParams,
@@ -39,6 +40,7 @@ export interface SwapQuoteResult {
 }
 
 export interface DexAggregatorConfig {
+  hub?: Pick<JupiterOrgHub,'request'>;
   apiKey?: string;
   rateLimitMs?: number;
   cacheTtlMs?: number;
@@ -67,6 +69,7 @@ export class JupiterQuoteException extends Error {
  */
 export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
+  private hub?: Pick<JupiterOrgHub,'request'>;
   private apiKey?: string;
   private rateLimitMs: number;
   private cacheTtlMs: number;
@@ -81,7 +84,8 @@ export class DexAggregatorService {
     config: DexAggregatorConfig = {}
   ) {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl.replace(/\/$/, '');
-    this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+    this.hub = config.hub;
+    this.apiKey = config.apiKey;
     const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
     const configuredRateLimitMs = config.rateLimitMs ??
       (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 1050 : 2100)));
@@ -106,7 +110,7 @@ export class DexAggregatorService {
   }
 
   public async waitForRateSlot(priority: JupiterPriority = 5): Promise<void> {
-    await this.trafficCoordinator.schedule(priority, async () => undefined, 'general');
+    hubWorkForPriority(priority); // Hub admission occurs at request time.
   }
 
   private resolveRequestedSlippage(params: SwapQuoteParams): number {
@@ -133,6 +137,7 @@ export class DexAggregatorService {
   }
 
   public async getQuote(params: SwapQuoteParams): Promise<SwapQuoteResult> {
+    const work = hubWorkForPriority(params.trafficPriority ?? 5);
     const requestedSlippageBps = this.resolveRequestedSlippage(params);
 
     const queryParams: Record<string, string | number> = {
@@ -157,62 +162,18 @@ export class DexAggregatorService {
       queryParams.slippageBps = requestedSlippageBps;
     }
 
-    const cacheKey = JSON.stringify({queryParams, slippageCapBps: requestedSlippageBps});
+    const cacheKey = JSON.stringify({work, queryParams, slippageCapBps: requestedSlippageBps});
     const cached = this.quoteCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return cached.result;
     if (cached) this.quoteCache.delete(cacheKey);
 
-    let response: any;
-    let lastError: any;
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        response = await this.trafficCoordinator.schedule(
-          params.trafficPriority ?? 5,
-          () => axios.get(`${this.jupiterApiBaseUrl}/order`, {
-            params: queryParams,
-            timeout: 8000,
-            headers: this.apiKey ? { 'x-api-key': this.apiKey } : undefined
-          }),
-          'general'
-        );
-        break;
-      } catch (err: any) {
-        lastError = err;
-        const status = err?.response?.status;
-        if (status === 429 && attempt === 0) {
-          const retryAfterHeader = Number(err?.response?.headers?.['retry-after'] || 0);
-          const configuredBackoff = /fake\.invalid/i.test(this.jupiterApiBaseUrl)
-            ? 0
-            : Number(process.env.JUPITER_429_BACKOFF_MS || 1200);
-          const waitMs = retryAfterHeader > 0
-            ? retryAfterHeader * 1000
-            : configuredBackoff;
-          console.warn(`[Jupiter V2 429] retry único em ${waitMs}ms.`);
-          if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-          continue;
-        }
-        break;
-      }
+    let data: any;
+    try {
+      if (!this.hub) throw new Error('Jupiter hub required');
+      data = (await this.hub.request(work, '/swap/v2/order', queryParams)).body;
+    } catch (error) {
+      throw new JupiterQuoteException('Falha na cotação Jupiter V2: hub request failed', error instanceof JupiterHubError ? error.status : undefined);
     }
-
-    if (!response) {
-      const status = lastError?.response?.status;
-      const detail =
-        lastError?.response?.data?.error ??
-        lastError?.response?.data?.message ??
-        lastError?.message ??
-        String(lastError);
-
-      throw new JupiterQuoteException(
-        `Falha na cotação Jupiter V2 (${status ?? 'sem status'}): ` +
-        `${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`,
-        status,
-        lastError
-      );
-    }
-
-    const data = response.data;
     if (!data || data.inAmount === undefined || data.outAmount === undefined) {
       throw new JupiterQuoteException(
         'Resposta inválida da Jupiter V2 /order: inAmount/outAmount ausentes.'

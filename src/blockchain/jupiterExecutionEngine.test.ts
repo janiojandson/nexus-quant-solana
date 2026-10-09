@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import axios from 'axios';
+import {hubFixture} from './hubTestFixture.js';
+let {hub,transport}=hubFixture();
+import {beforeEach} from 'node:test';
+beforeEach(()=>{({hub,transport}=hubFixture());});
 import {
   Connection,
   AddressLookupTableAccount,
@@ -71,12 +74,12 @@ function makeConnection(simResult: { err: any } | { throwErr: any }) {
   };
   return { conn: conn as unknown as Connection, state };
 }
-const originalGet = axios.get;
-const originalPost = axios.post;
+const originalGet = transport.get;
+const originalPost = transport.post;
 
 test.afterEach(() => {
-  axios.get = originalGet;
-  axios.post = originalPost;
+  transport.get = originalGet;
+  transport.post = originalPost;
 });
 
 const testSigner = Keypair.generate();
@@ -93,7 +96,7 @@ const baseRequest: SwapExecutionRequest = {
 };
 
 function makeEngine(conn: Connection, signer = testSigner): JupiterExecutionEngine {
-  return new JupiterExecutionEngine({
+  return new JupiterExecutionEngine({jupiterHub:hub,
     connection: conn,
     isDryRun: false,
     executionEnv: { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' },
@@ -105,10 +108,11 @@ function makeEngine(conn: Connection, signer = testSigner): JupiterExecutionEngi
 }
 
 test('shadow override keeps executeSwap hypothetical even when isDryRun is false', async () => {
+  mockOrder();
   let posts = 0;
-  axios.post = (async () => { posts++; throw new Error('broadcast attempted'); }) as any;
+  transport.post = (async () => { posts++; throw new Error('broadcast attempted'); }) as any;
   const { conn } = makeConnection({ err: null });
-  const engine = new JupiterExecutionEngine({
+  const engine = new JupiterExecutionEngine({jupiterHub:hub,
     connection: conn, isDryRun: false, dexAggregator: new OkAggregator(), apiKey: 'test-key',
     executionEnv: { SHADOW_MODE: 'true', DRY_RUN_MODE: 'false' }
   });
@@ -141,7 +145,7 @@ function mockOrder(
   overrides: Record<string, unknown> = {},
   feePayer: Keypair = signer
 ) {
-  axios.get = (async (url: string) => {
+  transport.get = (async (url: string) => {
     assert.strictEqual(url, V2_BASE + '/order');
     return {
       data: {
@@ -165,7 +169,7 @@ function mockExecuteSuccess(
   totalOutputAmount = '900000',
   signature = 'fake_v2_signature'
 ) {
-  axios.post = (async (url: string, body: any) => {
+  transport.post = (async (url: string, body: any) => {
     assert.strictEqual(url, V2_BASE + '/execute');
     assert.strictEqual(body.requestId, 'req-v2-1');
     assert.ok(body.signedTransaction);
@@ -186,7 +190,7 @@ function mockExecuteSuccess(
 test('entry rejects a fresh Jupiter order that does not reference the audited pool before signing or simulation', async () => {
   mockOrder();
   let posts = 0;
-  axios.post = (async () => { posts++; return { data: { status: 'Success', signature: 'unexpected' } }; }) as any;
+  transport.post = (async () => { posts++; return { data: { status: 'Success', signature: 'unexpected' } }; }) as any;
   const { conn, state } = makeConnection({ err: null });
   const result = await makeEngine(conn).executeSwap({ ...baseRequest, requiredPoolAddress: Keypair.generate().publicKey.toBase58() } as any);
   assert.strictEqual(result.status, 'FAILED');
@@ -198,7 +202,7 @@ test('entry rejects a fresh Jupiter order that does not reference the audited po
 test('entry program restriction rejects the explicit bonding curve program before sending', async () => {
   mockOrder(testSigner, { routePlan: [{ swapInfo: { programId: BONDING_CURVE_PROGRAM } }] });
   let sends = 0;
-  axios.post = (async () => { sends++; throw new Error('must not send'); }) as any;
+  transport.post = (async () => { sends++; throw new Error('must not send'); }) as any;
   const { conn } = makeConnection({ err: null });
   const result = await makeEngine(conn).executeSwap({ ...baseRequest, forbiddenProgramIds: [BONDING_CURVE_PROGRAM] });
   assert.equal(result.status, 'FAILED');
@@ -233,7 +237,7 @@ test('entry restriction checks serialized static and lookup-table CPI programs w
     const tx = new VersionedTransaction(message);
     mockOrder(testSigner, { transaction: Buffer.from(tx.serialize()).toString('base64'), routePlan: [] });
     let sends = 0;
-    axios.post = (async () => { sends++; throw new Error('must not send'); }) as any;
+    transport.post = (async () => { sends++; throw new Error('must not send'); }) as any;
     const { conn, state } = makeConnection({ err: null });
     (conn as any).getAddressLookupTable = async () => ({ value: lookup });
     const result = await makeEngine(conn).executeSwap({ ...baseRequest, forbiddenProgramIds: [BONDING_CURVE_PROGRAM] });
@@ -254,7 +258,7 @@ test('Jupiter V2 uses injected coordinator for general order and separate execut
       return op();
     }
   };
-  const engine = new JupiterExecutionEngine({
+  const engine = new JupiterExecutionEngine({jupiterHub:hub,
     connection: conn,
     isDryRun: false,
     executionEnv: { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' },
@@ -271,21 +275,20 @@ test('Jupiter V2 uses injected coordinator for general order and separate execut
   } as any);
 
   assert.strictEqual(result.status, 'SUCCESS');
-  assert.deepStrictEqual(seen, [
-    { priority: 1, bucket: 'general' },
-    { priority: 1, bucket: 'execute' }
-  ]);
+  assert.deepStrictEqual(seen, []); // Hub admission replaces the old coordinator.
 });
 
 test('Jupiter V2: DRY_RUN usa quote V2 sem executar /execute', async () => {
+  mockOrder();
   let postCalls = 0;
-  axios.post = (async () => {
+  transport.post = (async () => {
     postCalls++;
     throw new Error('não deveria chamar /execute');
   }) as any;
 
-  const engine = new JupiterExecutionEngine({
+  const engine = new JupiterExecutionEngine({jupiterHub:hub,
     isDryRun: true,
+    connection: {} as any,
     dexAggregator: new OkAggregator(),
     apiKey: 'test-key',
     v2BaseUrl: V2_BASE
@@ -308,7 +311,7 @@ test('Jupiter V2: DRY_RUN usa quote V2 sem executar /execute', async () => {
 test('Jupiter V2: simulação 6014 barra /execute', async () => {
   mockOrder();
   let postCalls = 0;
-  axios.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
+  transport.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
   const { conn, state } = makeConnection({ err: { InstructionError: [6, { Custom: 6014 }] } });
   const engine = makeEngine(conn);
 
@@ -322,7 +325,7 @@ test('Jupiter V2: simulação 6014 barra /execute', async () => {
 test('Jupiter V2: falha do RPC de simulação é fail-closed', async () => {
   mockOrder();
   let postCalls = 0;
-  axios.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
+  transport.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
   const { conn } = makeConnection({ throwErr: new Error('RPC indisponível: 502') });
   const engine = makeEngine(conn);
 
@@ -352,7 +355,7 @@ test('Jupiter V2: sucesso usa totalOutputAmount refletido na wallet', async () =
 test('Jupiter V2: simulateSwap nunca chama /execute', async () => {
   mockOrder();
   let postCalls = 0;
-  axios.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
+  transport.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
   const { conn, state } = makeConnection({ err: null });
   const engine = makeEngine(conn);
 
@@ -366,7 +369,7 @@ test('Jupiter V2: simulateSwap nunca chama /execute', async () => {
 test('Jupiter V2: simulateSwap propaga 6014', async () => {
   mockOrder();
   let postCalls = 0;
-  axios.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
+  transport.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
   const { conn } = makeConnection({ err: { InstructionError: [6, { Custom: 6014 }] } });
   const engine = makeEngine(conn);
 
@@ -378,13 +381,13 @@ test('Jupiter V2: simulateSwap propaga 6014', async () => {
 });
 
 test('Jupiter V2: /order indisponível falha sem /execute', async () => {
-  axios.get = (async () => {
+  transport.get = (async () => {
     const err: any = new Error('rate limit');
     err.response = { status: 429, data: { error: 'rate limit' } };
     throw err;
   }) as any;
   let postCalls = 0;
-  axios.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
+  transport.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
   const { conn } = makeConnection({ err: null });
   const engine = makeEngine(conn);
   const result = await engine.executeSwap(baseRequest);
@@ -396,7 +399,7 @@ test('Jupiter V2: /order indisponível falha sem /execute', async () => {
 
 test('Jupiter V2: resposta Failed do /execute não vira sucesso', async () => {
   mockOrder();
-  axios.post = (async () => ({
+  transport.post = (async () => ({
     data: {
       status: 'Failed',
       signature: 'failed_sig',
@@ -414,10 +417,10 @@ test('Jupiter V2: resposta Failed do /execute não vira sucesso', async () => {
   assert.match(result.error || '', /-1001/);
 });
 
-test('Jupiter V2: timeout repete somente o MESMO requestId/transação', async () => {
+test('Jupiter V2: timeout leaves execution uncertain without repeating submission', async () => {
   mockOrder();
   const payloads: any[] = [];
-  axios.post = (async (_url: string, body: any) => {
+  transport.post = (async (_url: string, body: any) => {
     payloads.push({ ...body });
     throw new Error('ECONNRESET');
   }) as any;
@@ -427,16 +430,14 @@ test('Jupiter V2: timeout repete somente o MESMO requestId/transação', async (
   const result = await engine.executeSwap(baseRequest);
 
   assert.strictEqual(result.status, 'SUBMITTED_UNCONFIRMED');
-  assert.strictEqual(payloads.length, 2);
-  assert.strictEqual(payloads[0].requestId, payloads[1].requestId);
-  assert.strictEqual(payloads[0].signedTransaction, payloads[1].signedTransaction);
+  assert.strictEqual(payloads.length, 1);
   assert.match(result.error || '', /reconciliar o requestId/);
 });
-test('Jupiter V2: retry idempotente pode resolver resposta incerta', async () => {
+test('Jupiter V2: uncertainty requires reconciliation even if a retry could succeed', async () => {
   mockOrder();
   const payloads: any[] = [];
   let calls = 0;
-  axios.post = (async (_url: string, body: any) => {
+  transport.post = (async (_url: string, body: any) => {
     payloads.push({ ...body });
     calls++;
     if (calls === 1) throw new Error('gateway timeout');
@@ -455,11 +456,8 @@ test('Jupiter V2: retry idempotente pode resolver resposta incerta', async () =>
   const engine = makeEngine(conn);
   const result = await engine.executeSwap(baseRequest);
 
-  assert.strictEqual(result.status, 'SUCCESS');
-  assert.strictEqual(result.txSignature, 'resolved_sig');
-  assert.strictEqual(result.outAmount, 888_000);
-  assert.strictEqual(payloads.length, 2);
-  assert.deepStrictEqual(payloads[0], payloads[1]);
+  assert.strictEqual(result.status, 'SUBMITTED_UNCONFIRMED');
+  assert.strictEqual(payloads.length, 1);
 });
 
 test('Jupiter V2: aceita transação JupiterZ com signer adicional', async () => {
@@ -478,7 +476,7 @@ test('Jupiter V2: aceita transação JupiterZ com signer adicional', async () =>
 test('Jupiter V2: RTSE acima do hard-cap bloqueia antes de /execute', async () => {
   mockOrder(testSigner, { slippageBps: 800 });
   let postCalls = 0;
-  axios.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
+  transport.post = (async () => { postCalls++; throw new Error('não chamar'); }) as any;
   const { conn } = makeConnection({ err: null });
   const engine = makeEngine(conn);
 
@@ -491,7 +489,7 @@ test('Jupiter V2: RTSE acima do hard-cap bloqueia antes de /execute', async () =
 
 test('Jupiter V2: saída explícita preserva slippage 500bps', async () => {
   let seenParams: any;
-  axios.get = (async (_url: string, config: any) => {
+  transport.get = (async (_url: string, config: any) => {
     seenParams = config.params;
     return {
       data: {
@@ -524,7 +522,7 @@ test('Jupiter V2: saída explícita preserva slippage 500bps', async () => {
 
 test('RTSE over cap requests exactly one fresh capped order before simulation', async () => {
  const seen: any[] = [];
- axios.get = (async (_url:string, config:any) => {
+ transport.get = (async (_url:string, config:any) => {
    seen.push({...config.params});
    return {data:{transaction:buildSwapTransactionB64(testSigner),requestId:'capped-'+seen.length,
     inAmount:String(baseRequest.amountLamports),outAmount:'987654',slippageBps:seen.length===1?1000:500}};
@@ -539,8 +537,8 @@ test('RTSE over cap requests exactly one fresh capped order before simulation', 
 });
 test('capped replacement rejected if provider ignores cap; no simulation or execution', async () => {
  let getCalls=0,postCalls=0;
- axios.get=(async()=>{getCalls++;return {data:{transaction:buildSwapTransactionB64(testSigner),requestId:'unsafe',slippageBps:1000}};}) as any;
- axios.post=(async()=>{postCalls++;throw Error('never');}) as any;
+ transport.get=(async()=>{getCalls++;return {data:{transaction:buildSwapTransactionB64(testSigner),requestId:'unsafe',slippageBps:1000}};}) as any;
+ transport.post=(async()=>{postCalls++;throw Error('never');}) as any;
  const {conn,state}=makeConnection({err:null});
  const result=await makeEngine(conn).simulateSwap(baseRequest);
  assert.strictEqual(result.success,false);assert.strictEqual(getCalls,2);
@@ -549,7 +547,7 @@ test('capped replacement rejected if provider ignores cap; no simulation or exec
 });
 
 test('Jupiter V2 requires final wallet totals rather than gross route output', async()=>{
- mockOrder();axios.post=(async()=>({data:{status:'Success',code:0,signature:'pending-accounting',inputAmountResult:'15000000',outputAmountResult:'900000'}})) as any;
+ mockOrder();transport.post=(async()=>({data:{status:'Success',code:0,signature:'pending-accounting',inputAmountResult:'15000000',outputAmountResult:'900000'}})) as any;
  const {conn}=makeConnection({err:null});const result=await makeEngine(conn).executeSwap(baseRequest);
  assert.strictEqual(result.status,'SUBMITTED_UNCONFIRMED');assert.strictEqual(result.outAmount,0);assert.strictEqual(result.txSignature,'pending-accounting');
 });
@@ -560,7 +558,7 @@ test('Jupiter V2 refuses expired RFQ before simulation',async()=>{
 });
 test('Jupiter V2 checks RFQ expiry again after preflight',async()=>{
  mockOrder(testSigner,{expireAt:new Date(Date.now()+60000).toISOString()});
- let posts=0;axios.post=(async()=>{posts++;throw Error('never');}) as any;
+ let posts=0;transport.post=(async()=>{posts++;throw Error('never');}) as any;
  const now=Date.now;const {conn}=makeConnection({err:null});
  (conn as any).simulateTransaction=async()=>{Date.now=()=>now()+120000;return {value:{err:null}};};
  try{const r=await makeEngine(conn).executeSwap(baseRequest);assert.strictEqual(r.status,'FAILED');assert.strictEqual(posts,0);}

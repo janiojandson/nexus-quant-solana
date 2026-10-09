@@ -15,8 +15,8 @@ import {
 } from './blockchain/adaptivePositionSizer.js';
 import { buildEquitySizingPolicy } from './blockchain/equitySizingPolicy.js';
 import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
-import { JupiterOrgHub, JupiterCredential } from "./hubs/jupiterOrgHub.js";
-import { HeliusRpcHub, HeliusKey } from "./hubs/heliusRpcHub.js";
+import { createQuantHubs } from "./hubs/runtimeHubs.js";
+
 import { PreFlightEngine } from "./execution/preflightEngine.js";
 import { JupiterDiscoveryScanner } from "./scanner/jupiterDiscoveryScanner.js";
 
@@ -73,7 +73,7 @@ const MAX_GAS_RESERVE_SOL = Math.max(MIN_GAS_RESERVE_SOL, Number(process.env.MAX
 const MAX_TOTAL_ALLOCATION_SOL = Math.max(MAX_TRADE_AMOUNT_SOL, Number(process.env.MAX_TOTAL_ALLOCATION_SOL || 0.10));
 const PORT = Number(process.env.PORT) || 3009;
 const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
-const ACTIVE_SOLANA_RPC_URL = process.env.HELIUS_RPC_URL || process.env.QUICKNODE_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+const ACTIVE_SOLANA_RPC_URL = 'https://mainnet.helius-rpc.com/'; // Hub-owned transport only.
 const ENTRY_MOMENTUM_GATE_ENABLED = true; // Mandatory live momentum for conventional DEX entries.
 const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
 const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS || DEFAULT_ENTRY_MOMENTUM_CONFIG.intervalMs));
@@ -137,24 +137,13 @@ const exitPathHealth = new ExitPathHealth({
   emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
 });
 
-const CANDIDATE_RPC_URLS: string[] = [];
-if (process.env.HELIUS_RPC_URL) CANDIDATE_RPC_URLS.push(process.env.HELIUS_RPC_URL);
-if (process.env.HELIUS_API_KEYS) {
-  const keys = process.env.HELIUS_API_KEYS.split(/[,\s]+/).map(k => k.trim()).filter(Boolean);
-  for (const k of keys) {
-    CANDIDATE_RPC_URLS.push(`https://mainnet.helius-rpc.com/?api-key=${k}`);
-  }
-}
-if (process.env.QUICKNODE_RPC_URL) CANDIDATE_RPC_URLS.push(process.env.QUICKNODE_RPC_URL);
-if (process.env.SOLANA_RPC_URL) CANDIDATE_RPC_URLS.push(process.env.SOLANA_RPC_URL);
-CANDIDATE_RPC_URLS.push('https://api.mainnet-beta.solana.com');
+const {jupiterHub,rpcHub,connection:hubConnection}=createQuantHubs();
 
 // Instâncias Globais dos Serviços Operacionais
 const wallet = new SolanaWalletService({
   publicKey: OFFICIAL_PHANTOM_WALLET,
   secretKeyRaw: readSigningSecretKey(process.env),
-  rpcUrl: ACTIVE_SOLANA_RPC_URL,
-  rpcUrls: CANDIDATE_RPC_URLS
+  connection: hubConnection
 });
 
 const getExecutionSigner = () => resolveExecutionMode(process.env).canSign ? wallet.getKeypair() : undefined;
@@ -165,7 +154,7 @@ const rentRecovery = new RentRecoveryService(
 const pumpObservatory = new PumpObservatory(
   wallet.getConnection() as unknown as PumpRpc,
   {
-    enabled: PUMP_OBSERVATORY_ENABLED,
+    enabled: false, // Sentinel owns observation subscriptions.
     refreshIntervalMs: PUMP_OBSERVATORY_REFRESH_MS,
     refreshBatchSize: PUMP_OBSERVATORY_BATCH_SIZE,
     maxRecent: 200
@@ -180,26 +169,6 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
   intervalMs: PUMP_DEX_TIMING_INTERVAL_MS
 });
 
-
-const jupCredentials: JupiterCredential[] = [
-  { orgId: process.env.JUPITER_ORG1_ID || '1', apiKey: process.env.JUPITER_ORG1_KEY || '', role: 'PROTECTION' },
-  { orgId: process.env.JUPITER_ORG2_ID || '2', apiKey: process.env.JUPITER_ORG2_KEY || '', role: 'ENTRY' },
-  { orgId: process.env.JUPITER_ORG3_ID || '3', apiKey: process.env.JUPITER_ORG3_KEY || '', role: 'ENTRY' },
-  { orgId: process.env.JUPITER_ORG4_ID || '4', apiKey: process.env.JUPITER_ORG4_KEY || '', role: 'DISCOVERY' }
-];
-const jupiterHub = new JupiterOrgHub(jupCredentials, fetch as any, { now: Date.now, sleep: async (ms: number) => new Promise<void>(r => setTimeout(r, ms)) });
-
-const rpcCredentials: HeliusKey[] = [
-  { id: '1', apiKey: process.env.HELIUS_KEY_1 || 'fallback_key_1', role: 'CRITICAL', quotaGroupId: 'group_1', rps: 30 },
-  { id: '2', apiKey: process.env.HELIUS_KEY_2 || 'fallback_key_2', role: 'STATE', quotaGroupId: 'group_2', rps: 30 }
-];
-const quotaGroups = [{ id: 'group_1', rps: 30 }, { id: 'group_2', rps: 30 }
-];
-const rpcHub = new HeliusRpcHub(rpcCredentials, quotaGroups, async (cred: any, endpoint: string, params: unknown[], signal: AbortSignal) => {
-  const url = `https://mainnet.helius-rpc.com/?api-key=${cred.apiKey}`;
-  const res = await fetch(url, { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: endpoint, params }), headers: {'content-type':'application/json'} });
-  return { status: res.status, headers: res.headers as any, body: await res.json() };
-}, { now: Date.now, sleep: async (ms: number) => new Promise<void>(r => setTimeout(r, ms)), random: Math.random });
 
 const shadowPreFlight = new PreFlightEngine(jupiterHub, rpcHub, OFFICIAL_PHANTOM_WALLET);
 const scanner = new JupiterDiscoveryScanner(jupiterHub);
@@ -217,7 +186,8 @@ const uncertainExitMints = new Set<string>();
 let executionUncertainReason: string | null = null;
 
 const jupiterEngine = new JupiterExecutionEngine({
-  rpcUrl: ACTIVE_SOLANA_RPC_URL,
+  connection: hubConnection,
+  jupiterHub,
   isDryRun: IS_DRY_RUN
 });
 
@@ -281,7 +251,7 @@ const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
   jupiterEngine.getAggregator(),
   pumpStrategyRepository,
   {
-    enabled: PUMP_OBSERVATORY_ENABLED && PUMP_STRATEGY_LAB_ENABLED,
+    enabled: false, // Standalone Jupiter quote research has no financial quota allocation.
     intervalMs: PUMP_STRATEGY_LAB_INTERVAL_MS,
     entryLamports: PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS,
     entryLamportLadder: () => latestShadowEntryLadderLamports,
@@ -651,8 +621,10 @@ async function executeExitOrderUnlocked(
       trafficPriority
     });
 
-    if (exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS') {
+    if (exitSwap.status === 'SUCCESS' && !isHypotheticalExecution(exitSwap)) {
       console.log(`✅ [TENTATIVA 2 SUCESSO] ${pos.symbol}: Liquidação V2 confirmada com slippage 750bps`);
+    } else if (isHypotheticalExecution(exitSwap)) {
+      console.log(`[SHADOW] ${pos.symbol}: tentativa 2 hipotética, sem liquidação confirmada`);
     }
   }
 

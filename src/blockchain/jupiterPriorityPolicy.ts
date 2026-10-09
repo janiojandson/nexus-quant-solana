@@ -1,4 +1,11 @@
 import type { JupiterPriority } from './jupiterTrafficCoordinator.js';
+import type { JupiterWork } from '../hubs/jupiterOrgHub.js';
+export function hubWorkForPriority(priority:JupiterPriority):JupiterWork {
+  if(priority===0||priority===1) return 'EXIT';
+  if(priority===2||priority===3) return 'RECONCILE';
+  if(priority===4||priority===5) return 'ENTRY';
+  throw new Error('Jupiter quote research disabled; discovery uses token endpoints only');
+}
 
 export type JupiterWorkKind =
   | 'EMERGENCY_EXIT'

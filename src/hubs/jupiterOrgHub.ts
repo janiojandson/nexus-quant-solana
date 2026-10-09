@@ -20,6 +20,11 @@ type Job = {
 };
 const priority: JupiterWork[] = ['EXIT', 'RECONCILE', 'ENTRY', 'DISCOVERY'];
 const fail = (message: string) => new Error(`JupiterOrgHub: ${message}`);
+export class JupiterHubError extends Error {
+  constructor(public readonly kind: 'network' | 'auth' | 'http' | 'rate' | 'uncertain' | 'abort', public readonly status?: number) {
+    super(`JupiterOrgHub: ${kind === 'uncertain' ? 'execution status unknown; reconcile before any retry' : kind === 'rate' ? 'rate limited (429)' : kind + ' request failure'}`);
+  }
+}
 const bucket = (): Bucket => ({ times: [], resetAt: 0, cooldownUntil: 0 });
 
 function classify(work: JupiterWork, endpoint: string): 'main' | 'execute' {
@@ -232,12 +237,12 @@ export class JupiterOrgHub {
       }
       if (result.status === 429) {
         if (job.bucket === 'execute') throw fail('execution status unknown; reconcile before any retry');
-        throw fail('rate limited (429)');
+        throw new JupiterHubError('rate', 429);
       }
-      if (result.status < 200 || result.status >= 300) throw fail(job.bucket === 'execute' ? 'execution status unknown; reconcile before any retry' : 'request failed');
+      if (result.status < 200 || result.status >= 300) throw new JupiterHubError(result.status === 401 || result.status === 403 ? 'auth' : 'http', result.status);
       job.resolve(result);
-    } catch {
-      job.reject(fail(job.bucket === 'execute' ? 'execution status unknown; reconcile before any retry' : controller.signal.aborted ? 'deadline or abort' : 'request failed or rate limited (429)'));
+    } catch (error) {
+      job.reject(job.bucket === 'execute' ? new JupiterHubError('uncertain') : controller.signal.aborted ? new JupiterHubError('abort') : error instanceof JupiterHubError ? error : new JupiterHubError('network'));
     } finally {
       if (timer) clearTimeout(timer);
       job.options.signal?.removeEventListener('abort', onAbort);

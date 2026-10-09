@@ -1,4 +1,5 @@
-import axios from 'axios';
+import type { JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
+import { hubWorkForPriority } from './jupiterPriorityPolicy.js';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
 import { referencesProgram } from '../execution/entryRoutePolicy.js';
@@ -51,6 +52,7 @@ export interface SwapExecutionResponse {
 }
 
 export interface JupiterEngineConfig {
+  jupiterHub?: Pick<JupiterOrgHub,'request'>;
   rpcUrl?: string;
   isDryRun?: boolean;
   executionEnv?: ExecutionEnvironment;
@@ -101,21 +103,22 @@ export class JupiterExecutionEngine {
   private isDryRun: boolean;
   private executionEnv: ExecutionEnvironment;
   private dexAggregator: DexAggregatorService;
-  private apiKey?: string;
+  private hub?: Pick<JupiterOrgHub,'request'>;
   private v2BaseUrl: string;
   private executeTimeoutMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
 
   constructor(config: JupiterEngineConfig = {}) {
     this.executionEnv = config.executionEnv ?? process.env;
-    this.connection = config.connection ||
-      new Connection(config.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
+    if (!config.connection) throw new Error('Hub-backed connection required');
+    this.connection = config.connection;
     this.isDryRun = config.isDryRun !== undefined
       ? config.isDryRun
       : resolveExecutionMode(this.executionEnv).shadow;
-    this.dexAggregator = config.dexAggregator || new DexAggregatorService();
+    this.hub = config.jupiterHub;
+    this.dexAggregator = config.jupiterHub ? new DexAggregatorService(undefined, {hub:config.jupiterHub}) : config.dexAggregator || new DexAggregatorService();
     this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
-    this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
+
     this.v2BaseUrl = (
       config.v2BaseUrl ||
       process.env.JUPITER_V2_BASE_URL ||
@@ -170,9 +173,7 @@ export class JupiterExecutionEngine {
   }
 
   private async getOrder(req: SwapExecutionRequest): Promise<JupiterV2OrderResponse> {
-    if (!this.apiKey) {
-      throw new Error('JUPITER_API_KEY ausente para Jupiter Swap API V2.');
-    }
+    if (!this.hub) throw new Error('Jupiter hub required');
 
     const params: Record<string, string | number> = {
       inputMint: req.inputMint,
@@ -184,29 +185,7 @@ export class JupiterExecutionEngine {
     const slippageBps = this.orderSlippage(req);
     if (slippageBps !== undefined) params.slippageBps = slippageBps;
 
-    let response: any;
-    try {
-      response = await this.trafficCoordinator.schedule(
-        req.trafficPriority ?? 4,
-        () => axios.get(`${this.v2BaseUrl}/order`, {
-          params,
-          timeout: 10_000,
-          headers: { 'x-api-key': this.apiKey }
-        }),
-        'general'
-      );
-    } catch (err: any) {
-      const detail =
-        err?.response?.data?.error ??
-        err?.response?.data?.message ??
-        err?.message ??
-        String(err);
-      throw new Error(
-        `Jupiter V2 /order falhou: ${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`
-      );
-    }
-
-    const order = response.data as JupiterV2OrderResponse;
+    const order = (await this.hub.request(hubWorkForPriority(req.trafficPriority ?? 4), '/swap/v2/order', params)).body as JupiterV2OrderResponse;
     for (const program of req.forbiddenProgramIds || []) {
       if (referencesProgram(order.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
     }
@@ -357,59 +336,14 @@ export class JupiterExecutionEngine {
     if (!resolveExecutionMode(this.executionEnv).canBroadcast) {
       throw new Error('Shadow mode blocks Jupiter broadcast.');
     }
-    let lastError: any;
-
-    // Retry somente do MESMO requestId + MESMA transação assinada.
-    // Nunca cria uma segunda ordem em caso de timeout.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const response = await this.trafficCoordinator.schedule(
-          priority,
-          () => axios.post(
-            `${this.v2BaseUrl}/execute`,
-            payload,
-            {
-              timeout: this.executeTimeoutMs,
-              headers: {
-                'Content-Type': 'application/json',
-                ...(this.apiKey ? { 'x-api-key': this.apiKey } : {})
-              }
-            }
-          ),
-          'execute'
-        );
-        return { response: response.data as JupiterV2ExecuteResponse };
-      } catch (err: any) {
-        lastError = err;
-        const status = Number(err?.response?.status || 0);
-        const body = err?.response?.data;
-
-        if (body && (body.status === 'Success' || body.status === 'Failed')) {
-          return { response: body as JupiterV2ExecuteResponse };
-        }
-
-        const retryable = !status || status === 429 || status >= 500;
-        if (!retryable || attempt === 1) break;
-
-        const delayMs = status === 429 ? 1200 : 500;
-        console.warn(
-          `⚠️ [Jupiter V2 /execute] resposta incerta; repetindo MESMO requestId em ${delayMs}ms.`
-        );
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-      }
+    try {
+      if (!this.hub) throw new Error('Jupiter hub required');
+      const work=hubWorkForPriority(priority);
+      const response=await this.hub.request(work==='ENTRY'?'ENTRY':'EXIT','/swap/v2/execute',payload,{deadlineMs:Date.now()+this.executeTimeoutMs});
+      return {response:response.body as JupiterV2ExecuteResponse};
+    } catch {
+      return {uncertainError:'/execute status unknown; reconcile before any retry'};
     }
-
-    const detail =
-      lastError?.response?.data?.error ??
-      lastError?.response?.data?.message ??
-      lastError?.message ??
-      String(lastError);
-
-    return {
-      uncertainError:
-        `/execute sem resposta conclusiva após retry idempotente: ` +
-        `${typeof detail === 'object' ? JSON.stringify(detail) : String(detail)}`
-    };
   }
 
   public async executeSwap(req: SwapExecutionRequest): Promise<SwapExecutionResponse> {

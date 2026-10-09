@@ -3,6 +3,7 @@ import bs58 from 'bs58';
 import { resolveExecutionMode, type ExecutionEnvironment } from '../execution/executionMode.js';
 
 export interface WalletServiceConfig {
+  connection?: Connection;
   secretKeyRaw?: string;
   publicKey?: string;
   executionEnv?: ExecutionEnvironment;
@@ -16,68 +17,8 @@ export interface TradeValidationResult {
   maxAllowedAllocationSol: number;
 }
 
-export function createResilientConnection(urls: string[]): Connection {
-  const sanitizedUrls = urls
-    .map(u => (u || '').trim())
-    .filter(u => u.length > 0 && (u.startsWith('http://') || u.startsWith('https://')));
-
-  const uniqueUrls = Array.from(new Set(sanitizedUrls));
-  if (uniqueUrls.length === 0) {
-    uniqueUrls.push('https://api.mainnet-beta.solana.com');
-  }
-
-  const connections = uniqueUrls.map(u => new Connection(u, 'confirmed'));
-  let counter = 0;
-  let activeIndex = 0;
-
-  return new Proxy(connections[0], {
-    get(target, prop, receiver) {
-      if (typeof (target as any)[prop] === 'function') {
-        const executeWithFailover = async (...callArgs: any[]) => {
-          let lastErr: any;
-          const startIdx = (counter++) % connections.length;
-          for (let attempt = 0; attempt < connections.length; attempt++) {
-            const idx = (startIdx + attempt) % connections.length;
-            const conn = connections[idx];
-            try {
-              const res = await (conn as any)[prop](...callArgs);
-              activeIndex = idx;
-              return res;
-            } catch (err: any) {
-              lastErr = err;
-              if (connections.length > 1) {
-                console.warn(`[SolanaRPC] Falha/Limite no RPC ${uniqueUrls[idx].split('?')[0]} (${err?.message || err}). Alternando para próximo endpoint...`);
-              } else {
-                throw err;
-              }
-            }
-          }
-          throw lastErr;
-        };
-
-        return async (...args: any[]) => {
-          // QuickNode Discover plan e RPCs gratuitos limitam getMultipleAccountsInfo a no maximo 5 chaves por chamada (erro 413)
-          if (prop === 'getMultipleAccountsInfo' && Array.isArray(args[0]) && args[0].length > 5) {
-            const keys: any[] = args[0];
-            const otherArgs = args.slice(1);
-            const CHUNK_SIZE = 5;
-            const allResults: any[] = [];
-            for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
-              const chunk = keys.slice(i, i + CHUNK_SIZE);
-              const chunkRes = await executeWithFailover(chunk, ...otherArgs);
-              if (Array.isArray(chunkRes)) {
-                allResults.push(...chunkRes);
-              }
-            }
-            return allResults;
-          }
-
-          return executeWithFailover(...args);
-        };
-      }
-      return Reflect.get(connections[activeIndex], prop, receiver);
-    }
-  });
+export function createResilientConnection(_urls: string[]): Connection {
+  throw new Error('Direct RPC transport disabled; inject hub-backed connection');
 }
 
 export class SolanaWalletService {
@@ -97,12 +38,8 @@ export class SolanaWalletService {
       this.keypair = this.parseKeypair(config.secretKeyRaw || '');
       this.publicKey = this.keypair.publicKey;
     }
-    const candidateUrls = [
-      ...(config.rpcUrls || []),
-      ...(config.rpcUrl ? [config.rpcUrl] : []),
-      'https://api.mainnet-beta.solana.com'
-    ];
-    this.connection = createResilientConnection(candidateUrls);
+    if (!config.connection) throw new Error('Hub-backed connection required');
+    this.connection = config.connection;
   }
 
   private parseKeypair(raw: string): Keypair {
