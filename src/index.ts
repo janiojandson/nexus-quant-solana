@@ -4,7 +4,6 @@ import { reportProfitProtectionShadow } from './protection/profitProtectionShado
 import http from 'http';
 import { PublicKey } from '@solana/web3.js';
 import dotenv from 'dotenv';
-import axios from 'axios';
 import { VitalityState, getAgentVitalityState } from './core/vitalityEngine.js';
 import { SolanaWalletService } from './blockchain/solanaWallet.js';
 import { JupiterExecutionEngine } from './blockchain/jupiterExecutionEngine.js';
@@ -18,6 +17,7 @@ import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { createQuantHubs } from "./hubs/runtimeHubs.js";
 
 import { PreFlightEngine } from "./execution/preflightEngine.js";
+import { EntryAdmission } from './execution/entryAdmission.js';
 import { JupiterDiscoveryScanner } from "./scanner/jupiterDiscoveryScanner.js";
 
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
@@ -72,7 +72,6 @@ const MIN_GAS_RESERVE_SOL = Math.max(0, Number(process.env.MIN_GAS_RESERVE_SOL |
 const MAX_GAS_RESERVE_SOL = Math.max(MIN_GAS_RESERVE_SOL, Number(process.env.MAX_GAS_RESERVE_SOL || 0.05));
 const MAX_TOTAL_ALLOCATION_SOL = Math.max(MAX_TRADE_AMOUNT_SOL, Number(process.env.MAX_TOTAL_ALLOCATION_SOL || 0.10));
 const PORT = Number(process.env.PORT) || 3009;
-const MACRO_SENTINEL_URL = process.env.MACRO_SENTINEL_URL || process.env.MACRO_SENTINEL_PUBLIC_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
 const ACTIVE_SOLANA_RPC_URL = 'https://mainnet.helius-rpc.com/'; // Hub-owned transport only.
 const ENTRY_MOMENTUM_GATE_ENABLED = true; // Mandatory live momentum for conventional DEX entries.
 const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
@@ -171,6 +170,8 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
 
 
 const shadowPreFlight = new PreFlightEngine(jupiterHub, rpcHub, OFFICIAL_PHANTOM_WALLET);
+// Task 5 will supply a durable registrar; until then no candidate can be accepted.
+const entryAdmission = new EntryAdmission(shadowPreFlight);
 const scanner = new JupiterDiscoveryScanner(jupiterHub);
 
 const exitTelemetry = new NonBlockingTelemetry<any>();
@@ -338,7 +339,7 @@ const latestState: DashboardState = {
   vitalityState: 'NORMAL',
   dryRun: IS_DRY_RUN,
   maintenanceMode: NEXUS_MAINTENANCE_MODE,
-  macroRegime: 'NEUTRAL_RANGING',
+  macroRegime: 'NOT_APPLICABLE',
   circuitBreakerActive: false,
   activeRpcUrl: ACTIVE_SOLANA_RPC_URL.split('?')[0],
   totalRealizedPnlSol: 0,
@@ -789,7 +790,7 @@ async function executeExitOrderUnlocked(
         tokenSymbol: pos.symbol,
         priceUsd: pos.entryPriceUsd
       },
-      market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
+      market: { sentinelRegime: (latestState.macroRegime as any) || 'NOT_APPLICABLE' },
       execution: { sizeSol: exitSolValue },
       gateEvaluations: [],
       rejectionReason: `EXIT_SWAP_FAILED: ${failReason}`,
@@ -1134,7 +1135,6 @@ const server = http.createServer(async (req, res) => {
       }
       console.log('🚨 [API PANIC ALL] Desarmando Sentinel, liquidando todos os tokens e fechando ATAs...');
       latestState.circuitBreakerActive = true;
-      axios.post(`${MACRO_SENTINEL_URL}/v1/sentinel/breaker/trip`, {}).catch(() => {});
 
       positionEngine.clearPositions();
 
@@ -1603,872 +1603,61 @@ async function executeAutonomousCycle() {
       `cap=${capitalPolicy.selectedEntryCapSol.toFixed(6)} SOL slots=${capitalPolicy.slotsRemaining}/${MAX_CONCURRENT_POSITIONS}.`
     );
 
-    // Ciclo 1.8: Conexão Explícita ao Macro Sentinel (:4005)
-    let macroRegime = 'NEUTRAL_RANGING';
-    let isCircuitBreaker = false;
-    try {
-      const sentinelRes = await axios.get(`${MACRO_SENTINEL_URL}/v1/sentinel/regime`, { timeout: 2000 });
-      macroRegime = sentinelRes.data?.regime || 'NEUTRAL_RANGING';
-      isCircuitBreaker = Boolean(sentinelRes.data?.is_circuit_breaker_active);
-      const breakerStatusText = isCircuitBreaker ? 'LIGADO (Operações Bloqueadas)' : 'DESLIGADO (Seguro)';
-      console.log(`📡 [SENTINEL: ${macroRegime} | Disjuntor: ${breakerStatusText}]`);
-    } catch {
-      console.log(`⚠️ [AVISO] Sentinel inacessível, mantendo operação defensiva`);
-    }
+    // Macro Sentinel was retired. A local panic breaker still pauses entries.
+    latestState.macroRegime = 'NOT_APPLICABLE';
+    if (latestState.circuitBreakerActive) return;
 
-    latestState.macroRegime = macroRegime;
-    latestState.circuitBreakerActive = isCircuitBreaker;
-
-    if (isCircuitBreaker) {
-      console.log(`🛑 [CIRCUIT BREAKER ATIVO] Mercado em estresse macro (${macroRegime}). Scanner e swaps pausados.`);
-      return;
-    }
-
-    // Ciclo 2: Scanner On-Chain (DexScreener)
-    console.log('🔍 [1/3 Scanner Descoberta] Buscando piscinas consolidadas (5-60m | Liquidez >= $15k)...');
-    const mints = await scanner.scanTrendingTokens();
-    const candidates = mints.map(mint => ({
-      mint,
-      symbol: mint.slice(0, 5),
-      name: mint.slice(0, 5),
-      liquidityUsd: 20000,
-      pairCreatedAt: Date.now() - 3600000,
-      priceUsd: 0.001,
-      priceChangeM5: 1,
-      buysM5: 10,
-      sellsM5: 5,
-      volume5mUsd: 5000,
-      volumeBuysM5: 0,
-      volumeSellsM5: 0,
-      h1HighPriceUsd: 0,
-      pairAddress: '11111111111111111111111111111111'
-    }));
-    const { waiting, mature, technicalDiscards: scannerDiscards, upstreamFailures, retrying } = { waiting: 0, mature: candidates.length, technicalDiscards: 0, upstreamFailures: 0, retrying: 0 };
-    if (upstreamFailures > 0 || retrying > 0) {
-      console.warn(`[DEX_UPSTREAM_WAIT] falhas/pares vazios=${upstreamFailures} | maduros aguardando retry=${retrying} | backoff=15000ms`);
-    }
-
-    let technicalDiscardCount = scannerDiscards || 0;
-    let quarantineCount = 0;
-    const eligibleCandidates: typeof candidates = [];
-
-    for (const token of candidates) {
-      const nowTs = Date.now();
-      const tokenAgeMinutes = token.pairCreatedAt
-        ? Math.max(0, Math.floor((nowTs - token.pairCreatedAt) / 60000))
-        : 0;
-
+    const discovered = await scanner.scanTrendingCandidates();
+    latestState.incubator = { waiting: 0, mature: discovered.length,
+      technicalDiscards: 0, entryEligible: 0 };
+    for (const token of discovered.slice(0, 3)) {
+      if (!token.symbol || !token.name || token.priceUsd === null ||
+          token.liquidityUsd === null || !token.pairAddress) {
+        antiSpamMemory.recordTechnicalDiscard(token.mint, 'DADOS_INSUFICIENTES', 0.05);
+        latestState.incubator.technicalDiscards++;
+        continue;
+      }
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
-      if (!classification.isEligibleForMemeScan) {
-        technicalDiscardCount++;
-        // Registro assíncrono no Decision Journal (rejeição de maturação / descarte técnico)
-        journal.logDecision({
-          traceId: randomUUID(),
-          decision: 'ENTRY_REJECTED',
-          token: {
-            mint: token.mint,
-            tokenSymbol: token.symbol,
-            poolAddress: (token as any).pairAddress,
-            ageMinutes: tokenAgeMinutes,
-            liquidityUsd: token.liquidityUsd,
-            priceUsd: token.priceUsd,
-            priceChange5mPct: token.priceChangeM5,
-            volume5mUsd: token.volume5mUsd
-          },
-          market: {
-            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-            sessionHourUtc: new Date().getUTCHours(),
-            isWeekend: [0, 6].includes(new Date().getUTCDay())
-          },
-          gateEvaluations: [
-            DecisionLogger.evaluateGate('MATURITY_AGE', tokenAgeMinutes >= 5 && tokenAgeMinutes <= 60, tokenAgeMinutes, 5),
-            DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', (token.liquidityUsd || 0) >= 15000, token.liquidityUsd, 15000)
-          ],
-          rejectionReason: classification.reason || 'Descarte por classificação técnica'
-        });
-
-        // TTL inteligente de 5 minutos: permite que tokens com liquidez oscilante ou status transitório sejam reavaliados
-        antiSpamMemory.recordTechnicalDiscard(token.mint, classification.reason || 'Descarte por classificação técnica', 5);
+      if (!classification.isEligibleForMemeScan || antiSpamMemory.shouldSkip(token.mint).skip) continue;
+      latestState.incubator.entryEligible++;
+      const candidate = { mint: token.mint, symbol: token.symbol, name: token.name,
+        priceUsd: token.priceUsd, liquidityUsd: token.liquidityUsd, pairAddress: token.pairAddress };
+      const stakeLamports = latestShadowEntryLadderLamports[0];
+      if (!Number.isSafeInteger(stakeLamports) || stakeLamports <= 0) continue;
+      let securityAudit: Awaited<ReturnType<typeof entryGatekeeper.auditToken>> | undefined;
+      const decision = await entryAdmission.attempt({ candidate, stakeLamports,
+        availableLamports: Math.floor(balanceSol * 1e9),
+        reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
+        poolHints: [token.pairAddress],
+        verifySecurity: async facts => {
+          // Security still requires contract and pool facts from RugCheck. Historic M5
+          // windows are not reused as a second momentum decision.
+          securityAudit = await entryGatekeeper.auditToken({ mint: facts.mint,
+            pairAddress: facts.pairAddress, liquidityUsd: facts.liquidityUsd,
+            priceUsd: facts.priceUsd });
+          return { safe: securityAudit.safe, reason: securityAudit.reason };
+        } });
+      if (!decision.accepted) {
+        const durableSecurityVeto = securityAudit?.safe === false &&
+          securityAudit.rugCheckReport?.factsComplete === true;
+        if (durableSecurityVeto) antiSpamMemory.recordVeto(token.mint, decision.reason, 24 * 60 * 60 * 1000);
+        else antiSpamMemory.recordTechnicalDiscard(token.mint, decision.reason, 0.05);
+        journal.logDecision({ traceId: randomUUID(), decision: 'ENTRY_REJECTED',
+          token: { mint: token.mint, tokenSymbol: token.symbol,
+            poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,
+            priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
+          rejectionReason: decision.reason, metadata: { phase: 'TYPED_4D_PREFLIGHT',
+            macroStatus: 'NOT_APPLICABLE', accountingMode: 'SHADOW' } });
         continue;
       }
-
-      const spamCheck = antiSpamMemory.shouldSkip(token.mint);
-      if (spamCheck.skip) {
-        quarantineCount++;
-        continue;
-      }
-
-      eligibleCandidates.push(token);
+      journal.logDecision({ traceId: decision.receipt.traceId, decision: 'ENTRY_APPROVED',
+        token: { mint: token.mint, tokenSymbol: token.symbol,
+          poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,
+          priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
+        metadata: { phase: 'DURABLE_SHADOW_ENTRY',
+          entryIntentId: decision.receipt.entryIntentId, accountingMode: 'SHADOW' } });
+      break;
     }
-
-    const logMsg = `📊 [Incubadora: ${waiting} aguardando | Maturos (5-60m): ${mature} | Descarte Técnico: ${technicalDiscardCount} | Quarentena: ${quarantineCount} | Elegíveis para Auditoria: ${eligibleCandidates.length}]`;
-    console.log(logMsg);
-
-    latestState.incubator = {
-      waiting,
-      mature,
-      technicalDiscards: technicalDiscardCount,
-      entryEligible: eligibleCandidates.length
-    };
-
-    // Registra no buffer de scannerLogs para exposição na API e Dashboard
-    if (!latestState.scannerLogs) latestState.scannerLogs = [];
-    latestState.scannerLogs.unshift({
-      timestamp: new Date().toLocaleTimeString(),
-      message: logMsg,
-      type: eligibleCandidates.length > 0 ? 'success' : 'info'
-    });
-    if (latestState.scannerLogs.length > 15) latestState.scannerLogs.pop();
-
-    if (eligibleCandidates.length > 0) {
-      // Consulta de Memória Cruzada Sentinel: verifica histórico de graduação na bonding curve (sentinel_handoff)
-      for (const candidate of eligibleCandidates) {
-        try {
-          const cross = await sentinelHandoffScanner.checkCrossMemory(candidate.mint, (candidate as any).devWallet);
-          if (cross.found && (cross.isGraduated || (cross.layaScore !== null && cross.layaScore >= 75))) {
-            (candidate as any).sentinelCrossMemory = cross;
-            (candidate as any).hasSentinelPriorityBonus = true;
-            console.log(
-              `⚡ [Memória Cruzada Sentinel] Token ${candidate.symbol} (${candidate.mint}) reconhecido no Sentinel Handoff! ` +
-              `Status=${cross.status} LayaScore=${cross.layaScore ?? 'N/D'} | Bonificação heurística de prioridade no pipeline Jupiter concedida.`
-            );
-          }
-        } catch {
-          // Tolerante
-        }
-      }
-
-      // Prioriza candidatos reconhecidos pelo Sentinel no topo da fila
-      eligibleCandidates.sort((a, b) => {
-        const aBonus = (a as any).hasSentinelPriorityBonus ? 1 : 0;
-        const bBonus = (b as any).hasSentinelPriorityBonus ? 1 : 0;
-        return bBonus - aBonus;
-      });
-
-      // PRIORIDADE 2: Fila de fallback - tenta até 3 candidatos se os primeiros falharem
-      const maxCandidatesToTry = Math.min(3, eligibleCandidates.length);
-      let candidateProcessed = false;
-      
-      for (let candidateIndex = 0; candidateIndex < maxCandidatesToTry && !candidateProcessed; candidateIndex++) {
-        const topCandidate = eligibleCandidates[candidateIndex];
-        const classification = TokenClassifier.classify(topCandidate.mint, topCandidate.symbol, topCandidate.liquidityUsd);
-
-        console.log(`🔥 Analisando Candidato #${candidateIndex + 1}/${maxCandidatesToTry}: ${topCandidate.symbol} (${topCandidate.name})`);
-        console.log(`   Subgrupo: [${classification.category}] | Mint: ${topCandidate.mint}`);
-        console.log(`   Liquidez: $${topCandidate.liquidityUsd.toLocaleString()} | Preço: $${topCandidate.priceUsd}`);
-
-        // Ciclo 3: Sentinela de Risco (RugCheck + Laya + Price Action Momentum)
-        console.log('🛡️ [2/3 Sentinela Anti-Rug] Auditando contrato, liquidez e momentum de preço...');
-        const audit = await entryGatekeeper.auditToken({
-        mint: topCandidate.mint,
-        pairAddress: topCandidate.pairAddress,
-        liquidityUsd: topCandidate.liquidityUsd,
-        priceChangeM5: topCandidate.priceChangeM5,
-        buysM5: topCandidate.buysM5,
-        sellsM5: topCandidate.sellsM5,
-        volumeBuysM5: topCandidate.volumeBuysM5,
-        volumeSellsM5: topCandidate.volumeSellsM5,
-        priceUsd: topCandidate.priceUsd,
-        h1HighPriceUsd: topCandidate.h1HighPriceUsd
-      });
-
-      console.log(`   Veredito de Segurança: ${audit.safe ? 'APROVADO ✅' : 'VETADO ⛔'}`);
-      console.log(`   Score: ${audit.score}/100 | Validador: ${audit.validatedBy}`);
-
-      if (audit.safe) {
-        const m5Pct = topCandidate.priceChangeM5 !== undefined ? topCandidate.priceChangeM5.toFixed(1) : '0.0';
-        const buys = topCandidate.buysM5 ?? 0;
-        const sells = topCandidate.sellsM5 ?? 0;
-        console.log(`🛡️ [Filtros Solana aprovados]: Contrato Seguro (80+) | Momentum m5: +${m5Pct}% | Buys/Sells: ${buys}/${sells} | Vol Comprador > Vendedor`);
-      }
-
-      let txSignature: string | null = null;
-
-      // Avaliação detalhada dos 9 gates para o Decision Journal
-      const openPositions = positionEngine.getAllPositions().length;
-      const candidateAgeMinutes = topCandidate.pairCreatedAt
-        ? Math.max(0, Math.floor((Date.now() - topCandidate.pairCreatedAt) / 60000))
-        : 0;
-      const buySellRatio = topCandidate.sellsM5 && topCandidate.sellsM5 > 0
-        ? Number(((topCandidate.buysM5 || 0) / topCandidate.sellsM5).toFixed(2))
-        : (topCandidate.buysM5 ? 2.0 : 1.0);
-      const isPriceWindowValid = (topCandidate.priceChangeM5 ?? 0) >= 3 && (topCandidate.priceChangeM5 ?? 0) <= 85;
-      const isBuyDominanceValid = buySellRatio >= 1.0;
-      const isSentinelValid = ['NORMAL', 'NEUTRAL_RANGING'].includes(latestState.macroRegime || 'NORMAL');
-
-      const gates: GateEvaluation[] = [
-        DecisionLogger.evaluateGate('MATURITY_AGE', candidateAgeMinutes >= 5 && candidateAgeMinutes <= 60, candidateAgeMinutes, 5),
-        DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
-        ...buildContractGates(audit, topCandidate),
-        DecisionLogger.evaluateGate('PRICE_WINDOW', isPriceWindowValid, topCandidate.priceChangeM5, 85),
-        DecisionLogger.evaluateGate('BUY_DOMINANCE', isBuyDominanceValid, buySellRatio, 1.0),
-        DecisionLogger.evaluateGate('SENTINEL_REGIME', isSentinelValid),
-        DecisionLogger.evaluateGate('SLOT_AVAILABILITY', openPositions < MAX_CONCURRENT_POSITIONS, openPositions, MAX_CONCURRENT_POSITIONS),
-        DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
-      ];
-
-      const currentTraceId = randomUUID();
-
-        if (!audit.safe) {
-          console.log(`   Motivo do Veto: ${audit.reason}`);
-          const vetoReasonText = audit.reason || 'Veto preventivo de segurança (RugCheck/Filtros Solana)';
-          antiSpamMemory.recordVeto(topCandidate.mint, vetoReasonText, 24 * 60 * 60 * 1000);
-          // Persistência ativa no banco por 24 horas
-          postgresRepo.saveQuarantine({
-            mint: topCandidate.mint,
-            symbol: topCandidate.symbol,
-            reason: vetoReasonText,
-            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-          }).catch(() => {});
-
-          // Registro assíncrono no Decision Journal (rejeição no Gatekeeper)
-          journal.logDecision({
-          traceId: currentTraceId,
-          decision: 'ENTRY_REJECTED',
-          compositeScore: audit.score,
-          token: {
-            mint: topCandidate.mint,
-            tokenSymbol: topCandidate.symbol,
-            poolAddress: (topCandidate as any).pairAddress,
-            ageMinutes: candidateAgeMinutes,
-            liquidityUsd: topCandidate.liquidityUsd,
-            priceUsd: topCandidate.priceUsd,
-            priceChange5mPct: topCandidate.priceChangeM5,
-            buysCount5m: topCandidate.buysM5,
-            sellsCount5m: topCandidate.sellsM5,
-            buySellRatio,
-            volume5mUsd: topCandidate.volume5mUsd,
-          },
-          market: {
-            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-            sessionHourUtc: new Date().getUTCHours(),
-            isWeekend: [0, 6].includes(new Date().getUTCDay()),
-          },
-          gateEvaluations: gates,
-          rejectionReason: vetoReasonText,
-          metadata: {
-            layaNativeShadow: audit.layaNativeShadow ?? null,
-            rugCheckReport: audit.rugCheckReport ?? null,
-            gateEvidenceVersion: 2,
-            activeValidator: audit.validatedBy
-          },
-        });
-        
-        console.log(`⏭️ Candidato #${candidateIndex + 1} reprovado no gatekeeper. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
-        // Não marca como processado - continua loop para próximo candidato
-        continue;
-      } else {
-        let momentumTelemetry: any = null;
-        let layaEntryTelemetry: any = null;
-        const getMomentumStatus = () => {
-          if (!ENTRY_MOMENTUM_GATE_ENABLED) return 'DISABLED';
-          if (!momentumTelemetry) return 'UNKNOWN';
-          if (momentumTelemetry.staleSource) return 'INDETERMINATE_STALE_SOURCE';
-          return momentumTelemetry.pass ? 'PASS' : 'FAIL';
-        };
-
-        // Ciclo 4: Execução na Jupiter Swap V2 Meta-Aggregator (Dry-Run ou Real).
-        // O teto de capital e a reserva foram calculados sobre o patrimônio total
-        // antes da seleção; a profundidade da pool escolhe o degrau final.
-        const SOL_MINT = 'So11111111111111111111111111111111111111112';
-
-        // Momentum de curtíssimo prazo: usa o micropreço disponível no sensor.
-        // Fonte congelada/indeterminada rejeita o pré-voo. M5 não substitui avanço vivo.
-        if (ENTRY_MOMENTUM_GATE_ENABLED) {
-          try {
-            const momentum = await observeEntryMomentum(
-              async () => 0,
-              {
-                samples: ENTRY_MOMENTUM_SAMPLES,
-                intervalMs: ENTRY_MOMENTUM_INTERVAL_MS,
-                minRisePct: ENTRY_MOMENTUM_MIN_RISE_PCT,
-                maxRisePct: ENTRY_MOMENTUM_MAX_RISE_PCT,
-                maxPullbackPct: ENTRY_MOMENTUM_MAX_PULLBACK_PCT
-              }
-            );
-            momentumTelemetry = momentum;
-
-            console.log(
-              `📈 [Momentum Gate:MICROPRICE] ${topCandidate.symbol}: alta=${momentum.risePct.toFixed(3)}% | ` +
-              `passos=${momentum.risingSteps}/${momentum.samples.length - 1} | stale=${momentum.staleSource} | ${momentum.reason}`
-            );
-
-            if (momentum.staleSource || !momentum.pass || momentum.risePct <= 0 || momentum.risePct < ENTRY_MOMENTUM_MIN_RISE_PCT || momentum.risingSteps < 1) {
-              const reason = momentum.staleSource
-                ? 'MOTIVO: Momentum pré-voo indeterminado ou fonte estagnada (STALE_SOURCE)'
-                : `MOMENTUM_GATE: ${momentum.reason}`;
-              antiSpamMemory.recordVeto(
-                topCandidate.mint,
-                reason,
-                Math.max(SCAN_INTERVAL_MS, 30_000)
-              );
-              journal.logDecision({
-                traceId: currentTraceId,
-                decision: 'ENTRY_REJECTED',
-                compositeScore: audit.score,
-                token: {
-                  mint: topCandidate.mint,
-                  tokenSymbol: topCandidate.symbol,
-                  liquidityUsd: topCandidate.liquidityUsd,
-                  priceUsd: topCandidate.priceUsd,
-                  priceChange5mPct: topCandidate.priceChangeM5,
-                  buysCount5m: topCandidate.buysM5,
-                  sellsCount5m: topCandidate.sellsM5,
-                  buySellRatio,
-                  volume5mUsd: topCandidate.volume5mUsd
-                },
-                market: {
-                  sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-                  sessionHourUtc: new Date().getUTCHours(),
-                  isWeekend: [0, 6].includes(new Date().getUTCDay())
-                },
-                gateEvaluations: gates,
-                rejectionReason: reason,
-                metadata: {
-                  phase: 'MOMENTUM_GATE',
-                  momentumSource: 'DEXSCREENER_PRICE',
-                  momentumStatus: momentum.staleSource ? 'REJECTED_STALE_SOURCE' : 'FAIL',
-                  momentumRisePct: momentum.risePct,
-                  momentumRisingSteps: momentum.risingSteps,
-                  momentumMaxPullbackPct: momentum.maxPullbackPct,
-                  momentumSamples: momentum.samples,
-                  layaStatus: 'NOT_CALLED_BLOCKED_BY_MOMENTUM'
-                }
-              });
-              continue;
-            }
-          } catch (momentumErr: any) {
-            const errText = momentumErr?.message || String(momentumErr);
-            const reason = `MOMENTUM_SOURCE_UNAVAILABLE: ${errText}`;
-            console.warn(`⚠️ [Momentum Gate:MICROPRICE] Falha ao observar ${topCandidate.symbol}: ${errText}`);
-            antiSpamMemory.recordVeto(
-              topCandidate.mint,
-              reason,
-              Math.max(SCAN_INTERVAL_MS, 30_000)
-            );
-            journal.logDecision({
-              traceId: currentTraceId,
-              decision: 'ENTRY_REJECTED',
-              compositeScore: audit.score,
-              token: {
-                mint: topCandidate.mint,
-                tokenSymbol: topCandidate.symbol,
-                liquidityUsd: topCandidate.liquidityUsd,
-                priceUsd: topCandidate.priceUsd
-              },
-              market: {
-                sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-                sessionHourUtc: new Date().getUTCHours()
-              },
-              gateEvaluations: gates,
-              rejectionReason: reason,
-              metadata: {
-                phase: 'MOMENTUM_GATE',
-                momentumSource: 'DEXSCREENER_PRICE',
-                momentumStatus: 'SOURCE_FAILED',
-                layaStatus: 'NOT_CALLED_MOMENTUM_SOURCE_FAILED'
-              }
-            });
-            continue;
-          }
-        }
-
-
-
-        const quoteParams = {
-          inputMint: SOL_MINT,
-          outputMint: topCandidate.mint,
-          slippageBps: 750,
-          autoSlippage: true,
-          poolLiquidityUsd: topCandidate.liquidityUsd,
-          // Colisao calibrada pela profundidade real da pool, em vez do valor
-          // fixo de 1000 USD que apertava demais o slippage em pools de 15k-100k.
-          maxAutoSlippageBps: 750,
-          trafficPriority: (topCandidate as any).hasSentinelPriorityBonus
-            ? priorityForJupiterWork('ENTRY_ORDER')
-            : priorityForJupiterWork('ENTRY_SIZING')
-        };
-
-        console.log(
-          `⚡ [3/3 Motor Jupiter V2] Dimensionando ${capitalPolicy.ladderSol.length} degrau(s) ` +
-          `proporcionais ao patrimônio (${(capitalPolicy.entryEquityPct * 100).toFixed(1)}% | hard-cap 750bps)...`
-        );
-
-        // Cada degrau mantém o mesmo orçamento de risco da banca e reduz o lote
-        // até o piso técnico. Isso permite encontrar uma execução <= 750 bps sem
-        // relaxar slippage ou inventar liquidez.
-        const economyLadderSol = capitalPolicy.ladderSol;
-
-        const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
-          ladderSol: economyLadderSol,
-          validate: async (_quote, sizeSol) => {
-            try {
-              const sim = await jupiterEngine.simulateSwap({
-                inputMint: SOL_MINT,
-                outputMint: topCandidate.mint,
-                amountLamports: Math.floor(sizeSol * 1e9),
-                autoSlippage: true,
-                poolLiquidityUsd: topCandidate.liquidityUsd,
-                maxAutoSlippageBps: 750,
-                skipPreflight: false,
-                userPublicKey: OFFICIAL_PHANTOM_WALLET,
-                keypair: getExecutionSigner(),
-                priorityLevel: 'medium',
-                forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
-                requiredPoolAddress: topCandidate.pairAddress,
-                trafficPriority: priorityForJupiterWork('ENTRY_SIZING')
-              }, _quote);
-              if (sim.success) {
-                console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao APROVADA (CU=${sim.unitsConsumed ?? 'n/d'})`);
-                return null;
-              }
-              console.log(`   [Escada] Degrau ${sizeSol} SOL: simulacao FALHOU -> ${sim.error}`);
-              return sim.error || 'SIMULATION_REJECTED';
-            } catch (err: any) {
-              console.warn(`   [Sizing] Pré-voo do lote ${sizeSol} SOL lançou exceção: ${err?.message || err}`);
-              return err?.message || 'exceção na simulação pré-voo';
-            }
-          }
-        });
-
-        if (!sizing.success || !sizing.quote) {
-          const failReason = sizing.error || 'INSUFFICIENT_POOL_DEPTH';
-          console.log(`🚫 [Dimensionamento Abortado] ${topCandidate.symbol}: ${failReason}`);
-          console.log(`   Degraus testados: ${sizing.attempts.map((a) => `${a.sizeSol}SOL(pi=${a.priceImpactPct.toFixed(2)}%${a.accepted ? ',ok' : ',rej'})`).join(' -> ')}`);
-          journal.logDecision({
-            traceId: currentTraceId,
-            decision: 'ENTRY_REJECTED',
-            compositeScore: audit.score,
-            token: {
-              mint: topCandidate.mint,
-              tokenSymbol: topCandidate.symbol,
-              liquidityUsd: topCandidate.liquidityUsd,
-              priceUsd: topCandidate.priceUsd
-            },
-            market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
-            gateEvaluations: gates,
-            rejectionReason: `${sizing.abortReason}: ${failReason}`,
-            metadata: {
-              phase: 'SIZING',
-              attempts: sizing.attempts,
-              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
-                  momentumStatus: getMomentumStatus(),
-              momentumRisePct: momentumTelemetry?.risePct ?? null,
-              momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
-              layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-              layaAction: layaEntryTelemetry?.action ?? null,
-              layaConfidence: layaEntryTelemetry?.confidence ?? null,
-              layaAbstention: layaEntryTelemetry?.abstention ?? null,
-              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
-            }
-          });
-          const sizingRetryMs = sizing.abortReason === 'SIMULATION_REJECTED'
-            || sizing.abortReason === 'QUOTE_UNAVAILABLE'
-            ? 2 * 60 * 1000
-            : 5 * 60 * 1000;
-          const sizingReason = `Sizing temporariamente inviável: ${failReason}`;
-          antiSpamMemory.recordVeto(topCandidate.mint, sizingReason, sizingRetryMs);
-          postgresRepo.saveQuarantine({
-            mint: topCandidate.mint,
-            symbol: topCandidate.symbol,
-            reason: sizingReason,
-            expiresAt: new Date(Date.now() + sizingRetryMs)
-          }).catch(() => {});
-          
-          console.log(`⏭️ Candidato #${candidateIndex + 1} falhou no dimensionamento. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
-          // Não marca como processado - continua loop para próximo candidato
-          continue;
-        }
-
-        if (referencesProgram(sizing.quote.rawQuote?.routePlan, PUMP_PROGRAM_ID.toBase58())) {
-          console.warn(`🚫 [Veto de Rota] ${topCandidate.symbol}: contrato explícito da bonding curve Pump.fun.`);
-          continue;
-        }
-
-        const dynamicAllocSol = sizing.sizeSol;
-        const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
-        console.log(`📐 Lote dimensionado e validado no pré-voo: ${dynamicAllocSol} SOL (${tradeLamports} lamports) (Price Impact ${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}%)`);
-        console.log(`   Escada percorrida: ${sizing.attempts.map((a) => `${a.sizeSol}SOL(${a.accepted ? 'ok' : 'rej'})`).join(' -> ')}`);
-
-        // ENTRY_APPROVED: hard gates e lote dinâmico validados; Laya apenas advisory.
-        journal.logDecision({
-          traceId: currentTraceId,
-          decision: 'ENTRY_APPROVED',
-          compositeScore: audit.score,
-          token: {
-            mint: topCandidate.mint,
-            tokenSymbol: topCandidate.symbol,
-            poolAddress: (topCandidate as any).pairAddress,
-            ageMinutes: candidateAgeMinutes,
-            liquidityUsd: topCandidate.liquidityUsd,
-            priceUsd: topCandidate.priceUsd,
-            priceChange5mPct: topCandidate.priceChangeM5,
-            buysCount5m: topCandidate.buysM5,
-            sellsCount5m: topCandidate.sellsM5,
-            buySellRatio,
-            volume5mUsd: topCandidate.volume5mUsd
-          },
-          market: {
-            sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-            sessionHourUtc: new Date().getUTCHours(),
-            isWeekend: [0, 6].includes(new Date().getUTCDay())
-          },
-          execution: {
-            sizeSol: dynamicAllocSol,
-            estimatedSlippagePct: 7.5
-          },
-          gateEvaluations: gates,
-          metadata: {
-            phase: 'READY_FOR_JUPITER_SWAP',
-            momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
-                  momentumStatus: getMomentumStatus(),
-            momentumRisePct: momentumTelemetry?.risePct ?? null,
-            momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
-            momentumMaxPullbackPct: momentumTelemetry?.maxPullbackPct ?? null,
-            layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-            layaAction: layaEntryTelemetry?.action ?? null,
-            layaConfidence: layaEntryTelemetry?.confidence ?? null,
-            layaAbstention: layaEntryTelemetry?.abstention ?? null,
-            layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null,
-            sizingAttempts: sizing.attempts,
-            priceImpactPct: sizing.quote.priceImpactPct
-          }
-        });
-
-        
-        console.log('--- SHADOW PRE FLIGHT (Fase 3 Quant) ---');
-        await shadowPreFlight.executeShadowCycle(topCandidate.mint);
-        console.log('----------------------------------------');
-
-console.log(`⚡ [3/3 Motor Jupiter Swap V2] Executando compra com RTSE + pré-voo fail-closed (${dynamicAllocSol} SOL | hard-cap 750bps)...`);
-        const entryAttemptStartedAt = Date.now();
-        let swapSim = await jupiterEngine.executeSwap({
-          inputMint: SOL_MINT,
-          outputMint: topCandidate.mint,
-          amountLamports: tradeLamports,
-          autoSlippage: true,
-                poolLiquidityUsd: topCandidate.liquidityUsd,
-          maxAutoSlippageBps: 750, // Teto seguro com margem de 750 bps contra erro 6014
-          skipPreflight: false, // Fail-closed: nunca transmite se a simulação rejeitar
-          forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
-          requiredPoolAddress: topCandidate.pairAddress,
-          userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: getExecutionSigner(),
-          trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
-        });
-
-        txSignature = swapSim.txSignature;
-        console.log(`   Status do Swap: ${swapSim.status}`);
-        if (swapSim.error) {
-          console.log(`   ⚠️ Erro Swap: ${swapSim.error}`);
-        }
-        console.log(`   Assinatura Tx: ${swapSim.txSignature || 'N/A'}`);
-        console.log(`   Retorno V2: ${swapSim.outAmount.toLocaleString()} unidades atômicas | router=${swapSim.router || 'n/d'} | slippage=${swapSim.slippageBps ?? 'n/d'}bps`);
-
-        if (swapSim.status === 'SUBMITTED_UNCONFIRMED') {
-          console.warn(
-            `⚠️ [Jupiter V2: RECONCILIAÇÃO DE ENTRADA] ${topCandidate.symbol}: ` +
-            'resposta /execute inconclusiva; procurando delta confirmado na wallet.'
-          );
-          const reconciled = await reconcileUncertainV2Execution(
-            topCandidate.mint,
-            entryAttemptStartedAt,
-            'IN'
-          );
-
-          if (reconciled) {
-            const receivedAtomic = Number(BigInt(reconciled.deltaAtomic));
-            if (Number.isSafeInteger(receivedAtomic) && receivedAtomic > 0) {
-              swapSim = {
-                ...swapSim,
-                status: 'SUCCESS',
-                txSignature: reconciled.signature,
-                outAmount: receivedAtomic,
-                error: undefined
-              };
-              txSignature = reconciled.signature;
-              console.log(
-                `✅ [Jupiter V2: ENTRADA RECONCILIADA ON-CHAIN] ${topCandidate.symbol} ` +
-                `| tx=${reconciled.signature} | recebido=${receivedAtomic} atomic`
-              );
-            }
-          }
-
-          if (swapSim.status === 'SUBMITTED_UNCONFIRMED') {
-            const reason =
-              `Entrada V2 inconclusiva em ${topCandidate.symbol} (${topCandidate.mint}); ` +
-              'novas entradas suspensas até reconciliação/restart seguro.';
-            executionUncertainReason = reason;
-            antiSpamMemory.recordVeto(topCandidate.mint, reason, 24 * 60 * 60 * 1000);
-            void postgresRepo.saveQuarantine({
-              mint: topCandidate.mint,
-              symbol: topCandidate.symbol,
-              reason,
-              expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
-            }).catch(() => {});
-            console.error(`🛑 [CIRCUIT BREAKER V2] ${reason}`);
-            return;
-          }
-        }
-
-        if (isHypotheticalExecution(swapSim)) {
-          console.log(`🧪 [SHADOW] Entrada hipotética ${topCandidate.symbol}; nenhuma posição ou PnL real registrado.`);
-          return;
-        }
-        if (swapSim.status === 'SUCCESS') {
-          // CORREÇÃO: Só adiciona posição se houver txid on-chain confirmado
-          if (!swapSim.txSignature) {
-            const reason = `JUPITER_SWAP_NO_TXID: status=${swapSim.status}`;
-            console.error(`🛑 [ENTRADA REJEITADA] Swap sem txid on-chain: ${topCandidate.symbol} | Status: ${swapSim.status}`);
-            antiSpamMemory.recordVeto(topCandidate.mint, reason, 60 * 60 * 1000);
-            journal.logDecision({
-              traceId: currentTraceId,
-              decision: 'ENTRY_REJECTED',
-              compositeScore: audit.score,
-              token: {
-                mint: topCandidate.mint,
-                tokenSymbol: topCandidate.symbol,
-                liquidityUsd: topCandidate.liquidityUsd,
-                priceUsd: topCandidate.priceUsd
-              },
-              market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
-              gateEvaluations: gates,
-              rejectionReason: reason,
-              metadata: {
-                phase: 'JUPITER_SWAP',
-                swapStatus: swapSim.status,
-                swapError: swapSim.error ?? null,
-                momentumRisePct: momentumTelemetry?.risePct ?? null,
-                layaAction: layaEntryTelemetry?.action ?? null,
-                layaConfidence: layaEntryTelemetry?.confidence ?? null
-              }
-            });
-            return;
-          }
-          
-          // Snapshot de Entrada (Contexto Inicial da Operação):
-          const nowTs = Date.now();
-          const confirmedEntrySol = swapSim.inAmount / 1e9;
-
-          // A quote Jupiter informa uma expectativa. Para posição REAL, a quantidade
-          // gerida deve vir do delta efetivamente confirmado na própria transação.
-          let managedEntryAtomic = Math.trunc(swapSim.outAmount);
-          if (!swapSim.isDryRun && swapSim.txSignature) {
-            const actualReceivedAtomic = await wallet.getReceivedTokenDeltaAtomic(
-              swapSim.txSignature,
-              topCandidate.mint
-            );
-            if (actualReceivedAtomic) {
-              managedEntryAtomic = assertAtomicAmountToNumber(actualReceivedAtomic);
-              if (managedEntryAtomic !== Math.trunc(swapSim.outAmount)) {
-                console.warn(
-                  `⚖️ [ENTRY:Reconciliação Imediata] ${topCandidate.symbol}: quote=${Math.trunc(swapSim.outAmount)} ` +
-                  `| recebido on-chain=${managedEntryAtomic} unidades atômicas.`
-                );
-              }
-            } else {
-              console.warn(
-                `⚠️ [ENTRY] ${topCandidate.symbol}: delta on-chain indisponível após confirmação; ` +
-                'mantendo outAmount cotado até a próxima reconciliação de custódia.'
-              );
-            }
-          }
-
-          // Só agora a aprovação entra no cache: a compra já foi confirmada pelo executor.
-          antiSpamMemory.recordApproval(topCandidate.mint, audit.score);
-          positionEngine.addPosition({
-            mint: topCandidate.mint,
-            symbol: topCandidate.symbol,
-            tokenAmount: managedEntryAtomic,
-            entryPriceUsd: topCandidate.priceUsd,
-            entryTimestamp: nowTs,
-            stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
-            takeProfitPct: 0.35, // +35% para colheita parcial 50%
-            entrySol: confirmedEntrySol,
-            entrySolValue: confirmedEntrySol,
-            entryLiquidityUsd: topCandidate.liquidityUsd,
-            entryVolume5m: topCandidate.volume5mUsd || 0,
-            entryPairAddress: topCandidate.pairAddress,
-            traceId: currentTraceId
-          });
-
-          // Ledger de execução real: somente este evento prova que a compra chegou
-          // ao executor. A aprovação anterior é pré-swap e não pode reidratar posição.
-          journal.logDecision({
-            traceId: currentTraceId,
-            decision: 'ENTRY_APPROVED',
-            compositeScore: audit.score,
-            token: {
-              mint: topCandidate.mint,
-              tokenSymbol: topCandidate.symbol,
-              poolAddress: (topCandidate as any).pairAddress,
-              ageMinutes: candidateAgeMinutes,
-              liquidityUsd: topCandidate.liquidityUsd,
-              priceUsd: topCandidate.priceUsd,
-              priceChange5mPct: topCandidate.priceChangeM5,
-              buysCount5m: topCandidate.buysM5,
-              sellsCount5m: topCandidate.sellsM5,
-              buySellRatio,
-              volume5mUsd: topCandidate.volume5mUsd
-            },
-            market: {
-              sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING',
-              sessionHourUtc: new Date().getUTCHours(),
-              isWeekend: [0, 6].includes(new Date().getUTCDay())
-            },
-            execution: {
-              sizeSol: confirmedEntrySol,
-              estimatedSlippagePct: (swapSim.slippageBps ?? 750) / 100
-            },
-            gateEvaluations: gates,
-            metadata: {
-              phase: 'ENTRY_EXECUTED',
-              gateEvidenceVersion: 2,
-              txSignature: swapSim.txSignature,
-              outAmountAtomic: String(managedEntryAtomic),
-              quotedOutAmountAtomic: String(Math.trunc(swapSim.outAmount)),
-              executionPath: swapSim.executionPath,
-              jupiterRouter: swapSim.router ?? null,
-              jupiterRequestId: swapSim.requestId ?? null,
-              jupiterFeeBps: swapSim.feeBps ?? null,
-              jupiterFeeMint: swapSim.feeMint ?? null,
-              jupiterSlippageBps: swapSim.slippageBps ?? null,
-              stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
-              takeProfitPct: 0.35,
-              entryTimestampMs: nowTs,
-              isDryRun: swapSim.isDryRun,
-              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
-                  momentumStatus: getMomentumStatus(),
-              momentumRisePct: momentumTelemetry?.risePct ?? null,
-              momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
-              momentumMaxPullbackPct: momentumTelemetry?.maxPullbackPct ?? null,
-              layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-              layaAction: layaEntryTelemetry?.action ?? null,
-              layaConfidence: layaEntryTelemetry?.confidence ?? null,
-              layaAbstention: layaEntryTelemetry?.abstention ?? null,
-              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
-            }
-          });
-
-          // Cria o trade OPEN imediatamente; a mesma linha será atualizada nas
-          // saídas via ON CONFLICT(trace_id). O flush aqui ocorre após a compra,
-          // portanto não adiciona latência ao envio on-chain e evita amnésia pós-restart.
-          journal.logOutcome({
-            traceId: currentTraceId,
-            mint: topCandidate.mint,
-            entryPriceUsd: topCandidate.priceUsd,
-            entrySizeSol: confirmedEntrySol,
-            entryTimestamp: new Date(nowTs),
-            // Slippage tolerance is not realized slippage; leave the latter unknown.
-            status: 'OPEN'
-          });
-          await journal.flush();
-
-          console.log(`📈 Posição em ${topCandidate.symbol} registrada no Gestor de Posições (Snapshot: Liq $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m $${(topCandidate.volume5mUsd || 0).toLocaleString()} | Alocação: ${dynamicAllocSol} SOL | SL: -12.5% | TP: +35%)`);
-          
-          // CORREÇÃO: Atualiza saldo imediatamente após compra
-          const newBalance = await wallet.getBalanceSol();
-          latestState.balanceSol = newBalance;
-          console.log(`💰 [SALDO ATUALIZADO] Novo saldo após compra: ${newBalance.toFixed(4)} SOL`);
-          
-          updateDashboardViews();
-
-          // Notificação assíncrona ao Cérebro & Telegram (não bloqueante)
-          cerebroService.notifyTradeEvent({
-            title: `Nova Entrada Executada (Sniper ${dynamicAllocSol} SOL)`,
-            symbol: topCandidate.symbol,
-            mint: topCandidate.mint,
-            action: `Compra na Jupiter V2 (${swapSim.router || 'router n/d'}) | Recebido: ${managedEntryAtomic.toLocaleString()} unidades atômicas`,
-            solValue: dynamicAllocSol,
-            txSignature: swapSim.txSignature,
-            detail: `Liq: $${topCandidate.liquidityUsd.toLocaleString()} | Vol5m: $${(topCandidate.volume5mUsd || 0).toLocaleString()}`
-          }).catch(() => {});
-          
-          // Marca candidato como processado com sucesso - não tenta próximo
-          candidateProcessed = true;
-        } else {
-          const failReason = swapSim.error || '0x177e (SlippageExceeded ou liquidez insuficiente)';
-          const swapVetoText = `Swap Jupiter falhou: ${failReason}`;
-          antiSpamMemory.recordVeto(topCandidate.mint, swapVetoText, 60 * 60 * 1000);
-          journal.logDecision({
-            traceId: currentTraceId,
-            decision: 'ENTRY_REJECTED',
-            compositeScore: audit.score,
-            token: {
-              mint: topCandidate.mint,
-              tokenSymbol: topCandidate.symbol,
-              liquidityUsd: topCandidate.liquidityUsd,
-              priceUsd: topCandidate.priceUsd,
-              priceChange5mPct: topCandidate.priceChangeM5
-            },
-            market: { sentinelRegime: (latestState.macroRegime as any) || 'NEUTRAL_RANGING' },
-            gateEvaluations: gates,
-            rejectionReason: swapVetoText,
-            metadata: {
-              phase: 'JUPITER_SWAP',
-              swapStatus: swapSim.status,
-              swapError: failReason,
-              txSignature: swapSim.txSignature || null,
-              momentumSource: ENTRY_MOMENTUM_GATE_ENABLED ? 'DEXSCREENER_PRICE' : 'DISABLED',
-                  momentumStatus: getMomentumStatus(),
-              momentumRisePct: momentumTelemetry?.risePct ?? null,
-              momentumRisingSteps: momentumTelemetry?.risingSteps ?? null,
-              layaMode: 'SHADOW',
-              layaStatus: layaEntryTelemetry?.status ?? (SOLANA_LAYA_TACTICAL_MODE === 'OFF' ? 'OFF' : 'NOT_CALLED'),
-              layaAction: layaEntryTelemetry?.action ?? null,
-              layaConfidence: layaEntryTelemetry?.confidence ?? null,
-              layaAbstention: layaEntryTelemetry?.abstention ?? null,
-              layaLatencyMs: layaEntryTelemetry?.latencyMs ?? null
-            }
-          });
-          // Persistência ativa no banco por 1 hora
-          postgresRepo.saveQuarantine({
-            mint: topCandidate.mint,
-            symbol: topCandidate.symbol,
-            reason: swapVetoText,
-            expiresAt: new Date(Date.now() + 60 * 60 * 1000)
-          }).catch(() => {});
-          // Registra falha no dashboard como auditoria com swapFailReason visivel
-          latestState.recentAudits[0] = { ...latestState.recentAudits[0], swapFailReason: failReason } as any;
-          
-          console.log(`⏭️ Swap falhou para candidato #${candidateIndex + 1}. ${candidateIndex + 1 < maxCandidatesToTry ? 'Tentando próximo candidato...' : 'Fim da fila de candidatos.'}`);
-          // Não marca como processado - continua loop para próximo candidato
-        }
-        
-        // Persistência no Postgres Central (Stateless Event Store) - dentro do loop
-        await postgresRepo.saveAudit({
-          mint: topCandidate.mint,
-          symbol: topCandidate.symbol,
-          name: topCandidate.name,
-          liquidityUsd: topCandidate.liquidityUsd,
-          priceUsd: topCandidate.priceUsd,
-          isSafe: audit.safe,
-          score: audit.score,
-          validatedBy: audit.validatedBy,
-          vetoReason: audit.reason || null,
-          dryRun: IS_DRY_RUN,
-          txSignature
-        });
-
-        latestState.recentAudits.unshift({
-          mint: topCandidate.mint,
-          symbol: topCandidate.symbol,
-          isSafe: audit.safe,
-          score: audit.score,
-          reason: audit.reason,
-          swapFailReason: undefined, // preenchido abaixo se o swap falhar
-          timestamp: Date.now()
-        } as any);
-        if (latestState.recentAudits.length > 20) latestState.recentAudits.pop();
-      } // fecha else do if (!audit.safe)
-      } // fecha for loop
-    } else { // fecha if (eligibleCandidates.length > 0)
-      console.log('💤 Nenhum token novo ou pendente. Todos os itens recentes já foram filtrados ou estão em quarentena.');
-    }
-
     // Ciclo 5: Reprodução Darwinista legada removida (projeto anterior)
 
     console.log(`✅ [${new Date().toLocaleTimeString()}] Ciclo finalizado com proteção integral.`);
@@ -2751,244 +1940,80 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
   sentinelActiveGraduations.add(mint);
   latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   try {
+    await token.assertLeaseActive();
     if (poolEvidence?.kind !== 'PHYSICAL_POOL_CONFIRMED') {
       await sentinelHandoffScanner.release(mint, leaseId, 'INVALID_POOL_PROOF');
       return;
     }
-    // Task 3 will supply independently sourced market metadata to the new 4D preflight.
-    // Physical reserve proof alone cannot supply USD price, liquidity, or pool creation age.
-    console.warn(`[SentinelHandoff] ${symbol}: DADOS_INSUFICIENTES; pool ${poolEvidence.poolAddress} confirmed at slot ${poolEvidence.slot}.`);
-    await sentinelHandoffScanner.release(mint, leaseId, 'DADOS_INSUFICIENTES');
+    const discovered = await scanner.fetchCandidate(mint, token.leaseSignal);
+    await token.assertLeaseActive();
+    if (!discovered?.symbol || !discovered.name || discovered.priceUsd === null ||
+        discovered.liquidityUsd === null) {
+      await sentinelHandoffScanner.release(mint, leaseId, 'DADOS_INSUFICIENTES');
+      return;
+    }
+    if (executionUncertainReason || latestState.circuitBreakerActive ||
+        positionEngine.getAllPositions().length >= MAX_CONCURRENT_POSITIONS ||
+        !exitPathHealth.snapshot().canOpenNewPosition) {
+      await sentinelHandoffScanner.release(mint, leaseId, 'ENTRY_CAPACITY_UNAVAILABLE');
+      return;
+    }
+    const balanceSol = await wallet.getBalanceSol();
+    await token.assertLeaseActive();
+    const activePositions = positionEngine.getAllPositions();
+    const capitalPolicy = buildEquitySizingPolicy({
+      cashBalanceSol: balanceSol,
+      positions: activePositions.map(p => ({ costBasisSol: Math.max(0, p.entrySol || 0),
+        executableValueSol: p.lastJupiterExecutableSolValue || p.entrySol })),
+      maxPositions: MAX_CONCURRENT_POSITIONS,
+      entryEquityPct: ENTRY_EQUITY_PCT,
+      maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
+      maxEntrySol: BUY_AMOUNT_SOL,
+      maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
+      minExecutableEntrySol: BUY_AMOUNT_SOL,
+      gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
+      minGasReserveSol: MIN_GAS_RESERVE_SOL,
+      maxGasReserveSol: MAX_GAS_RESERVE_SOL
+    });
+    if (!capitalPolicy.canOpenNextPosition || !capitalPolicy.ladderSol.length) {
+      await sentinelHandoffScanner.release(mint, leaseId, 'ENTRY_CAPITAL_UNAVAILABLE');
+      return;
+    }
+    const stakeLamports = Math.floor(capitalPolicy.ladderSol[0] * 1e9);
+    const candidate = { mint, symbol: discovered.symbol, name: discovered.name,
+      priceUsd: discovered.priceUsd, liquidityUsd: discovered.liquidityUsd,
+      pairAddress: poolEvidence.poolAddress };
+    const decision = await entryAdmission.attempt({ candidate, stakeLamports,
+      availableLamports: Math.floor(balanceSol * 1e9),
+      reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
+      poolHints: [poolEvidence.poolAddress, ...token.poolHints],
+      signal: token.leaseSignal,
+      lease: { mint, leaseId, assertLeaseActive: token.assertLeaseActive },
+      verifySecurity: async facts => {
+        const audit = await entryGatekeeper.auditToken({ mint: facts.mint,
+          pairAddress: facts.pairAddress, liquidityUsd: facts.liquidityUsd,
+          priceUsd: facts.priceUsd });
+        return { safe: audit.safe, reason: audit.reason };
+      } });
+    await token.assertLeaseActive();
+    if (!decision.accepted) {
+      await sentinelHandoffScanner.release(mint, leaseId, decision.reason);
+      return;
+    }
+    // Acknowledgement is fenced and only follows a durable SHADOW entry receipt.
+    await token.assertLeaseActive();
+    if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId))
+      console.warn(`[SentinelHandoff] ${symbol}: durable registration complete, ACK failed.`);
+  } catch (error) {
+    const reason = token.leaseSignal.aborted ||
+      (error instanceof Error && error.message === 'LEASE_LOST')
+      ? 'LEASE_LOST' : 'HANDOFF_PROCESSING_FAILED';
+    await sentinelHandoffScanner.release(mint, leaseId, reason);
   } finally {
     sentinelActiveGraduations.delete(mint);
     latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   }
 }
-
-
-/**
- * Executa a tentativa de entrada para um candidato pré-auditado pelo Sentinel.
- * Reutiliza a lógica de capital, sizing e execução Jupiter do ciclo normal,
- * com um gate MATURITY_AGE bypass explícito para tokens desta origem.
- */
-async function executeSentinelEntryCandidate(
-  topCandidate: {
-    mint: string; symbol: string; name: string; priceUsd: number;
-    liquidityUsd: number; volume24hUsd: number; volume5mUsd?: number;
-    buysM5?: number; sellsM5?: number; pairCreatedAt: number; dexId: string;
-    priceChangeM5?: number; pairAddress?: string; isSentinelPreAudited?: true;
-  },
-  sentinelToken: SentinelHandoffToken
-): Promise<void> {
-  // Guarda de concorrência: não abre nova posição se já no teto ou circuit breaker ativo
-  if (executionUncertainReason) return;
-  if (positionEngine.getAllPositions().length >= MAX_CONCURRENT_POSITIONS) {
-    console.log(`[SentinelHandoff] ${topCandidate.symbol}: teto de concorrência atingido, pulando.`);
-    return;
-  }
-  if (latestState.circuitBreakerActive) {
-    console.log(`[SentinelHandoff] ${topCandidate.symbol}: circuit breaker ativo, pulando.`);
-    return;
-  }
-
-  console.log(
-    `[SentinelHandoff] Auditando ${topCandidate.symbol} via RugCheck ` +
-    `(bypass MATURITY_AGE ativo — pre-auditado na bonding curve pelo Sentinel).`
-  );
-
-  // Auditoria completa via RugCheck + MemeRiskGatekeeper (sem bypass de risco — apenas de idade)
-  const audit = await entryGatekeeper.auditToken({
-    mint: topCandidate.mint,
-    pairAddress: topCandidate.pairAddress,
-    liquidityUsd: topCandidate.liquidityUsd,
-    priceChangeM5: topCandidate.priceChangeM5,
-    buysM5: topCandidate.buysM5,
-    sellsM5: topCandidate.sellsM5,
-    priceUsd: topCandidate.priceUsd
-  });
-
-  if (!audit.safe) {
-    console.warn(`[SentinelHandoff] ${topCandidate.symbol}: vetado pela auditoria de risco: ${audit.reason}`);
-    antiSpamMemory.recordVeto(topCandidate.mint, audit.reason || 'SentinelHandoff: veto RugCheck', 60 * 60 * 1000);
-    return;
-  }
-
-  console.log(`[SentinelHandoff] ${topCandidate.symbol}: aprovado pelo RugCheck (score=${audit.score}). Dimensionando entrada...`);
-
-  const balanceSol = await wallet.getBalanceSol();
-  const activePositions = positionEngine.getAllPositions();
-  const capitalPolicy = buildEquitySizingPolicy({
-    cashBalanceSol: balanceSol,
-    positions: activePositions.map(p => ({ costBasisSol: Math.max(0, p.entrySol || 0), executableValueSol: p.lastJupiterExecutableSolValue || p.entrySol })),
-    maxPositions: MAX_CONCURRENT_POSITIONS,
-    entryEquityPct: ENTRY_EQUITY_PCT,
-    maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
-    maxEntrySol: BUY_AMOUNT_SOL,
-    maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
-    minExecutableEntrySol: BUY_AMOUNT_SOL,
-    gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
-    minGasReserveSol: MIN_GAS_RESERVE_SOL,
-    maxGasReserveSol: MAX_GAS_RESERVE_SOL
-  });
-
-  if (!capitalPolicy.canOpenNextPosition) {
-    console.log(`[SentinelHandoff] ${topCandidate.symbol}: capital insuficiente para nova entrada.`);
-    return;
-  }
-
-
-
-  const quoteParams = {
-    inputMint: SOL_MINT_GLOBAL,
-    outputMint: topCandidate.mint,
-    slippageBps: 750,
-    autoSlippage: true,
-    poolLiquidityUsd: topCandidate.liquidityUsd,
-    maxAutoSlippageBps: 750,
-    trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
-  };
-
-  const sizing = await adaptiveSizer.findExecutableSize(quoteParams, {
-    ladderSol: capitalPolicy.ladderSol,
-    validate: async (_quote, sizeSol) => {
-      try {
-        const sim = await jupiterEngine.simulateSwap({
-          inputMint: SOL_MINT_GLOBAL,
-          outputMint: topCandidate.mint,
-          amountLamports: Math.floor(sizeSol * 1e9),
-          forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
-          requiredPoolAddress: topCandidate.pairAddress,
-          autoSlippage: true,
-          poolLiquidityUsd: topCandidate.liquidityUsd,
-          maxAutoSlippageBps: 750,
-          skipPreflight: false,
-          userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: getExecutionSigner(),
-          priorityLevel: 'medium',
-          trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
-        }, _quote);
-        return sim.success ? null : (sim.error || 'SIMULATION_REJECTED');
-      } catch (err: any) {
-        return err?.message || 'excecao na simulacao pre-voo';
-      }
-    }
-  });
-
-  if (!sizing.success || !sizing.quote) {
-    console.log(`[SentinelHandoff] ${topCandidate.symbol}: dimensionamento falhou — ${sizing.error || 'pool rasa'}.`);
-    antiSpamMemory.recordTechnicalDiscard(topCandidate.mint, `Sentinel: sizing falhou: ${sizing.error || 'pool rasa'}`, 2);
-    return;
-  }
-
-  // Migrated AMMs are eligible; only the explicit bonding curve program is forbidden.
-  if (referencesProgram(sizing.quote.rawQuote?.routePlan, PUMP_PROGRAM_ID.toBase58())) {
-    console.warn(`[SentinelHandoff] ${topCandidate.symbol}: contrato Bonding Curve vetado. Entrada abortada.`);
-    return;
-  }
-
-  const dynamicAllocSol = sizing.sizeSol;
-  const tradeLamports = Math.floor(dynamicAllocSol * 1e9);
-  const traceId = randomUUID();
-  console.log(
-    `[SentinelHandoff] Executando swap Graduation Dip — ${topCandidate.symbol} | ` +
-    `${dynamicAllocSol} SOL (${tradeLamports} lamports) | impact=${Math.abs(sizing.quote.priceImpactPct || 0).toFixed(3)}% | traceId=${traceId}`
-  );
-
-  const swapResult = await jupiterEngine.executeSwap({
-    inputMint: SOL_MINT_GLOBAL,
-    outputMint: topCandidate.mint,
-    amountLamports: tradeLamports,
-    forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
-    requiredPoolAddress: topCandidate.pairAddress,
-    autoSlippage: true,
-    poolLiquidityUsd: topCandidate.liquidityUsd,
-    maxAutoSlippageBps: 750,
-    skipPreflight: false,
-    userPublicKey: OFFICIAL_PHANTOM_WALLET,
-    keypair: getExecutionSigner(),
-    trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
-  });
-
-  if (swapResult.status !== 'SUCCESS' && swapResult.status !== 'DRY_RUN_SUCCESS') {
-    console.error(`[SentinelHandoff] ${topCandidate.symbol}: swap falhou — ${swapResult.error || swapResult.status}`);
-    antiSpamMemory.recordVeto(topCandidate.mint, `Sentinel swap falhou: ${swapResult.status}`, 10 * 60 * 1000);
-    return;
-  }
-
-  if (isHypotheticalExecution(swapResult)) {
-    console.log(`[SentinelHandoff] Entrada hipotética ${topCandidate.symbol}; nenhuma posição real registrada.`);
-    return;
-  }
-
-  let managedAtomic = Math.trunc(swapResult.outAmount);
-  if (!swapResult.isDryRun && swapResult.txSignature) {
-    const actualDelta = await wallet.getReceivedTokenDeltaAtomic(swapResult.txSignature, topCandidate.mint);
-    if (actualDelta) managedAtomic = assertAtomicAmountToNumber(actualDelta);
-  }
-
-  const nowTs = Date.now();
-  const confirmedEntrySol = swapResult.inAmount / 1e9;
-
-  // Registra a posição no PositionExitEngine com a Escada 4D completa do Padrão Ouro
-  positionEngine.addPosition({
-    mint: topCandidate.mint,
-    symbol: topCandidate.symbol,
-    tokenAmount: managedAtomic,
-    entryPriceUsd: topCandidate.priceUsd,
-    entrySol: confirmedEntrySol,
-    stopLossPct: PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
-    takeProfitPct: PositionExitEngine.TP1_TRIGGER_PCT,
-    entryTimestamp: nowTs,
-    traceId,
-    initialTokenAmount: managedAtomic,
-    entryPairAddress: topCandidate.pairAddress
-  });
-
-  // A durable handoff is consumed only after a real position exists locally.
-  if (!await sentinelHandoffScanner.acknowledgeAccepted(topCandidate.mint, sentinelToken.leaseId)) {
-    console.error(`[SentinelHandoff] ${topCandidate.symbol}: posição registrada, mas ACK durável falhou.`);
-  }
-
-  journal.logDecision({
-    traceId,
-    decision: 'ENTRY_APPROVED',
-    compositeScore: audit.score,
-    token: {
-      mint: topCandidate.mint,
-      tokenSymbol: topCandidate.symbol,
-      poolAddress: topCandidate.pairAddress,
-      ageMinutes: Math.round((nowTs - topCandidate.pairCreatedAt) / 60000),
-      liquidityUsd: topCandidate.liquidityUsd,
-      priceUsd: topCandidate.priceUsd,
-      priceChange5mPct: topCandidate.priceChangeM5,
-      volume5mUsd: topCandidate.volume5mUsd
-    },
-    market: { sentinelRegime: latestState.macroRegime as any || 'NEUTRAL_RANGING' },
-    execution: { sizeSol: sizing.sizeSol, estimatedSlippagePct: 7.5 },
-    gateEvaluations: [
-      // MATURITY_AGE: bypass documentado — token pre-auditado na bonding curve pelo Sentinel
-      DecisionLogger.evaluateGate('MATURITY_AGE', true, 0, 0),
-      DecisionLogger.evaluateGate('RUG_CHECK', audit.safe, audit.score, 80, audit.reason || undefined),
-      DecisionLogger.evaluateGate('LIQUIDITY_THRESHOLD', topCandidate.liquidityUsd >= 15000, topCandidate.liquidityUsd, 15000),
-      DecisionLogger.evaluateGate('SLOT_AVAILABILITY', positionEngine.getAllPositions().length <= MAX_CONCURRENT_POSITIONS, positionEngine.getAllPositions().length, MAX_CONCURRENT_POSITIONS),
-    ],
-    metadata: {
-      phase: 'ENTRY_EXECUTED',
-      txSignature: swapResult.txSignature,
-      isDryRun: swapResult.isDryRun,
-      sentinelHandoff: true,
-      layaScore: sentinelToken.layaScore,
-      devWallet: sentinelToken.devWallet,
-      graduationDipAgeMs: nowTs - sentinelToken.createdAt.getTime()
-    }
-  });
-
-  console.log(
-    `[SentinelHandoff] Posicao Graduation Dip aberta com sucesso: ${topCandidate.symbol} ` +
-    `| ${managedAtomic} unidades atomicas | tx=${swapResult.txSignature || 'DRY_RUN'}`
-  );
-}
-
 async function main() {
   console.log('====================================================');
   console.log('🚀 NEXUS QUANT SOLANA - INICIALIZANDO SERVIÇO 24/7');

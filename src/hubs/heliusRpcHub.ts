@@ -21,7 +21,7 @@ const fault = (kind: FaultKind, message: string): Fault => {
   return error;
 };
 const isFault = (value: unknown): value is Fault => typeof value === 'object' && value !== null && internalFaults.has(value);
-const common = new Set(['getAccountInfo', 'getMultipleAccounts', 'getBlockTime', 'getTokenSupply', 'getTokenLargestAccounts', 'getBalance', 'getTokenAccountsByOwner', 'getRecentPrioritizationFees', 'getMinimumBalanceForRentExemption']);
+const common = new Set(['getAccountInfo', 'getMultipleAccounts', 'getSlot', 'getBlockTime', 'getTokenSupply', 'getTokenLargestAccounts', 'getBalance', 'getTokenAccountsByOwner', 'getRecentPrioritizationFees', 'getMinimumBalanceForRentExemption']);
 export const criticalRpcMethods = new Set(['getLatestBlockhash', 'simulateTransaction', 'getSignatureStatuses', 'getTransaction', 'getSignaturesForAddress', 'getBlockHeight', 'sendTransaction']);
 const cacheable = new Set(['getAccountInfo', 'getMultipleAccounts', 'getTokenSupply']);
 function knownCacheResult(method: string, result: unknown): boolean {

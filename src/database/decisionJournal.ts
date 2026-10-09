@@ -80,7 +80,8 @@ export interface TokenContext {
 }
 
 export interface MarketContext {
-  sentinelRegime: SentinelRegime;
+  /** Null means no macro provider is in this entry decision path. */
+  sentinelRegime: SentinelRegime | null;
   btcTrend?: string;
   solTrend?: string;
   sessionHourUtc?: number;

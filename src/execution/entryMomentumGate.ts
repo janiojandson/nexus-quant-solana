@@ -9,6 +9,23 @@ export interface EntryMomentumGateConfig {
 export interface EntryMomentumSample {
   timestamp: number;
   priceUsd: number;
+  latencyMs?: number;
+  requestedAtMs?: number;
+  completedAtMs?: number;
+}
+
+export interface EntryMomentumQuote {
+  inputAmountAtomic: string;
+  outputAmountAtomic: string;
+  tokenDecimals: number;
+  /** Local monotonic observation time at the response boundary. */
+  observedAtMs: number;
+}
+
+export interface MomentumClock {
+  now(): number;
+  wallNow(): number;
+  sleep(ms: number): Promise<void>;
 }
 
 export interface EntryMomentumResult {
@@ -23,7 +40,7 @@ export interface EntryMomentumResult {
 
 export const DEFAULT_ENTRY_MOMENTUM_CONFIG: EntryMomentumGateConfig = {
   samples: 4,
-  intervalMs: 1500,
+  intervalMs: 500,
   minRisePct: 0.40,
   maxRisePct: 4.00,
   maxPullbackPct: 0.30
@@ -38,7 +55,7 @@ export function evaluateEntryMomentum(
   samples: EntryMomentumSample[],
   config: EntryMomentumGateConfig
 ): EntryMomentumResult {
-  if (samples.length < 3 || samples.some(sample => !Number.isFinite(sample.priceUsd) || sample.priceUsd <= 0)) {
+  if (samples.length !== config.samples || samples.some(sample => !Number.isFinite(sample.priceUsd) || sample.priceUsd <= 0)) {
     return {
       pass: false,
       risePct: 0,
@@ -69,16 +86,16 @@ export function evaluateEntryMomentum(
 
   let maxPullbackPct = 0;
   let risingSteps = 0;
+  let peak = first;
   for (let i = 1; i < samples.length; i++) {
     const previous = samples[i - 1].priceUsd;
     const current = samples[i].priceUsd;
     if (current > previous) risingSteps++;
-    if (current < previous) {
-      maxPullbackPct = Math.max(maxPullbackPct, ((previous - current) / previous) * 100);
-    }
+    peak = Math.max(peak, current);
+    maxPullbackPct = Math.max(maxPullbackPct, ((peak - current) / peak) * 100);
   }
 
-  const requiredRisingSteps = Math.ceil((samples.length - 1) * 0.67);
+  const requiredRisingSteps = Math.ceil(2 * (samples.length - 1) / 3);
   let reason = 'Momentum de alta confirmado pela fonte de micropreço.';
   let pass = true;
 
@@ -101,22 +118,42 @@ export function evaluateEntryMomentum(
 }
 
 export async function observeEntryMomentum(
-  getPriceUsd: () => Promise<number | null>,
-  config: EntryMomentumGateConfig = DEFAULT_ENTRY_MOMENTUM_CONFIG
+  getQuote: (deadlineMs: number, signal?: AbortSignal) => Promise<EntryMomentumQuote | null>,
+  config: EntryMomentumGateConfig = DEFAULT_ENTRY_MOMENTUM_CONFIG,
+  clock: MomentumClock = { now: () => performance.now(), wallNow: () => Date.now(), sleep },
+  signal?: AbortSignal
 ): Promise<EntryMomentumResult> {
   const samples: EntryMomentumSample[] = [];
-
+  const begin = clock.now();
+  const toleranceMs = Math.max(100, config.intervalMs * 0.2);
+  const invalid = (reason: string): EntryMomentumResult => ({
+    pass: false, risePct: 0, maxPullbackPct: 0, risingSteps: 0,
+    staleSource: reason === 'STALE_SOURCE', reason, samples
+  });
   for (let i = 0; i < config.samples; i++) {
-    const priceUsd = await getPriceUsd();
-    if (!priceUsd || !Number.isFinite(priceUsd) || priceUsd <= 0) {
-      return evaluateEntryMomentum(samples, config);
-    }
-    samples.push({ timestamp: Date.now(), priceUsd });
-
-    if (i < config.samples - 1) {
-      await sleep(config.intervalMs);
-    }
+    if (signal?.aborted) return invalid('ABORTED');
+    const target = begin + i * config.intervalMs;
+    if (clock.now() < target) await clock.sleep(target - clock.now());
+    const started = clock.now();
+    if (signal?.aborted) return invalid('ABORTED');
+    if (started > target + toleranceMs) return invalid('LATE_SAMPLE');
+    const quote = await getQuote(clock.wallNow() + Math.max(1, target + toleranceMs - started), signal);
+    const ended = clock.now();
+    if (signal?.aborted) return invalid('ABORTED');
+    if (ended > target + toleranceMs) return invalid('LATE_SAMPLE');
+    if (!quote || !/^\d+$/.test(quote.inputAmountAtomic) || !/^\d+$/.test(quote.outputAmountAtomic) ||
+        !Number.isInteger(quote.tokenDecimals) || quote.tokenDecimals < 0 || quote.tokenDecimals > 18)
+      return invalid('INVALID_QUOTE');
+    const input = BigInt(quote.inputAmountAtomic);
+    const output = BigInt(quote.outputAmountAtomic);
+    if (input <= 0n || output <= 0n || input > BigInt(Number.MAX_SAFE_INTEGER) || output > BigInt(Number.MAX_SAFE_INTEGER))
+      return invalid('INVALID_QUOTE');
+    if (!Number.isFinite(quote.observedAtMs) || quote.observedAtMs < started - toleranceMs || quote.observedAtMs > ended)
+      return invalid('STALE_SOURCE');
+    const priceSolPerToken = Number(input) / 1e9 / (Number(output) / 10 ** quote.tokenDecimals);
+    if (!Number.isFinite(priceSolPerToken) || priceSolPerToken <= 0) return invalid('INVALID_QUOTE');
+    samples.push({ timestamp: ended, priceUsd: priceSolPerToken, latencyMs: ended - started,
+      requestedAtMs: started, completedAtMs: ended });
   }
-
   return evaluateEntryMomentum(samples, config);
 }

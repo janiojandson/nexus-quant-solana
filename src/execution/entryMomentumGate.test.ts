@@ -53,11 +53,13 @@ test('EntryMomentumGate: rejeita pullback excessivo durante a sequência', () =>
 });
 
 test('observeEntryMomentum: coleta preços sem executar transação', async () => {
-  const prices = [1.0000, 1.0040, 1.0080, 1.0120];
+  const outputs = [1000000, 996016, 992063, 988142];
   let calls = 0;
+  let t = 0;
   const result = await observeEntryMomentum(
-    async () => prices[calls++] ?? null,
-    { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 0 }
+    async () => ({ inputAmountAtomic: '1000000000', outputAmountAtomic: String(outputs[calls++]), tokenDecimals: 6, observedAtMs: t }),
+    { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 500 },
+    { now: () => t, wallNow: () => 1000 + t, sleep: async ms => { t += ms; } }
   );
 
   assert.strictEqual(calls, 4);
@@ -72,4 +74,42 @@ test('EntryMomentumGate: identifica fonte congelada como indeterminada, não com
   assert.strictEqual(result.pass, false);
   assert.strictEqual(result.staleSource, true);
   assert.match(result.reason, /sem atualização|indeterminado/i);
+});
+
+test('four quote observations use absolute 500 ms starts, positive amounts, and no final sleep', async () => {
+  let t = 0;
+  const starts: number[] = [];
+  const output = [1000000, 997009, 998004, 995025]; // SOL/token: 100, 100.3, 100.2, 100.5
+  const result = await observeEntryMomentum(async (deadlineMs) => {
+    starts.push(t);
+    assert.ok(deadlineMs > 1000);
+    const observedAtMs = t;
+    t += 20;
+    return { inputAmountAtomic: '1000000000', outputAmountAtomic: String(output[starts.length - 1]), tokenDecimals: 6, observedAtMs };
+  }, { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 500 }, {
+    now: () => t, wallNow: () => 1000 + t, sleep: async ms => { t += ms; }
+  });
+  assert.deepEqual(starts, [0, 500, 1000, 1500]);
+  assert.equal(t, 1520);
+  assert.equal(result.pass, true);
+  assert.deepEqual(result.samples.map(s => s.latencyMs), [20, 20, 20, 20]);
+  assert.deepEqual(result.samples.map(s => [s.requestedAtMs, s.completedAtMs]),
+    [[0,20],[500,520],[1000,1020],[1500,1520]]);
+});
+
+test('late or nonpositive quote rejects instead of inventing a momentum pass', async () => {
+  let t = 0;
+  const clock = { now: () => t, wallNow: () => 1000 + t, sleep: async (ms: number) => { t += ms; } };
+  const late = await observeEntryMomentum(async () => {
+    t += 250;
+    return { inputAmountAtomic: '1000000000', outputAmountAtomic: '1000000', tokenDecimals: 6, observedAtMs: t };
+  }, { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 500 }, clock);
+  assert.equal(late.pass, false);
+  assert.match(late.reason, /LATE_SAMPLE/);
+  t = 0;
+  const zero = await observeEntryMomentum(async () => ({
+    inputAmountAtomic: '1000000000', outputAmountAtomic: '0', tokenDecimals: 6, observedAtMs: t
+  }), { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: 500 }, clock);
+  assert.equal(zero.pass, false);
+  assert.match(zero.reason, /INVALID_QUOTE/);
 });
