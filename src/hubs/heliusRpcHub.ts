@@ -307,10 +307,6 @@ export class HeliusRpcHub {
   private parse(response: RpcResponse, key: KeyState): unknown {
     if (!response || typeof response.status !== 'number')
       throw fault('transient', 'malformed provider response');
-    if (response.status === 401 || response.status === 403) {
-      key.disabled = true;
-      throw fault('auth', 'credential disabled by provider');
-    }
     let body: Record<string, unknown> | undefined;
     let rpcError: Record<string, unknown> | undefined;
     let message = typeof response.body === 'string' ? response.body.toLowerCase() : '';
@@ -324,6 +320,10 @@ export class HeliusRpcHub {
     if (/max usage reached|credits? exhausted/.test(message)) {
       this.groups.get(key.credential.quotaGroupId)!.disabled = true;
       throw fault('monthly', 'monthly quota group exhausted');
+    }
+    if (response.status === 401 || response.status === 403) {
+      key.disabled = true;
+      throw fault('auth', 'credential disabled by provider');
     }
     if (response.status === 429) {
       const now = this.runtime.now();

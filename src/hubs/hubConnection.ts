@@ -22,15 +22,21 @@ export function createHubConnection(hub: Pick<HeliusRpcHub,'call'>, policy: HubC
   return new Proxy(connection,{get(target,prop){
     if (typeof prop==='string' && subscriptions.has(prop) && !policy.observerWsEndpoint) return () => {throw new Error('Unmanaged RPC subscriptions disabled');};
     // web3 confirmation implicitly subscribes; poll through the hub instead.
-    if (prop==='confirmTransaction') return async (strategy: string | {signature:string;lastValidBlockHeight?:number;abortSignal?:AbortSignal}) => {
+    if (prop==='confirmTransaction') return async (strategy: string | {signature:string;lastValidBlockHeight?:number;abortSignal?:AbortSignal}, commitment?: string) => {
       if(policy.stateOnly) throw new Error('CRITICAL RPC forbidden for observer role');
+      const requested=commitment ?? 'confirmed';
+      if(requested!=='processed' && requested!=='confirmed' && requested!=='finalized') throw new Error('Unsupported confirmation commitment');
+      if(typeof strategy!=='string' && strategy.lastValidBlockHeight===undefined) throw new Error('Unsupported confirmation strategy');
       const signature=typeof strategy==='string' ? strategy : strategy.signature;
       const deadline=Date.now()+30000;
       while(Date.now()<deadline){
         if(typeof strategy!=='string' && strategy.abortSignal?.aborted) throw new Error('Confirmation aborted');
         const result=await target.getSignatureStatuses([signature],{searchTransactionHistory:true});
         const status=result.value[0];
-        if(status && (status.err || status.confirmationStatus==='confirmed' || status.confirmationStatus==='finalized')) return {context:result.context,value:{err:status.err}};
+        if(status && (status.confirmationStatus==='finalized' ||
+          (requested!=='finalized' && status.confirmationStatus==='confirmed') ||
+          (requested==='processed' && status.confirmationStatus==='processed')))
+          return {context:result.context,value:{err:status.err ?? null}};
         if(typeof strategy!=='string' && strategy.lastValidBlockHeight!==undefined && await target.getBlockHeight('confirmed')>strategy.lastValidBlockHeight) throw new Error('Transaction confirmation expired');
         await new Promise(resolve=>setTimeout(resolve,1000));
       }

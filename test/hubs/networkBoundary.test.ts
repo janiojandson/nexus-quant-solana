@@ -44,3 +44,35 @@ test('plain-text monthly quota disables the whole group without retry', async ()
   await assert.rejects(hub.call('STATE','getTokenSupply',[]), (e:any) => e.kind==='monthly');
   assert.equal(calls,1); assert.equal(hub.snapshot().groups.disabled,1);
 });
+test('HTTP 403 monthly exhaustion disables sibling credentials in the same quota group', async () => {
+  const calls: string[] = [];
+  const hub = new HeliusRpcHub([
+    {id:'critical',apiKey:'critical-key',quotaGroupId:'shared',role:'CRITICAL',rps:5},
+    {id:'state',apiKey:'state-key',quotaGroupId:'shared',role:'STATE',rps:5},
+  ], [{id:'shared',rps:5}], async key => {
+    calls.push(key.id);
+    return {status:403,headers:new Headers(),body:'Max usage reached'};
+  }, runtime);
+  await assert.rejects(hub.call('STATE','getBalance',[]), (error:any) => error.kind === 'monthly');
+  await assert.rejects(hub.call('CRITICAL','getBlockHeight',[]), (error:any) => error.kind === 'monthly');
+  assert.equal(hub.snapshot().groups.disabled,1);
+  assert.deepEqual(calls,['state']);
+});
+test('ordinary HTTP authentication failures disable only the selected credential', async () => {
+  for (const status of [401,403]) {
+    const calls: string[] = [];
+    const hub = new HeliusRpcHub([
+      {id:'first',apiKey:'first-key',quotaGroupId:'shared',role:'STATE',rps:5},
+      {id:'second',apiKey:'second-key',quotaGroupId:'shared',role:'STATE',rps:5},
+    ], [{id:'shared',rps:5}], async key => {
+      calls.push(key.id);
+      return key.id === 'first'
+        ? {status,headers:new Headers(),body:'Permission denied'}
+        : {status:200,headers:new Headers(),body:{jsonrpc:'2.0',result:7}};
+    }, runtime, {allowedRoles:['STATE']});
+    await assert.rejects(hub.call('STATE','getBalance',[]), (error:any) => error.kind === 'auth');
+    assert.equal(await hub.call('STATE','getBalance',[]),7);
+    assert.equal(hub.snapshot().groups.disabled,0);
+    assert.deepEqual(calls,['first','second']);
+  }
+});
