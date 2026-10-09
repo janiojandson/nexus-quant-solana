@@ -1,8 +1,11 @@
 import { Keypair, Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
+import { resolveExecutionMode, type ExecutionEnvironment } from '../execution/executionMode.js';
 
 export interface WalletServiceConfig {
-  secretKeyRaw: string;
+  secretKeyRaw?: string;
+  publicKey?: string;
+  executionEnv?: ExecutionEnvironment;
   rpcUrl?: string;
   rpcUrls?: string[];
 }
@@ -78,14 +81,22 @@ export function createResilientConnection(urls: string[]): Connection {
 }
 
 export class SolanaWalletService {
-  private keypair: Keypair;
+  private keypair?: Keypair;
+  private publicKey: PublicKey;
+  private executionEnv: ExecutionEnvironment;
   private connection: Connection;
   private lastKnownBalanceSol: number = 0;
   public static readonly MAX_TRADE_ALLOCATION_RATIO = 0.10; // Teto de 10%
   public static readonly MIN_GAS_RESERVE_SOL = 0.005; // Reserva intangível para taxas
 
   constructor(config: WalletServiceConfig) {
-    this.keypair = this.parseKeypair(config.secretKeyRaw);
+    this.executionEnv = config.executionEnv ?? process.env;
+    if (resolveExecutionMode(this.executionEnv).shadow) {
+      this.publicKey = new PublicKey(config.publicKey || 'FBx2SKLDLsdeLM8owxU8MNVPKAfJpLpmpHHRgiZDqBoi');
+    } else {
+      this.keypair = this.parseKeypair(config.secretKeyRaw || '');
+      this.publicKey = this.keypair.publicKey;
+    }
     const candidateUrls = [
       ...(config.rpcUrls || []),
       ...(config.rpcUrl ? [config.rpcUrl] : []),
@@ -125,10 +136,13 @@ export class SolanaWalletService {
   }
 
   public getPublicKey(): string {
-    return this.keypair.publicKey.toBase58();
+    return this.publicKey.toBase58();
   }
 
   public getKeypair(): Keypair {
+    if (!resolveExecutionMode(this.executionEnv).canSign || !this.keypair) {
+      throw new Error('Signer unavailable in shadow mode.');
+    }
     return this.keypair;
   }
 
@@ -138,7 +152,7 @@ export class SolanaWalletService {
 
   public async getBalanceSol(): Promise<number> {
     try {
-      const lamports = await this.connection.getBalance(this.keypair.publicKey);
+      const lamports = await this.connection.getBalance(this.publicKey);
       const bal = lamports / LAMPORTS_PER_SOL;
       this.lastKnownBalanceSol = bal;
       return bal;
@@ -182,7 +196,7 @@ export class SolanaWalletService {
       });
       if (!tx?.meta) return null;
 
-      const owner = this.keypair.publicKey.toBase58();
+      const owner = this.publicKey.toBase58();
       const sumForOwner = (balances: any[] | null | undefined): bigint => {
         let total = 0n;
         for (const balance of balances || []) {
@@ -223,9 +237,9 @@ export class SolanaWalletService {
     blockTimeMs: number;
   } | null> {
     try {
-      const owner = this.keypair.publicKey.toBase58();
+      const owner = this.publicKey.toBase58();
       const signatures = await this.connection.getSignaturesForAddress(
-        this.keypair.publicKey,
+        this.publicKey,
         { limit: 30 },
         'confirmed'
       );
@@ -291,7 +305,7 @@ export class SolanaWalletService {
     for (const programId of programIds) {
       try {
         const response = await this.connection.getParsedTokenAccountsByOwner(
-          this.keypair.publicKey,
+          this.publicKey,
           { programId }
         );
         accounts.push(...response.value);
@@ -358,6 +372,9 @@ export class SolanaWalletService {
   }
 
   public async closeTokenAccount(mintAddress: string): Promise<{ txSignature: string | null; success: boolean }> {
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast || !this.keypair) {
+      return { txSignature: null, success: false };
+    }
     try {
       const { Transaction, sendAndConfirmTransaction } = await import('@solana/web3.js');
       const {
@@ -368,7 +385,7 @@ export class SolanaWalletService {
       } = await import('@solana/spl-token');
 
       const mint = new PublicKey(mintAddress);
-      const owner = this.keypair.publicKey;
+      const owner = this.publicKey;
       const mintInfo = await this.connection.getAccountInfo(mint);
       if (!mintInfo) {
         throw new Error(`Mint inexistente: ${mintAddress}`);
@@ -420,6 +437,9 @@ export class SolanaWalletService {
    * diretamente para a carteira Phantom.
    */
   public async sweepEmptyTokenAccounts(): Promise<{ closedCount: number; reclaimedSolEst: number; errors: string[] }> {
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast || !this.keypair) {
+      return { closedCount: 0, reclaimedSolEst: 0, errors: [] };
+    }
     try {
       const accounts = await this.getParsedTokenAccountsForSupportedPrograms();
 

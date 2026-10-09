@@ -4,8 +4,10 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
-  TransactionInstruction
+  TransactionInstruction,
+  VersionedTransaction
 } from '@solana/web3.js';
+import { resolveExecutionMode, type ExecutionEnvironment } from '../execution/executionMode.js';
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   NATIVE_MINT,
@@ -41,7 +43,7 @@ const U64_MAX = (1n << 64n) - 1n;
 export interface PumpSellExecutorConnection {
   getAccountInfo(key: PublicKey, commitment?: unknown): Promise<{ owner: PublicKey; data: Buffer } | null>;
   getLatestBlockhash(commitment?: unknown): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
-  simulateTransaction(transaction: Transaction): Promise<{ value: { err: unknown; unitsConsumed?: number } }>;
+  simulateTransaction(transaction: VersionedTransaction, options: { sigVerify: false }): Promise<{ value: { err: unknown; unitsConsumed?: number } }>;
   sendRawTransaction(rawTransaction: Buffer | Uint8Array, options?: unknown): Promise<string>;
   confirmTransaction(
     strategy: { signature: string; blockhash: string; lastValidBlockHeight: number },
@@ -51,7 +53,8 @@ export interface PumpSellExecutorConnection {
 
 export interface PumpSellRequest {
   mint: PublicKey;
-  userKeypair: Keypair;
+  userKeypair?: Keypair;
+  userPublicKey?: PublicKey;
   tokenAmountAtomic: bigint;
   slippageBps?: number;
   totalFeeBps?: number;
@@ -72,6 +75,7 @@ export interface PumpBuiltSell {
 
 export interface PumpSellExecutionResult {
   status: 'SUCCESS' | 'FAILED' | 'SUBMITTED_UNCONFIRMED';
+  hypothetical?: boolean;
   txSignature?: string;
   expectedNetSolLamports?: bigint;
   minSolOutputLamports?: bigint;
@@ -184,12 +188,14 @@ function assertRequestCaps(request: PumpSellRequest): {
 export class PumpSellExecutor {
   constructor(
     private readonly connection: PumpSellExecutorConnection,
-    private readonly reconciler?: PumpSellReconciler
+    private readonly reconciler?: PumpSellReconciler,
+    private readonly executionEnv: ExecutionEnvironment = process.env
   ) {}
 
   async buildSell(request: PumpSellRequest): Promise<PumpBuiltSell> {
     const caps = assertRequestCaps(request);
-    const user = request.userKeypair.publicKey;
+    const user = request.userPublicKey ?? request.userKeypair?.publicKey;
+    if (!user) throw new Error('Pump direct sell public owner is required.');
     const bondingCurve = derivePumpBondingCurvePda(request.mint);
 
     const [mintInfo, curveInfo] = await Promise.all([
@@ -375,7 +381,6 @@ export class PumpSellExecutor {
       );
     }
     transaction.add(sellInstruction);
-    transaction.sign(request.userKeypair);
 
     return {
       transaction,
@@ -390,16 +395,19 @@ export class PumpSellExecutor {
 
   async simulateSell(request: PumpSellRequest): Promise<{
     success: boolean;
+    hypothetical: true;
     built?: PumpBuiltSell;
     unitsConsumed?: number;
     error?: string;
   }> {
     try {
       const built = await this.buildSell(request);
-      const simulation = await this.connection.simulateTransaction(built.transaction);
+      const unsigned = new VersionedTransaction(built.transaction.compileMessage());
+      const simulation = await this.connection.simulateTransaction(unsigned, { sigVerify: false });
       if (simulation.value.err) {
         return {
           success: false,
+          hypothetical: true,
           built,
           unitsConsumed: simulation.value.unitsConsumed,
           error: `Pump direct sell simulation rejected: ${JSON.stringify(simulation.value.err)}`
@@ -407,11 +415,12 @@ export class PumpSellExecutor {
       }
       return {
         success: true,
+        hypothetical: true,
         built,
         unitsConsumed: simulation.value.unitsConsumed
       };
     } catch (err: any) {
-      return { success: false, error: err?.message || String(err) };
+      return { success: false, hypothetical: true, error: err?.message || String(err) };
     }
   }
 
@@ -420,14 +429,35 @@ export class PumpSellExecutor {
     if (!simulation.success || !simulation.built) {
       return {
         status: 'FAILED',
+        hypothetical: resolveExecutionMode(this.executionEnv).shadow,
         unitsConsumed: simulation.unitsConsumed,
         error: simulation.error || 'Pump direct sell simulation failed.'
       };
     }
 
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast) {
+      return {
+        status: 'FAILED', hypothetical: true,
+        expectedNetSolLamports: simulation.built.quote.netSolLamports,
+        minSolOutputLamports: simulation.built.quote.minSolOutputLamports,
+        unitsConsumed: simulation.unitsConsumed,
+        error: 'Shadow simulation only; no sale submitted.'
+      };
+    }
+    if (!request.userKeypair) {
+      return { status: 'FAILED', error: 'Pump direct sell signer required for live execution.' };
+    }
+
     const built = simulation.built;
+    if (!resolveExecutionMode(this.executionEnv).canSign) {
+      return { status: 'FAILED', hypothetical: true, error: 'Shadow mode blocks Pump signing.' };
+    }
+    built.transaction.sign(request.userKeypair);
     const submissionStartedAt = Date.now();
     try {
+      if (!resolveExecutionMode(this.executionEnv).canBroadcast) {
+        return { status: 'FAILED', hypothetical: true, error: 'Shadow mode blocks Pump broadcast.' };
+      }
       const txSignature = await this.connection.sendRawTransaction(
         built.transaction.serialize(),
         { skipPreflight: false, maxRetries: 0 }

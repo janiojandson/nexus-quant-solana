@@ -2,6 +2,7 @@ import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
 import { referencesProgram } from '../execution/entryRoutePolicy.js';
+import { resolveExecutionMode, type ExecutionEnvironment } from '../execution/executionMode.js';
 import {
   JupiterTrafficCoordinator,
   type JupiterPriority
@@ -38,6 +39,7 @@ export interface SwapExecutionResponse {
   inAmount: number;
   outAmount: number;
   isDryRun: boolean;
+  hypothetical?: boolean;
   error?: string;
   unitsConsumed?: number;
   executionPath: 'V2_META_AGGREGATOR';
@@ -51,6 +53,7 @@ export interface SwapExecutionResponse {
 export interface JupiterEngineConfig {
   rpcUrl?: string;
   isDryRun?: boolean;
+  executionEnv?: ExecutionEnvironment;
   dexAggregator?: DexAggregatorService;
   connection?: Connection;
   confirmationTimeoutMs?: number;
@@ -96,6 +99,7 @@ interface JupiterV2ExecuteResponse {
 export class JupiterExecutionEngine {
   private connection: Connection;
   private isDryRun: boolean;
+  private executionEnv: ExecutionEnvironment;
   private dexAggregator: DexAggregatorService;
   private apiKey?: string;
   private v2BaseUrl: string;
@@ -103,11 +107,12 @@ export class JupiterExecutionEngine {
   private trafficCoordinator: JupiterTrafficCoordinator;
 
   constructor(config: JupiterEngineConfig = {}) {
+    this.executionEnv = config.executionEnv ?? process.env;
     this.connection = config.connection ||
       new Connection(config.rpcUrl || 'https://api.mainnet-beta.solana.com', 'confirmed');
     this.isDryRun = config.isDryRun !== undefined
       ? config.isDryRun
-      : (process.env.DRY_RUN_MODE !== 'false');
+      : resolveExecutionMode(this.executionEnv).shadow;
     this.dexAggregator = config.dexAggregator || new DexAggregatorService();
     this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
     this.apiKey = config.apiKey ?? process.env.JUPITER_API_KEY;
@@ -267,6 +272,9 @@ export class JupiterExecutionEngine {
     order: JupiterV2OrderResponse,
     req: SwapExecutionRequest
   ): { transaction: VersionedTransaction; signedTransaction: string } {
+    if (!resolveExecutionMode(this.executionEnv).canSign) {
+      throw new Error('Shadow mode blocks Jupiter signing.');
+    }
     if (!req.keypair) throw new Error('Keypair ausente para assinatura Jupiter V2.');
 
     const transaction = VersionedTransaction.deserialize(
@@ -301,7 +309,9 @@ export class JupiterExecutionEngine {
     transaction: VersionedTransaction
   ): Promise<{ success: boolean; error?: string; unitsConsumed?: number }> {
     try {
-      const simRes = await this.connection.simulateTransaction(transaction);
+      const unsigned = VersionedTransaction.deserialize(transaction.serialize());
+      unsigned.signatures = unsigned.signatures.map(() => new Uint8Array(64));
+      const simRes = await this.connection.simulateTransaction(unsigned, { sigVerify: false });
       if (simRes.value.err) {
         return {
           success: false,
@@ -324,18 +334,16 @@ export class JupiterExecutionEngine {
   public async simulateSwap(
     req: SwapExecutionRequest,
     _quoteOverride?: SwapQuoteResult
-  ): Promise<{ success: boolean; error?: string; unitsConsumed?: number }> {
+  ): Promise<{ success: boolean; hypothetical: true; error?: string; unitsConsumed?: number }> {
     try {
-      if (!req.keypair) {
-        return { success: false, error: 'Keypair ausente para simulação V2.' };
-      }
       const order = await this.getOrder(req);
       await this.assertEntryProgramsAllowed(order, req);
-      const { transaction } = this.signOrder(order, req);
-      return await this.simulateSignedTransaction(transaction);
+      const transaction = VersionedTransaction.deserialize(Buffer.from(order.transaction as string, 'base64'));
+      return { ...(await this.simulateSignedTransaction(transaction)), hypothetical: true };
     } catch (err: any) {
       return {
         success: false,
+        hypothetical: true,
         error: err?.message || String(err)
       };
     }
@@ -346,6 +354,9 @@ export class JupiterExecutionEngine {
     requestId: string;
     lastValidBlockHeight?: string | number;
   }, priority: JupiterPriority): Promise<{ response?: JupiterV2ExecuteResponse; uncertainError?: string }> {
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast) {
+      throw new Error('Shadow mode blocks Jupiter broadcast.');
+    }
     let lastError: any;
 
     // Retry somente do MESMO requestId + MESMA transação assinada.
@@ -402,7 +413,7 @@ export class JupiterExecutionEngine {
   }
 
   public async executeSwap(req: SwapExecutionRequest): Promise<SwapExecutionResponse> {
-    if (this.isDryRun || !req.keypair) {
+    if (this.isDryRun || !resolveExecutionMode(this.executionEnv).canBroadcast || !req.keypair) {
       try {
         const quote = await this.dexAggregator.getQuote({
           inputMint: req.inputMint,
@@ -425,6 +436,7 @@ export class JupiterExecutionEngine {
           inAmount: quote.inAmount,
           outAmount: quote.outAmount,
           isDryRun: true,
+          hypothetical: true,
           executionPath: 'V2_META_AGGREGATOR',
           router: quote.router,
           requestId: quote.requestId,
@@ -439,6 +451,7 @@ export class JupiterExecutionEngine {
           inAmount: req.amountLamports,
           outAmount: 0,
           isDryRun: true,
+          hypothetical: true,
           executionPath: 'V2_META_AGGREGATOR',
           error: err?.message || String(err)
         };

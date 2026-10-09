@@ -96,12 +96,45 @@ function makeEngine(conn: Connection, signer = testSigner): JupiterExecutionEngi
   return new JupiterExecutionEngine({
     connection: conn,
     isDryRun: false,
+    executionEnv: { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' },
     dexAggregator: new OkAggregator(),
     apiKey: 'test-key',
     v2BaseUrl: V2_BASE,
     confirmationTimeoutMs: 20_000
   });
 }
+
+test('shadow override keeps executeSwap hypothetical even when isDryRun is false', async () => {
+  let posts = 0;
+  axios.post = (async () => { posts++; throw new Error('broadcast attempted'); }) as any;
+  const { conn } = makeConnection({ err: null });
+  const engine = new JupiterExecutionEngine({
+    connection: conn, isDryRun: false, dexAggregator: new OkAggregator(), apiKey: 'test-key',
+    executionEnv: { SHADOW_MODE: 'true', DRY_RUN_MODE: 'false' }
+  });
+  const result = await engine.executeSwap(baseRequest);
+  assert.equal(result.status, 'DRY_RUN_SUCCESS');
+  assert.equal(result.isDryRun, true);
+  assert.match(result.txSignature, /dry_run|shadow/i);
+  assert.equal(posts, 0);
+});
+
+test('simulateSwap sends an unsigned transaction with signature verification disabled', async () => {
+  mockOrder();
+  let checked = false;
+  const conn: any = {
+    simulateTransaction: async (transaction: VersionedTransaction, options: any) => {
+      checked = true;
+      assert.equal(options.sigVerify, false);
+      assert.ok(transaction.signatures.every(sig => sig.every(byte => byte === 0)));
+      return { value: { err: null, unitsConsumed: 1 } };
+    }
+  };
+  const result = await makeEngine(conn).simulateSwap(baseRequest);
+  assert.equal(result.success, true);
+  assert.equal(result.hypothetical, true);
+  assert.equal(checked, true);
+});
 
 function mockOrder(
   signer = testSigner,
@@ -224,6 +257,7 @@ test('Jupiter V2 uses injected coordinator for general order and separate execut
   const engine = new JupiterExecutionEngine({
     connection: conn,
     isDryRun: false,
+    executionEnv: { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' },
     dexAggregator: new OkAggregator(),
     apiKey: 'test-key',
     v2BaseUrl: V2_BASE,

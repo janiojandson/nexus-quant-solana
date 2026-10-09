@@ -2,6 +2,7 @@ import { buildContractGates } from './audit/contractGates.js';
 import { NonBlockingTelemetry } from './protection/nonBlockingTelemetry.js';
 import { reportProfitProtectionShadow } from './protection/profitProtectionShadow.js';
 import http from 'http';
+import { PublicKey } from '@solana/web3.js';
 import dotenv from 'dotenv';
 import axios from 'axios';
 import { VitalityState, getAgentVitalityState } from './core/vitalityEngine.js';
@@ -49,6 +50,7 @@ import { PumpStrategyLabRuntime } from './pump/pumpStrategyLabRuntime.js';
 import { SentinelHandoffScanner, type SentinelHandoffToken, type SentinelCrossMemoryResult } from './scanner/sentinelHandoffScanner.js';
 import { BUY_AMOUNT_SOL } from './config/env.js';
 import { scheduleEntryAdvisory } from './execution/entryAdvisory.js';
+import { resolveExecutionMode, readSigningSecretKey, isHypotheticalExecution } from './execution/executionMode.js';
 import { referencesProgram } from './execution/entryRoutePolicy.js';
 import { PUMP_PROGRAM_ID } from './pump/pumpBondingCurve.js';
 
@@ -56,8 +58,8 @@ import { PUMP_PROGRAM_ID } from './pump/pumpBondingCurve.js';
 dotenv.config();
 
 const OFFICIAL_PHANTOM_WALLET = process.env.AGENT_SOLANA_PUBLIC_KEY || 'FBx2SKLDLsdeLM8owxU8MNVPKAfJpLpmpHHRgiZDqBoi';
-const SECRET_KEY_RAW = process.env.AGENT_SOLANA_PRIVATE_KEY || '[]';
-const IS_DRY_RUN = process.env.DRY_RUN_MODE === 'false' ? false : true; // SIMULADOR POR PADRÃO (DRY-RUN 🟢)
+const EXECUTION_MODE = resolveExecutionMode(process.env);
+const IS_DRY_RUN = EXECUTION_MODE.shadow;
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
 const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 1));
@@ -149,12 +151,17 @@ CANDIDATE_RPC_URLS.push('https://api.mainnet-beta.solana.com');
 
 // Instâncias Globais dos Serviços Operacionais
 const wallet = new SolanaWalletService({
-  secretKeyRaw: SECRET_KEY_RAW,
+  publicKey: OFFICIAL_PHANTOM_WALLET,
+  secretKeyRaw: readSigningSecretKey(process.env),
   rpcUrl: ACTIVE_SOLANA_RPC_URL,
   rpcUrls: CANDIDATE_RPC_URLS
 });
 
-const rentRecovery = new RentRecoveryService(wallet.getConnection(), wallet.getKeypair());
+const getExecutionSigner = () => resolveExecutionMode(process.env).canSign ? wallet.getKeypair() : undefined;
+const rentRecovery = new RentRecoveryService(
+  wallet.getConnection(), getExecutionSigner(), process.env,
+  new PublicKey(wallet.getPublicKey())
+);
 const pumpObservatory = new PumpObservatory(
   wallet.getConnection() as unknown as PumpRpc,
   {
@@ -433,7 +440,8 @@ async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<
   if (rentRecoverySweepInFlight) {
     throw new Error('Varredura de rent já está em execução.');
   }
-  if (source === 'AUTO' && (!AUTO_RENT_RECOVERY_ENABLED || IS_DRY_RUN)) {
+  if (!resolveExecutionMode(process.env).canBroadcast ||
+      (source === 'AUTO' && !AUTO_RENT_RECOVERY_ENABLED)) {
     return {
       closedCount: 0,
       reclaimedSolEst: 0,
@@ -475,7 +483,7 @@ async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<
   }
 }
 
-if (AUTO_RENT_RECOVERY_ENABLED && !IS_DRY_RUN && !NEXUS_MAINTENANCE_MODE) {
+if (AUTO_RENT_RECOVERY_ENABLED && EXECUTION_MODE.canBroadcast && !NEXUS_MAINTENANCE_MODE) {
   const firstSweepDelayMs = Math.min(60_000, Math.max(15_000, Math.floor(AUTO_RENT_RECOVERY_INTERVAL_MS / 4)));
   setTimeout(() => {
     void runRentRecoverySweep('AUTO').catch((err: any) => {
@@ -619,7 +627,7 @@ async function executeExitOrderUnlocked(
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
     amountLamports: exitAmountAtomic,
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
-    keypair: wallet.getKeypair(),
+    keypair: getExecutionSigner(),
     slippageBps: initialSlippageBps,
     priorityLevel: 'high',
     trafficPriority
@@ -636,7 +644,7 @@ async function executeExitOrderUnlocked(
       outputMint: 'So11111111111111111111111111111111111111112',
       amountLamports: exitAmountAtomic,
       userPublicKey: OFFICIAL_PHANTOM_WALLET,
-      keypair: wallet.getKeypair(),
+      keypair: getExecutionSigner(),
       slippageBps: 750,
       priorityLevel: 'veryHigh',
       skipPreflight: false,
@@ -714,7 +722,8 @@ async function executeExitOrderUnlocked(
       if (IS_DRY_RUN) {
         const simulated = await pumpSellExecutor.simulateSell({
           mint: new (await import('@solana/web3.js')).PublicKey(pos.mint),
-          userKeypair: wallet.getKeypair(),
+          userPublicKey: new (await import('@solana/web3.js')).PublicKey(wallet.getPublicKey()),
+          userKeypair: getExecutionSigner(),
           tokenAmountAtomic: BigInt(exitAmountAtomic),
           slippageBps: 750
         });
@@ -737,7 +746,7 @@ async function executeExitOrderUnlocked(
 
       const direct = await pumpSellExecutor.executeSell({
         mint: new (await import('@solana/web3.js')).PublicKey(pos.mint),
-        userKeypair: wallet.getKeypair(),
+        userKeypair: getExecutionSigner(),
         tokenAmountAtomic: BigInt(exitAmountAtomic),
         slippageBps: 750
       });
@@ -760,7 +769,7 @@ async function executeExitOrderUnlocked(
     enabled: PUMP_DIRECT_SELL_FALLBACK_ENABLED,
     selectedPath: selectedExitPath,
     confirmationState:
-      exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS'
+      exitSwap.status === 'SUCCESS'
         ? 'CONFIRMED'
         : exitSwap.status === 'SUBMITTED_UNCONFIRMED'
           ? 'UNCERTAIN'
@@ -781,10 +790,14 @@ async function executeExitOrderUnlocked(
     );
   }
 
+  if (isHypotheticalExecution(exitSwap)) {
+    return { success: false, txSignature: '', error: 'Hypothetical shadow exit; position and rent remain unchanged.' };
+  }
+
   // 2. Fail-Closed na Saída: só prossegue com higiene on-chain e books se o swap
   // foi de fato confirmado. Sem esta trava, uma saída falha fechava a ATA
   // (prendendo os tokens), gravava PnLperformed fictício e notificava "Saída Executada".
-  const exitConfirmed = exitSwap.status === 'SUCCESS' || exitSwap.status === 'DRY_RUN_SUCCESS';
+  const exitConfirmed = exitSwap.status === 'SUCCESS';
 
   if (!exitConfirmed) {
     const failReason = exitSwap.error || `Swap de saída não confirmado (status: ${exitSwap.status})`;
@@ -1071,7 +1084,7 @@ const server = http.createServer(async (req, res) => {
         outputMint: 'So11111111111111111111111111111111111111112',
         amountLamports: rawLamports,
         userPublicKey: OFFICIAL_PHANTOM_WALLET,
-        keypair: wallet.getKeypair(),
+        keypair: getExecutionSigner(),
         slippageBps: 500,
         priorityLevel: 'high',
         trafficPriority: priorityForJupiterWork('PROTECTIVE_EXIT')
@@ -1085,7 +1098,8 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (exitSwap.status === 'DRY_RUN_SUCCESS') {
-        return { success: true, simulated: true, txSignature: exitSwap.txSignature };
+        return { success: false, hypothetical: true, simulated: true,
+          error: 'Hypothetical shadow liquidation; holding remains unchanged.' };
       }
 
       positionEngine.removePosition(mint);
@@ -1104,6 +1118,9 @@ const server = http.createServer(async (req, res) => {
     getAllOpenPositions: () => positionEngine.getAllPositions(),
     sweepRent: () => runRentRecoverySweep('MANUAL'),
     panicToken: async (mint: string) => {
+      if (!resolveExecutionMode(process.env).canBroadcast) {
+        return { success: false, error: 'Hypothetical shadow mode: no token was liquidated and no rent was recovered.' };
+      }
       console.log(`🚨 [API PANIC TOKEN] Liquidando moeda ${mint} a mercado via Jupiter Swap V2...`);
       positionEngine.removePosition(mint);
 
@@ -1120,7 +1137,7 @@ const server = http.createServer(async (req, res) => {
           outputMint: 'So11111111111111111111111111111111111111112',
           amountLamports: rawLamports,
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: wallet.getKeypair(),
+          keypair: getExecutionSigner(),
           slippageBps: 500,
           priorityLevel: 'high',
           trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
@@ -1139,6 +1156,10 @@ const server = http.createServer(async (req, res) => {
       };
     },
     panicAll: async () => {
+      if (!resolveExecutionMode(process.env).canBroadcast) {
+        return { success: false, liquidationsCount: 0,
+          error: 'Hypothetical shadow mode: no tokens were liquidated and no rent was recovered.' };
+      }
       console.log('🚨 [API PANIC ALL] Desarmando Sentinel, liquidando todos os tokens e fechando ATAs...');
       latestState.circuitBreakerActive = true;
       axios.post(`${MACRO_SENTINEL_URL}/v1/sentinel/breaker/trip`, {}).catch(() => {});
@@ -1162,7 +1183,7 @@ const server = http.createServer(async (req, res) => {
             outputMint: 'So11111111111111111111111111111111111111112',
             amountLamports: rawLamports,
             userPublicKey: OFFICIAL_PHANTOM_WALLET,
-            keypair: wallet.getKeypair(),
+            keypair: getExecutionSigner(),
             slippageBps: 500,
             priorityLevel: 'high',
             trafficPriority: priorityForJupiterWork('EMERGENCY_EXIT')
@@ -2019,7 +2040,7 @@ async function executeAutonomousCycle() {
                 maxAutoSlippageBps: 750,
                 skipPreflight: false,
                 userPublicKey: OFFICIAL_PHANTOM_WALLET,
-                keypair: wallet.getKeypair(),
+                keypair: getExecutionSigner(),
                 priorityLevel: 'medium',
                 forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
                 requiredPoolAddress: topCandidate.pairAddress,
@@ -2162,7 +2183,7 @@ console.log(`⚡ [3/3 Motor Jupiter Swap V2] Executando compra com RTSE + pré-v
           forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
           requiredPoolAddress: topCandidate.pairAddress,
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: wallet.getKeypair(),
+          keypair: getExecutionSigner(),
           trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
         });
 
@@ -2220,9 +2241,13 @@ console.log(`⚡ [3/3 Motor Jupiter Swap V2] Executando compra com RTSE + pré-v
           }
         }
 
-        if (swapSim.status === 'SUCCESS' || swapSim.status === 'DRY_RUN_SUCCESS') {
+        if (isHypotheticalExecution(swapSim)) {
+          console.log(`🧪 [SHADOW] Entrada hipotética ${topCandidate.symbol}; nenhuma posição ou PnL real registrado.`);
+          return;
+        }
+        if (swapSim.status === 'SUCCESS') {
           // CORREÇÃO: Só adiciona posição se houver txid on-chain confirmado
-          if (!swapSim.txSignature && swapSim.status !== 'DRY_RUN_SUCCESS') {
+          if (!swapSim.txSignature) {
             const reason = `JUPITER_SWAP_NO_TXID: status=${swapSim.status}`;
             console.error(`🛑 [ENTRADA REJEITADA] Swap sem txid on-chain: ${topCandidate.symbol} | Status: ${swapSim.status}`);
             antiSpamMemory.recordVeto(topCandidate.mint, reason, 60 * 60 * 1000);
@@ -3004,7 +3029,7 @@ async function executeSentinelEntryCandidate(
           maxAutoSlippageBps: 750,
           skipPreflight: false,
           userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: wallet.getKeypair(),
+          keypair: getExecutionSigner(),
           priorityLevel: 'medium',
           trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
         }, _quote);
@@ -3046,13 +3071,18 @@ async function executeSentinelEntryCandidate(
     maxAutoSlippageBps: 750,
     skipPreflight: false,
     userPublicKey: OFFICIAL_PHANTOM_WALLET,
-    keypair: wallet.getKeypair(),
+    keypair: getExecutionSigner(),
     trafficPriority: priorityForJupiterWork('ENTRY_ORDER')
   });
 
   if (swapResult.status !== 'SUCCESS' && swapResult.status !== 'DRY_RUN_SUCCESS') {
     console.error(`[SentinelHandoff] ${topCandidate.symbol}: swap falhou — ${swapResult.error || swapResult.status}`);
     antiSpamMemory.recordVeto(topCandidate.mint, `Sentinel swap falhou: ${swapResult.status}`, 10 * 60 * 1000);
+    return;
+  }
+
+  if (isHypotheticalExecution(swapResult)) {
+    console.log(`[SentinelHandoff] Entrada hipotética ${topCandidate.symbol}; nenhuma posição real registrada.`);
     return;
   }
 
@@ -3204,19 +3234,22 @@ async function main() {
   }
 
   // 2.1 Varredura e Resgate Automático de Rent Exemption de Contas Órfãs Vazias
-  try {
-    const sweep = await rentRecovery.sweepOrphanAccounts();
-    if (sweep.closedCount > 0) {
-      console.log(`🧹 [BOOT: Higiene On-Chain] ${sweep.closedCount} conta(s) vazia(s) fechada(s). ~${sweep.reclaimedSolEst} SOL devolvidos à carteira!`);
+  if (resolveExecutionMode(process.env).canBroadcast) {
+    try {
+      const sweep = await rentRecovery.sweepOrphanAccounts();
+      if (sweep.closedCount > 0) {
+        console.log(`🧹 [BOOT: Higiene On-Chain] ${sweep.closedCount} conta(s) vazia(s) fechada(s). ~${sweep.reclaimedSolEst} SOL devolvidos à carteira!`);
+      }
+    } catch (err: any) {
+      console.warn(`⚠️ [BOOT: Aviso Rent] Falha ao varrer contas órfãs no boot: ${err?.message || err}`);
     }
-  } catch (err: any) {
-    console.warn(`⚠️ [BOOT: Aviso Rent] Falha ao varrer contas órfãs no boot: ${err?.message || err}`);
+    // 2.2 Agendamento de Varredura Periódica de Rent a cada 2 horas
+    setInterval(() => {
+      if (resolveExecutionMode(process.env).canBroadcast) {
+        rentRecovery.sweepOrphanAccounts().catch(() => {});
+      }
+    }, 2 * 60 * 60 * 1000);
   }
-
-  // 2.2 Agendamento de Varredura Periódica de Rent a cada 2 horas
-  setInterval(() => {
-    rentRecovery.sweepOrphanAccounts().catch(() => {});
-  }, 2 * 60 * 60 * 1000);
 
   // 2.3 Ponte Sentinel Handoff: ingere tokens pré-auditados da bonding curve
   //     com bypass cirúrgico da trava de 5 minutos.

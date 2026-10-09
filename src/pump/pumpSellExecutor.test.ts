@@ -88,6 +88,42 @@ function fixture(complete = false) {
   return { connection, userKeypair, mint };
 }
 
+test('Pump shadow override never signs or sends an accidentally supplied key', async () => {
+  const { connection, userKeypair, mint } = fixture();
+  const executor = new PumpSellExecutor(connection as any, undefined, { SHADOW_MODE: 'false', DRY_RUN_MODE: 'true' });
+  const built = await executor.buildSell({ mint, userKeypair, tokenAmountAtomic: 1_000_000n });
+  assert.ok(built.transaction.signatures.every(item => item.signature === null));
+  const result = await executor.executeSell({ mint, userKeypair, tokenAmountAtomic: 1_000_000n });
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.hypothetical, true);
+  assert.equal(connection.sendCalls, 0);
+});
+
+test('Pump rejected shadow simulation remains labeled hypothetical', async () => {
+  const { connection, userKeypair, mint } = fixture();
+  connection.simulateErr = { InstructionError: [1, 'rejected'] };
+  const executor = new PumpSellExecutor(connection as any, undefined,
+    { SHADOW_MODE: 'true', DRY_RUN_MODE: 'false' });
+  const result = await executor.executeSell({ mint, userKeypair, tokenAmountAtomic: 1_000_000n });
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.hypothetical, true);
+  assert.equal(connection.sendCalls, 0);
+});
+
+test('Pump simulation is unsigned and explicitly disables signature verification', async () => {
+  const { connection, userKeypair, mint } = fixture();
+  (connection as any).simulateTransaction = async (transaction: any, options: any) => {
+    assert.ok(transaction.signatures.every((sig: Uint8Array) => sig.every(byte => byte === 0)));
+    assert.equal(options.sigVerify, false);
+    return { value: { err: null, unitsConsumed: 1 } };
+  };
+  const executor = new PumpSellExecutor(connection as any, undefined,
+    { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' });
+  const result = await executor.simulateSell({ mint, userKeypair, tokenAmountAtomic: 1_000_000n });
+  assert.equal(result.success, true);
+  assert.equal(result.hypothetical, true);
+});
+
 test('buildSell encodes exact atomic amount/min-out and canonical 26 sell_v2 accounts', async () => {
   const { connection, userKeypair, mint } = fixture();
   const executor = new PumpSellExecutor(connection as any);
@@ -144,7 +180,7 @@ test('completed curve fails before blockhash/signing and unsafe caps fail closed
 test('simulation rejection prevents any broadcast', async () => {
   const { connection, userKeypair, mint } = fixture();
   connection.simulateErr = { InstructionError: [2, { Custom: 6003 }] };
-  const executor = new PumpSellExecutor(connection as any);
+  const executor = new PumpSellExecutor(connection as any, undefined, { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' });
 
   const result = await executor.executeSell({
     mint,
@@ -174,7 +210,7 @@ test('timeout after broadcast reconciles on-chain and never sends a duplicate se
         receivedLamports: 123_456n
       };
     }
-  });
+  }, { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' });
 
   const result = await executor.executeSell({
     mint,
@@ -200,7 +236,7 @@ test('unreconciled uncertain submission returns SUBMITTED_UNCONFIRMED without re
       reconcileCalls++;
       return null;
     }
-  });
+  }, { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' });
 
   const result = await executor.executeSell({
     mint,

@@ -3,6 +3,34 @@ import assert from 'node:assert';
 import { Keypair } from '@solana/web3.js';
 import { SolanaWalletService } from './solanaWallet.js';
 
+const LIVE_ENV = { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' };
+
+it('shadow wallet never reads a hostile secret getter and cannot expose a signer', async () => {
+  const owner = Keypair.generate().publicKey.toBase58();
+  const config = {
+    publicKey: owner,
+    executionEnv: { SHADOW_MODE: 'true', DRY_RUN_MODE: 'false' },
+    get secretKeyRaw(): string { throw new Error('secret was read'); }
+  };
+  const wallet = new SolanaWalletService(config);
+  assert.equal(wallet.getPublicKey(), owner);
+  assert.throws(() => wallet.getKeypair(), /shadow|signer/i);
+  (wallet as any).connection = { getAccountInfo: () => { throw new Error('RPC was called'); } };
+  assert.deepEqual(await wallet.closeTokenAccount(owner), { txSignature: null, success: false });
+  assert.deepEqual(await wallet.sweepEmptyTokenAccounts(), { closedCount: 0, reclaimedSolEst: 0, errors: [] });
+});
+
+it('a generated key supplied in shadow cannot close accounts', async () => {
+  const signer = Keypair.generate();
+  const wallet = new SolanaWalletService({
+    publicKey: signer.publicKey.toBase58(),
+    secretKeyRaw: JSON.stringify(Array.from(signer.secretKey)),
+    executionEnv: { SHADOW_MODE: 'false', DRY_RUN_MODE: 'true' }
+  });
+  (wallet as any).connection = { getAccountInfo: () => { throw new Error('RPC was called'); } };
+  assert.deepEqual(await wallet.closeTokenAccount(signer.publicKey.toBase58()), { txSignature: null, success: false });
+});
+
 describe('SolanaWalletService - Blindagem e CustÃ³dia Segura', () => {
   const dummyKeypair = Keypair.generate();
   const dummySecretKeyString = JSON.stringify(Array.from(dummyKeypair.secretKey));
@@ -11,6 +39,7 @@ describe('SolanaWalletService - Blindagem e CustÃ³dia Segura', () => {
   it('deve inicializar com chave publica correta e nunca expor a chave privada', () => {
     const wallet = new SolanaWalletService({
       secretKeyRaw: dummySecretKeyString,
+      executionEnv: LIVE_ENV,
       rpcUrl: 'https://api.mainnet-beta.solana.com'
     });
 
@@ -21,13 +50,14 @@ describe('SolanaWalletService - Blindagem e CustÃ³dia Segura', () => {
   });
 
   it('deve abortar inicializa??o quando a chave estiver ausente ou inv?lida', () => {
-    assert.throws(() => new SolanaWalletService({ secretKeyRaw: '[]' }), /Chave privada Solana ausente/);
-    assert.throws(() => new SolanaWalletService({ secretKeyRaw: 'not-a-valid-key' }), /Chave privada Solana/);
+    assert.throws(() => new SolanaWalletService({ secretKeyRaw: '[]', executionEnv: LIVE_ENV }), /Chave privada Solana ausente/);
+    assert.throws(() => new SolanaWalletService({ secretKeyRaw: 'not-a-valid-key', executionEnv: LIVE_ENV }), /Chave privada Solana/);
   });
 
   it('deve validar teto maximo de risco por trade em 10% do saldo total', () => {
     const wallet = new SolanaWalletService({
       secretKeyRaw: dummySecretKeyString,
+      executionEnv: LIVE_ENV,
       rpcUrl: 'https://api.mainnet-beta.solana.com'
     });
 
@@ -50,6 +80,7 @@ describe('SolanaWalletService - Blindagem e CustÃ³dia Segura', () => {
   it('deve rejeitar trades se o saldo for insuficiente para cobrir o gas de rede', () => {
     const wallet = new SolanaWalletService({
       secretKeyRaw: dummySecretKeyString,
+      executionEnv: LIVE_ENV,
       rpcUrl: 'https://api.mainnet-beta.solana.com'
     });
 
@@ -62,8 +93,13 @@ describe('SolanaWalletService - Blindagem e CustÃ³dia Segura', () => {
   it('deve executar sweepEmptyTokenAccounts sem erro mesmo em ambiente sem contas ativas', async () => {
     const wallet = new SolanaWalletService({
       secretKeyRaw: dummySecretKeyString,
+      executionEnv: LIVE_ENV,
       rpcUrl: 'https://api.mainnet-beta.solana.com'
     });
+
+    (wallet as any).connection = {
+      getParsedTokenAccountsByOwner: async () => ({ value: [] })
+    };
 
     const sweepResult = await wallet.sweepEmptyTokenAccounts();
     assert.ok(typeof sweepResult.closedCount === 'number');
@@ -77,6 +113,7 @@ it('deve reconciliar saldos do SPL clÃ¡ssico e Token-2022', async () => {
   const token2022TestKeypair = Keypair.generate();
   const wallet = new SolanaWalletService({
     secretKeyRaw: JSON.stringify(Array.from(token2022TestKeypair.secretKey)),
+    executionEnv: LIVE_ENV,
     rpcUrl: 'https://api.mainnet-beta.solana.com'
   });
 
@@ -125,6 +162,7 @@ it('deve usar o delta real da transação confirmada, não o outAmount esperado 
   const owner = kp.publicKey.toBase58();
   const wallet = new SolanaWalletService({
     secretKeyRaw: JSON.stringify(Array.from(kp.secretKey)),
+    executionEnv: LIVE_ENV,
     rpcUrl: 'https://api.mainnet-beta.solana.com'
   });
 
@@ -151,6 +189,7 @@ it('reconcilia execução V2 incerta pelo delta real recente da wallet', async (
   const owner = kp.publicKey.toBase58();
   const wallet = new SolanaWalletService({
     secretKeyRaw: JSON.stringify(Array.from(kp.secretKey)),
+    executionEnv: LIVE_ENV,
     rpcUrl: 'https://api.mainnet-beta.solana.com'
   });
   const nowSec = Math.floor(Date.now() / 1000);

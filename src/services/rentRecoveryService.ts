@@ -1,4 +1,5 @@
 import { Connection, PublicKey, Keypair, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
+import { resolveExecutionMode, type ExecutionEnvironment } from '../execution/executionMode.js';
 import {
   getAssociatedTokenAddressSync,
   createCloseAccountInstruction,
@@ -24,20 +25,24 @@ export interface SplAccountInfo {
 export class RentRecoveryService {
   private connection: Connection;
   private keypair?: Keypair;
+  private publicKey?: PublicKey;
+  private executionEnv: ExecutionEnvironment;
   public static readonly RENT_EXEMPTION_EST_SOL = 0.00204;
 
-  constructor(connection: Connection, keypair?: Keypair) {
+  constructor(connection: Connection, keypair?: Keypair, executionEnv: ExecutionEnvironment = process.env, publicKey?: PublicKey) {
     this.connection = connection;
     this.keypair = keypair;
+    this.publicKey = publicKey ?? keypair?.publicKey;
+    this.executionEnv = executionEnv;
   }
 
   private async getParsedTokenAccountsForSupportedPrograms(): Promise<any[]> {
-    if (!this.keypair) return [];
+    if (!this.publicKey) return [];
     const accounts: any[] = [];
     for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
       try {
         const response = await this.connection.getParsedTokenAccountsByOwner(
-          this.keypair.publicKey,
+          this.publicKey,
           { programId }
         );
         accounts.push(...response.value);
@@ -65,8 +70,8 @@ export class RentRecoveryService {
     destinationAddress?: string,
     tokenProgramId: PublicKey = TOKEN_PROGRAM_ID
   ): Promise<{ success: boolean; txSignature?: string | null; error?: string }> {
-    if (!this.keypair) {
-      return { success: true, txSignature: 'DRY_RUN_ATA_CLOSED' };
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast || !this.keypair) {
+      return { success: false, txSignature: null, error: 'Shadow mode: rent closure blocked.' };
     }
 
     try {
@@ -102,9 +107,8 @@ export class RentRecoveryService {
     mintAddress: string,
     destinationAddress?: string
   ): Promise<{ success: boolean; txSignature?: string | null; error?: string }> {
-    if (!this.keypair) {
-      console.log(`🧹 [RentRecoveryService: SIMULAÇÃO] ATA de ${mintAddress} fechada virtualmente.`);
-      return { success: true, txSignature: 'DRY_RUN_ATA_CLOSED' };
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast || !this.keypair) {
+      return { success: false, txSignature: null, error: 'Shadow mode: rent closure blocked.' };
     }
 
     const mintPubkey = new PublicKey(mintAddress);
@@ -135,7 +139,7 @@ export class RentRecoveryService {
    * Contas com qualquer saldo token são sempre preservadas.
    */
   public async sweepOrphanAccounts(destinationAddress?: string): Promise<SweepResult> {
-    if (!this.keypair) {
+    if (!resolveExecutionMode(this.executionEnv).canBroadcast || !this.keypair) {
       return {
         closedCount: 0,
         reclaimedSolEst: 0,
@@ -210,7 +214,7 @@ export class RentRecoveryService {
 
   /** Varre todas as contas SPL com saldo > 0 da carteira. */
   public async getSplAccountsWithBalance(): Promise<SplAccountInfo[]> {
-    if (!this.keypair) return [];
+    if (!this.publicKey) return [];
 
     try {
       const parsedAccounts = await this.getParsedTokenAccountsForSupportedPrograms();
