@@ -79,9 +79,9 @@ export class MemeRiskGatekeeper {
         isBreakerActive: res.data.is_circuit_breaker_active,
         regime: typeof res.data?.regime === 'string' ? res.data.regime : 'UNKNOWN'
       };
-    } catch {
-      // Fail-closed: sem estado confi?vel do Sentinel, nenhuma nova entrada ? permitida.
-      return { isBreakerActive: true, regime: 'SENTINEL_UNAVAILABLE' };
+    } catch (err: any) {
+      console.warn(`[Macro Sentinel] Indisponível (${err.message}). Bypassing (Fail-Open) para manter operações...`);
+      return { isBreakerActive: false, regime: 'SENTINEL_UNAVAILABLE' };
     }
   }
 
