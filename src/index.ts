@@ -184,8 +184,8 @@ const jupCredentials: JupiterCredential[] = [
 const jupiterHub = new JupiterOrgHub(jupCredentials, fetch as any, { now: Date.now, sleep: async (ms: number) => new Promise<void>(r => setTimeout(r, ms)) });
 
 const rpcCredentials: HeliusKey[] = [
-  { id: process.env.HELIUS_CRITICAL_ID || '1', apiKey: process.env.HELIUS_CRITICAL_KEY || '', role: 'CRITICAL', quotaGroupId: 'group_1', rps: 30 },
-  { id: process.env.HELIUS_STATE_ID || '2', apiKey: process.env.HELIUS_STATE_KEY || '', role: 'STATE', quotaGroupId: 'group_2', rps: 30 }
+  { id: '1', apiKey: process.env.HELIUS_KEY_1 || 'fallback_key_1', role: 'CRITICAL', quotaGroupId: 'group_1', rps: 30 },
+  { id: '2', apiKey: process.env.HELIUS_KEY_2 || 'fallback_key_2', role: 'STATE', quotaGroupId: 'group_2', rps: 30 }
 ];
 const quotaGroups = [{ id: 'group_1', rps: 30 }, { id: 'group_2', rps: 30 }
 ];
