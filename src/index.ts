@@ -79,8 +79,7 @@ const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_P
 const ENTRY_MOMENTUM_MAX_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxRisePct);
 const ENTRY_MOMENTUM_MAX_PULLBACK_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_PULLBACK_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxPullbackPct);
 
-const SOLANA_LAYA_TACTICAL_MODE =
-  normalizeSolanaLayaTacticalMode(process.env.SOLANA_LAYA_TACTICAL_MODE);
+const SOLANA_LAYA_TACTICAL_MODE = 'OFF';
 const SOLANA_LAYA_POSITION_INTERVAL_MS = Math.max(5_000, Number(process.env.SOLANA_LAYA_POSITION_INTERVAL_MS || 10_000));
 const AUTO_RENT_RECOVERY_ENABLED = process.env.AUTO_RENT_RECOVERY_ENABLED === 'true';
 const AUTO_RENT_RECOVERY_INTERVAL_MS = Math.max(5 * 60_000, Number(process.env.AUTO_RENT_RECOVERY_INTERVAL_MS || 30 * 60_000));
@@ -200,11 +199,7 @@ const scanner = new JupiterDiscoveryScanner(jupiterHub);
 
 const exitTelemetry = new NonBlockingTelemetry<any>();
 // DEX e Sentinel agendam advisory separadamente; shadow nativo não atrasa os hard gates.
-const entryGatekeeper = new MemeRiskGatekeeper({
-  macroSentinelUrl: MACRO_SENTINEL_URL,
-  layaNativeShadowEnabled: false
-});
-const solanaLayaAdapter = new SolanaLayaAdapter();
+const entryGatekeeper = new MemeRiskGatekeeper({});
 const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
 /** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
@@ -432,33 +427,6 @@ void adminAuthService.initSchema()
     console.warn(`⚠️ [AdminAuth] inicialização falhou: ${err?.message || err}`);
   });
 
-async function refreshLayaHealth(): Promise<void> {
-  try {
-    const health = await solanaLayaAdapter.checkHealth();
-    latestState.laya = {
-      tacticalMode: SOLANA_LAYA_TACTICAL_MODE,
-      privateService: process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true',
-      health: health.ok ? 'OK' : 'DEGRADED',
-      loaded: health.loaded,
-      latencyMs: health.latencyMs,
-      lastCheckedAt: new Date().toISOString()
-    };
-    console.log(
-      `🧠 [Laya:Health] ok=${health.ok} loaded=${health.loaded.join(',') || 'none'} latencyMs=${health.latencyMs}`
-    );
-  } catch (err: any) {
-    if (latestState.laya) {
-      latestState.laya.health = 'DEGRADED';
-      latestState.laya.lastCheckedAt = new Date().toISOString();
-    }
-    console.warn(`⚠️ [Laya:Health] probe falhou: ${err?.message || err}`);
-  }
-}
-
-void refreshLayaHealth();
-setInterval(() => {
-  void refreshLayaHealth();
-}, 60_000);
 
 let rentRecoverySweepInFlight = false;
 async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<ReturnType<RentRecoveryService['sweepOrphanAccounts']>>> {
@@ -1029,53 +997,7 @@ async function maybeRunLayaTacticalPositionDecision(
   pnlPct: number,
   currentPriceUsd: number
 ): Promise<void> {
-  if (SOLANA_LAYA_TACTICAL_MODE === 'OFF') return;
-
-  const now = Date.now();
-  const lastCheck = layaPositionLastCheck.get(pos.mint) || 0;
-  if (now - lastCheck < SOLANA_LAYA_POSITION_INTERVAL_MS) return;
-  if (layaPositionInFlight.has(pos.mint)) return;
-
-  layaPositionLastCheck.set(pos.mint, now);
-  layaPositionInFlight.add(pos.mint);
-
-  try {
-    const entrySol = pos.entrySol || 0.015;
-    const peakSol = positionEngine.getPeakSolValue(pos.mint) || entrySol;
-    const peakPnlPct = entrySol > 0 ? (peakSol - entrySol) / entrySol : pnlPct;
-    const layaPosition = await solanaLayaAdapter.evaluatePosition({
-      mint: pos.mint,
-      symbol: pos.symbol,
-      pnlPct,
-      peakPnlPct,
-      holdingSeconds: Math.max(0, Math.floor((Date.now() - pos.entryTimestamp) / 1000)),
-      partialTaken: Boolean(pos.partialTaken),
-      currentPriceUsd,
-      entryPriceUsd: pos.entryPriceUsd,
-      lastKnownLiquidityUsd: pos.entryLiquidityUsd,
-      lastKnownVolume5mUsd: pos.entryVolume5m,
-      trailingActive: Boolean(pos.trailingActive),
-      stopLossPct: pos.stopLossPct
-    });
-
-    console.log(
-      `🧠 [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:POSITION] ${pos.symbol} ` +
-      `action=${layaPosition.action} confidence=${layaPosition.confidence.toFixed(4)} ` +
-      `abstention=${layaPosition.abstention ?? 'none'} latencyMs=${layaPosition.latencyMs}`
-    );
-
-    // A resposta da Laya é telemetria advisory. Stops, trailing e saídas
-    // permanecem exclusivamente sob o motor determinístico.
-
-  } catch (err: any) {
-    // Falha da Laya nunca desarma os hard exits do motor determinístico.
-    console.warn(
-      `⚠️ [Laya:Tactical:${SOLANA_LAYA_TACTICAL_MODE}:POSITION] ${pos.symbol}: ` +
-      `${err?.message || err}`
-    );
-  } finally {
-    layaPositionInFlight.delete(pos.mint);
-  }
+  // Laya logic removed
 }
 
 function updateDashboardViews() {
@@ -2058,19 +1980,7 @@ async function executeAutonomousCycle() {
           }
         }
 
-        // Mercado DEX: Laya é sempre advisory, inclusive com configuração LIVE/ACTIVE.
-        // Nenhuma resposta ou falha da IA altera o fluxo financeiro.
-        if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF' || process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true') {
-          layaEntryTelemetry = scheduleEntryAdvisory({
-            facts: audit.layaFacts,
-            evaluate: facts => solanaLayaAdapter.evaluateEntry(facts),
-            report: telemetry => console.log(
-              `🧠 [Laya:Tactical:SHADOW:ENTRY] ${topCandidate.symbol} ` +
-              `status=${telemetry.status} action=${telemetry.action ?? 'N/D'} ` +
-              `score=${telemetry.score ?? 'N/D'} error=${telemetry.error ?? 'none'}`
-            )
-          });
-        }
+
 
         const quoteParams = {
           inputMint: SOL_MINT,
@@ -3067,18 +2977,7 @@ async function executeSentinelEntryCandidate(
     return;
   }
 
-  // Laya é advisory também na ponte Sentinel, mesmo configurada como LIVE/ACTIVE.
-  if (SOLANA_LAYA_TACTICAL_MODE !== 'OFF' || process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true') {
-    scheduleEntryAdvisory({
-      facts: audit.layaFacts,
-      evaluate: facts => solanaLayaAdapter.evaluateEntry(facts),
-      report: telemetry => console.log(
-        `🧠 [Laya:Tactical:SHADOW:SENTINEL_ENTRY] ${topCandidate.symbol} ` +
-        `status=${telemetry.status} action=${telemetry.action ?? 'N/D'} ` +
-        `score=${telemetry.score ?? 'N/D'} error=${telemetry.error ?? 'none'}`
-      )
-    });
-  }
+
 
   const quoteParams = {
     inputMint: SOL_MINT_GLOBAL,

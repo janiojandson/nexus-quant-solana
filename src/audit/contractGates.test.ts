@@ -6,7 +6,7 @@ test('veto facts reach the journal: actual 98.7 percent fails the real 35 percen
  const report={mint:'mint',score:0,risks:['Top holders'],isRugged:false,isSafe:false,verified:false,
  mintAuthority:null,freezeAuthority:null,topHoldersPct:98.7,lpLockedPct:0,holdersCount:200,factsComplete:true};
  const engine=new MemeRiskGatekeeper({rugCheckService:{auditToken:async()=>report} as any});
- engine.checkMacroCircuitBreaker=async()=>({isBreakerActive:false});
+
  const audit=await engine.auditToken({mint:'mint',liquidityUsd:20000,priceChangeM5:10});
  assert.equal(audit.score,0);assert.equal(audit.safe,false);
  const gate=buildContractGates(audit).find(g=>g.gate==='TOP_HOLDERS')!;

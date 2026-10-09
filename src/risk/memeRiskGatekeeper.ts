@@ -40,50 +40,23 @@ export interface SecurityAuditResult {
 }
 
 export interface MemeGatekeeperConfig {
-  macroSentinelUrl?: string;
   minLiquidityUsd?: number;
   minHolders?: number;
   rugCheckService?: RugCheckService;
-  solanaLayaAdapter?: SolanaLayaAdapter;
-  layaNativeShadowEnabled?: boolean;
 }
 
 export class MemeRiskGatekeeper {
-  private macroSentinelUrl: string;
   private minLiquidityUsd: number;
   private minHolders: number;
   private rugCheckService: RugCheckService;
-  private solanaLayaAdapter: SolanaLayaAdapter;
-  private layaNativeShadowEnabled: boolean;
 
   constructor(config?: MemeGatekeeperConfig) {
-    this.macroSentinelUrl = config?.macroSentinelUrl || process.env.MACRO_SENTINEL_URL || 'http://nexus-macro-sentinel.railway.internal:4005';
     // Trava de Capital Solana: Rejeição estrita se liquidez < $15k
     this.minLiquidityUsd = config?.minLiquidityUsd || 15000;
     this.minHolders = config?.minHolders || 100;
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
-    this.solanaLayaAdapter = config?.solanaLayaAdapter || new SolanaLayaAdapter();
-    this.layaNativeShadowEnabled = config?.layaNativeShadowEnabled
-      ?? process.env.SOLANA_LAYA_SHADOW_ENABLED === 'true';
   }
 
-  public async checkMacroCircuitBreaker(): Promise<{ isBreakerActive: boolean; regime?: string }> {
-    try {
-      const res = await axios.get(`${this.macroSentinelUrl}/v1/sentinel/regime`, {
-        timeout: 2500
-      });
-      if (typeof res.data?.is_circuit_breaker_active !== 'boolean') {
-        return { isBreakerActive: true, regime: 'INVALID_SENTINEL_RESPONSE' };
-      }
-      return {
-        isBreakerActive: res.data.is_circuit_breaker_active,
-        regime: typeof res.data?.regime === 'string' ? res.data.regime : 'UNKNOWN'
-      };
-    } catch (err: any) {
-      console.warn(`[Macro Sentinel] Indisponível (${err.message}). Bypassing (Fail-Open) para manter operações...`);
-      return { isBreakerActive: false, regime: 'SENTINEL_UNAVAILABLE' };
-    }
-  }
 
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
     const startTime = Date.now();
@@ -142,17 +115,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    // 0. Consulta ao Disjuntor Macro Institucional (nexus-macro-sentinel :4005)
-    const macroCheck = await this.checkMacroCircuitBreaker();
-    if (macroCheck.isBreakerActive) {
-      return {
-        safe: false,
-        reason: `Disjuntor Macro Ativado pelo Nexus Sentinel: Mercado em colapso/sangria (${macroCheck.regime || 'BEARISH_DUMP'}). Compras suspensas.`,
-        score: 0,
-        validatedBy: 'MACRO_CIRCUIT_BREAKER',
-        latencyMs: Date.now() - startTime
-      };
-    }
+    // 0. Macro Sentinel check removed by user request
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
     const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress);
@@ -207,18 +170,7 @@ export class MemeRiskGatekeeper {
       h1HighPriceUsd: token.h1HighPriceUsd
     });
 
-    if (this.layaNativeShadowEnabled) {
-      try {
-        layaNativeShadow = await this.solanaLayaAdapter.evaluate(layaFacts);
-        console.log(
-          `[LayaNative:SHADOW] mint=${token.mint} route=${layaNativeShadow.route} ` +
-          `confidence=${layaNativeShadow.routeConfidence.toFixed(4)} abstention=${layaNativeShadow.abstention ?? 'none'} ` +
-          `model=${layaNativeShadow.routingModel ?? 'n/a'} latencyMs=${layaNativeShadow.latencyMs}`
-        );
-      } catch (shadowErr: any) {
-        console.warn(`[LayaNative:SHADOW] falha sem impacto na decisão: ${shadowErr?.message || shadowErr}`);
-      }
-    }
+
 
     return {
         rugCheckReport: rugReport,

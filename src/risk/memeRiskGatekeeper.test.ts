@@ -55,7 +55,7 @@ describe('MemeRiskGatekeeper - Auditoria determinística de Memecoins + Laya sha
     };
 
     const gatekeeper = new MemeRiskGatekeeper({
-      macroSentinelUrl: 'http://127.0.0.1:9997',
+      
       rugCheckService: mockRugCheck as any
     });
 
@@ -203,8 +203,8 @@ it('Laya nativa em shadow pode falhar sem bloquear entrada já aprovada pelos ga
 
     const gatekeeper = new MemeRiskGatekeeper({
       rugCheckService: mockRugCheck as any,
-      layaNativeShadowEnabled: true,
-      solanaLayaAdapter: { evaluate: async () => { throw new Error('shadow offline'); } } as any
+      
+      
     });
 
     const audit = await gatekeeper.auditToken({
@@ -243,8 +243,8 @@ it('ABSTAIN de baixa confiança da Laya shadow não substitui os gates determin�
 
     const gatekeeper = new MemeRiskGatekeeper({
       rugCheckService: mockRugCheck as any,
-      layaNativeShadowEnabled: true,
-      solanaLayaAdapter: { evaluate: async () => shadowDecision } as any
+      
+      
     });
 
     const audit = await gatekeeper.auditToken({
