@@ -29,3 +29,22 @@ test('SolanaPostgresRepository: opera gracioso sem DATABASE_URL configurado', as
   });
 });
 
+test('initTable/initQuarantineTable emitem somente DDL aditivo (sem ALTER/DROP/TRUNCATE/REPLACE)', async () => {
+  const statements: string[] = [];
+  const query = async (sql: string) => {
+    statements.push(sql);
+    return { rows: [] };
+  };
+  const repo = new SolanaPostgresRepository();
+  (repo as any).pool = { query } as any;
+
+  await repo.initTable();
+  await repo.initQuarantineTable();
+
+  assert.equal(statements.length, 2);
+  for (const sql of statements) {
+    assert.match(sql, /CREATE TABLE IF NOT EXISTS/);
+    assert.equal(/ALTER|DROP|TRUNCATE|CREATE\s+OR\s+REPLACE/i.test(sql), false);
+  }
+});
+

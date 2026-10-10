@@ -63,11 +63,6 @@ export class SolanaPostgresRepository {
         tx_signature VARCHAR(128),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-      -- Migração idempotente: scores reais podem ser fracionários (ex.: 91.5).
-      ALTER TABLE solana_agent_audits
-        ALTER COLUMN score TYPE NUMERIC(5,2)
-        USING score::numeric;
-
       CREATE INDEX IF NOT EXISTS idx_solana_audits_mint ON solana_agent_audits(mint);
       CREATE INDEX IF NOT EXISTS idx_solana_audits_created_at ON solana_agent_audits(created_at DESC);
     `;
@@ -94,10 +89,6 @@ export class SolanaPostgresRepository {
         quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         expires_at TIMESTAMPTZ NOT NULL
       );
-      -- Migração idempotente: motivos operacionais completos podem exceder 255 caracteres.
-      ALTER TABLE token_quarantine
-        ALTER COLUMN reason TYPE TEXT;
-
       CREATE INDEX IF NOT EXISTS idx_token_quarantine_expires ON token_quarantine(expires_at DESC);
     `;
 
