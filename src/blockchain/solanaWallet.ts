@@ -17,6 +17,11 @@ export interface TradeValidationResult {
   maxAllowedAllocationSol: number;
 }
 
+export type WalletBalanceObservation =
+  | { available: true; lamports: number; slot: number; observedAtMs: number;
+      provenance: 'FRESH_CONFIRMED_RPC' }
+  | { available: false; reason: 'WALLET_BALANCE_UNAVAILABLE' };
+
 export function createResilientConnection(_urls: string[]): Connection {
   throw new Error('Direct RPC transport disabled; inject hub-backed connection');
 }
@@ -26,7 +31,7 @@ export class SolanaWalletService {
   private publicKey: PublicKey;
   private executionEnv: ExecutionEnvironment;
   private connection: Connection;
-  private lastKnownBalanceSol: number = 0;
+  private lastKnownBalanceSol: number | null = null;
   public static readonly MAX_TRADE_ALLOCATION_RATIO = 0.10; // Teto de 10%
   public static readonly MIN_GAS_RESERVE_SOL = 0.005; // Reserva intangível para taxas
 
@@ -90,16 +95,31 @@ export class SolanaWalletService {
   public async getBalanceSol(): Promise<number> {
     try {
       const lamports = await this.connection.getBalance(this.publicKey);
+      if (!Number.isSafeInteger(lamports) || lamports < 0) throw new Error('INVALID_BALANCE');
       const bal = lamports / LAMPORTS_PER_SOL;
       this.lastKnownBalanceSol = bal;
       return bal;
     } catch (err: any) {
-      if (this.lastKnownBalanceSol > 0) {
-        console.warn(`[SolanaWallet] getBalance falhou (${err?.message || err}). Preservando último saldo conhecido: ${this.lastKnownBalanceSol.toFixed(4)} SOL`);
+      if (this.lastKnownBalanceSol !== null) {
+        console.warn('[SolanaWallet] Balance unavailable; returning cached display value only.');
         return this.lastKnownBalanceSol;
       }
-      return 0;
+      throw new Error('WALLET_BALANCE_UNAVAILABLE');
     }
+  }
+
+  /** getBalance is not hub-cacheable. Entry proof requires this new successful
+   * confirmed observation; cached display values never satisfy admission. */
+  public async readFreshBalance(): Promise<WalletBalanceObservation> {
+    try {
+      const result = await this.connection.getBalanceAndContext(this.publicKey, 'confirmed');
+      if (!Number.isSafeInteger(result.value) || result.value < 0 ||
+          !Number.isSafeInteger(result.context.slot) || result.context.slot <= 0)
+        throw new Error('INVALID_BALANCE');
+      this.lastKnownBalanceSol = result.value / LAMPORTS_PER_SOL;
+      return { available: true, lamports: result.value, slot: result.context.slot,
+        observedAtMs: Date.now(), provenance: 'FRESH_CONFIRMED_RPC' };
+    } catch { return { available: false, reason: 'WALLET_BALANCE_UNAVAILABLE' }; }
   }
 
   /**

@@ -1,4 +1,5 @@
 import type { PreFlightEngine, PreflightRequest, PreflightResult } from './preflightEngine.js';
+import type { WalletBalanceObservation } from '../blockchain/solanaWallet.js';
 
 export interface EntryCandidate {
   mint: string; symbol: string; name: string;
@@ -27,6 +28,7 @@ export interface DurableEntryRegistrar {
 export interface EntryAttempt {
   candidate: EntryCandidate; stakeLamports: number;
   availableLamports: number; reservedGasLamports: number; poolHints?: readonly string[];
+  capitalObservation?: WalletBalanceObservation;
   verifySecurity(candidate: EntryCandidate): Promise<{safe:boolean;reason?:string}>;
   signal?: AbortSignal; lease?: EntryLease;
 }
@@ -59,6 +61,13 @@ export class EntryAdmission {
         if (durableReceipt) return {accepted:true,receipt:durableReceipt,recovered:true};
         stage = 'security';
       }
+      const capital = input.capitalObservation;
+      if (capital?.available !== true || capital.provenance !== 'FRESH_CONFIRMED_RPC' ||
+          !Number.isSafeInteger(capital.lamports) || capital.lamports < 0 ||
+          !Number.isSafeInteger(capital.slot) || capital.slot <= 0 ||
+          !Number.isSafeInteger(capital.observedAtMs) || Date.now() - capital.observedAtMs < 0 ||
+          Date.now() - capital.observedAtMs > 15_000 || input.availableLamports !== capital.lamports)
+        return fail('ENTRY_CAPITAL_UNAVAILABLE');
       if (!Number.isSafeInteger(input.stakeLamports) || input.stakeLamports <= 0 ||
           !input.candidate.mint || !input.candidate.symbol || !input.candidate.name ||
           !Number.isFinite(input.candidate.priceUsd) || input.candidate.priceUsd <= 0 ||

@@ -5,6 +5,34 @@ import { SolanaWalletService } from './solanaWallet.js';
 
 const LIVE_ENV = { SHADOW_MODE: 'false', DRY_RUN_MODE: 'false' };
 
+it('failed initial balance read is unavailable rather than an observed zero', async () => {
+  const wallet = new SolanaWalletService({ connection: { getBalance: async () => {
+    throw new Error('RPC_UNAVAILABLE');
+  } } as any, executionEnv: { SHADOW_MODE: 'true' } });
+  await assert.rejects(wallet.getBalanceSol(), /WALLET_BALANCE_UNAVAILABLE/);
+});
+
+it('strict balance observations carry confirmed slot/time and never reuse display cache on failure', async () => {
+  let unavailable = false;
+  const wallet = new SolanaWalletService({ connection: {
+    getBalance: async () => 1_000_000_000,
+    getBalanceAndContext: async (_owner: unknown, commitment: string) => {
+      assert.equal(commitment, 'confirmed');
+      if (unavailable) throw new Error('RPC_UNAVAILABLE');
+      return { context: { slot: 42 }, value: 1_000_000_000 };
+    }
+  } as any, executionEnv: { SHADOW_MODE: 'true' } });
+  await wallet.getBalanceSol();
+  const observed = await (wallet as any).readFreshBalance?.();
+  assert.equal(observed?.available, true);
+  assert.equal(observed?.lamports, 1_000_000_000);
+  assert.equal(observed?.slot, 42);
+  assert.ok(Number.isSafeInteger(observed?.observedAtMs));
+  unavailable = true;
+  assert.deepEqual(await (wallet as any).readFreshBalance?.(),
+    { available: false, reason: 'WALLET_BALANCE_UNAVAILABLE' });
+});
+
 it('shadow wallet never reads a hostile secret getter and cannot expose a signer', async () => {
   const owner = Keypair.generate().publicKey.toBase58();
   const config = {

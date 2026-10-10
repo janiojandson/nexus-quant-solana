@@ -30,7 +30,7 @@ function scenario(options: {metadata?: boolean; decision?: {accepted:boolean;rea
     positionLedger:{recover:async()=>null},
     positionEngine:{getAllPositions:()=>[]},MAX_CONCURRENT_POSITIONS:2,
     exitPathHealth:{snapshot:()=>({canOpenNewPosition:true})},
-    wallet:{getBalanceSol:async()=>1},
+    wallet:{getBalanceSol:async()=>1,readFreshBalance:async()=>({available:true,lamports:1_000_000_000,slot:123,observedAtMs:1750000000000,provenance:'FRESH_CONFIRMED_RPC'})},
     buildEquitySizingPolicy:()=>({canOpenNextPosition:true,ladderSol:[0.025],gasReserveSol:0.005}),
     ENTRY_EQUITY_PCT:0.1,MAX_TOTAL_ALLOCATION_PCT:0.2,BUY_AMOUNT_SOL:0.025,
     MAX_TOTAL_ALLOCATION_SOL:0.1,GAS_RESERVE_EQUITY_PCT:0.1,

@@ -27,7 +27,8 @@ function run(decision:{accepted:boolean;reason?:string;receipt?:{traceId:string;
     TokenClassifier:{classify:()=>({isEligibleForMemeScan:true})},
     antiSpamMemory:{shouldSkip:()=>({skip:false}),recordTechnicalDiscard:(_mint:string,reason:string)=>discards.push(reason),
       recordVeto:()=>{throw new Error('unexpected durable veto');}},
-    latestShadowEntryLadderLamports:[25_000_000],balanceSol:1,
+    latestShadowEntryLadderLamports:[25_000_000],
+    capitalObservation:{available:true,lamports:100_000_000,slot:123,observedAtMs:1750000000000,provenance:'FRESH_CONFIRMED_RPC'},
     capitalPolicy:{gasReserveSol:0.005},
     entryAdmission:{attempt:async(input:any)=>{attempts.push(input);
       await input.verifySecurity(input.candidate);return decision;}},
