@@ -80,3 +80,14 @@ test('wallet custody refresh cannot reconcile real SPL balance into SHADOW token
   assert.ok(body.indexOf("tracked.accountingMode === 'SHADOW'") >= 0);
   assert.ok(body.indexOf("tracked.accountingMode === 'SHADOW'") < body.indexOf('tracked.tokenAmount = atomicAmount'));
 });
+
+test('runtime treats quote HOLD as ordinary retry while persistence failures lock reconciliation', () => {
+  assert.ok(monitor?.body);
+  const body = monitor.getText(source);
+  const commit = body.indexOf('await commitShadowExitFromQuote(');
+  const hold = body.indexOf("shadowOutcome.kind === 'HOLD'");
+  const lock = body.indexOf('uncertainExitMints.add(pos.mint)', commit);
+  assert.ok(commit >= 0 && hold > commit && lock > hold);
+  assert.match(body.slice(commit, lock), /SHADOW_QUOTE_HOLD/);
+  assert.match(body.slice(lock), /SHADOW ledger commit uncertain/);
+});

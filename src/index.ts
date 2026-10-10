@@ -1461,7 +1461,7 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           );
           if (pos.accountingMode === 'SHADOW') {
             try {
-              await commitShadowExitFromQuote({ position: {
+              const shadowOutcome = await commitShadowExitFromQuote({ position: {
                 mint: pos.mint, traceId: pos.traceId!, tokenAmount: pos.tokenAmount,
                 initialCapitalSol: pos.entrySolValue,
                 highestTpStepReached: pos.highestTpStepReached,
@@ -1481,6 +1481,9 @@ async function runUltraFastExitMonitor(onlyMint: string) {
                 if (result.position.status === 'FULLY_CLOSED') positionEngine.removePosition(pos.mint);
                 else restoreShadowPosition(result.position);
               } });
+              if (shadowOutcome.kind === 'HOLD') {
+                console.warn(`[SHADOW_QUOTE_HOLD] ${pos.mint}: ${shadowOutcome.reason}; next poll may re-quote.`);
+              }
             } catch (error) {
               uncertainExitMints.add(pos.mint);
               executionUncertainReason = `SHADOW ledger commit uncertain for ${pos.mint}; reconcile before another fill.`;

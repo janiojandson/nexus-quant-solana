@@ -14,25 +14,40 @@ export interface ShadowExitInput {
   persist(fill: DurableExitFill): Promise<DurableFillResult>;
   apply(result: DurableFillResult): void;
 }
+export type ShadowExitOutcome =
+  | { kind: 'HOLD'; reason: string }
+  | { kind: 'COMMITTED'; fill: DurableFillResult };
 
 /** A quote is hypothetical evidence; no swap, wallet delta or rent recovery occurs. */
-export async function commitShadowExitFromQuote(input: ShadowExitInput): Promise<DurableFillResult> {
+export async function commitShadowExitFromQuote(input: ShadowExitInput): Promise<ShadowExitOutcome> {
   const { position, exitTokenAmount } = input;
   if (!position.traceId || !Number.isSafeInteger(exitTokenAmount) || exitTokenAmount <= 0 ||
-      exitTokenAmount > position.tokenAmount) throw new Error('INVALID_SHADOW_EXIT');
+      exitTokenAmount > position.tokenAmount)
+    return { kind: 'HOLD', reason: 'INVALID_SHADOW_EXIT' };
   const reusable = input.monitorQuote.inAmount === exitTokenAmount &&
     input.now() - input.quoteAt >= 0 && input.now() - input.quoteAt <= 1000;
-  const quote = reusable ? input.monitorQuote : await input.getQuote();
+  let quote: Quote;
+  try { quote = reusable ? input.monitorQuote : await input.getQuote(); }
+  catch { return { kind: 'HOLD', reason: 'PARTIAL_QUOTE_UNAVAILABLE' }; }
   if (quote.inAmount !== exitTokenAmount || !Number.isSafeInteger(quote.outAmount) || quote.outAmount <= 0)
-    throw new Error('STALE_OR_INVALID_EXIT_QUOTE');
-  const liquidable = shadowLiquidableValue(quote, exitTokenAmount, input.taker);
+    return { kind: 'HOLD', reason: 'STALE_OR_INVALID_EXIT_QUOTE' };
+  let liquidable: ReturnType<typeof shadowLiquidableValue>;
+  let monitorNetLamports: number;
+  try {
+    liquidable = shadowLiquidableValue(quote, exitTokenAmount, input.taker);
+    monitorNetLamports = shadowLiquidableValue(input.monitorQuote, position.tokenAmount,
+      input.taker).netLamports;
+  } catch (error) {
+    return { kind: 'HOLD', reason: error instanceof Error &&
+      error.message.startsWith('SHADOW_QUOTE_') ? error.message : 'SHADOW_QUOTE_PROOF_UNAVAILABLE' };
+  }
   const isFull = exitTokenAmount === position.tokenAmount;
   const nextStep = isFull ? (position.highestTpStepReached ?? 0) :
     Math.min(2, (position.highestTpStepReached ?? 0) + 1);
   if (!isFull && nextStep === 1 &&
       (!Number.isFinite(position.initialCapitalSol) || (position.initialCapitalSol ?? 0) <= 0 ||
        liquidable.netLamports < Math.ceil(position.initialCapitalSol! * 1e9)))
-    throw new Error('TP1_NOMINAL_RECOVERY_UNPROVEN');
+    return { kind: 'HOLD', reason: 'TP1_NOMINAL_RECOVERY_UNPROVEN' };
   const ratio = (position.tokenAmount - exitTokenAmount) / position.tokenAmount;
   const result = await input.persist({ accountingMode: 'SHADOW', traceId: position.traceId,
     fillId: quote.requestId || `${position.traceId}:${input.quoteAt}:${exitTokenAmount}`,
@@ -50,9 +65,8 @@ export async function commitShadowExitFromQuote(input: ShadowExitInput): Promise
       position.executablePeakSolValue * ratio,
     observablePeakSolValue: position.observablePeakSolValue == null ? undefined :
       position.observablePeakSolValue * ratio,
-    lastJupiterExecutableSolValue: isFull ? undefined :
-      shadowLiquidableValue(input.monitorQuote, position.tokenAmount, input.taker).netLamports / 1e9 * ratio,
+    lastJupiterExecutableSolValue: isFull ? undefined : monitorNetLamports / 1e9 * ratio,
     lastHealthyExitRouteAt: input.now() });
   input.apply(result);
-  return result;
+  return { kind: 'COMMITTED', fill: result };
 }
