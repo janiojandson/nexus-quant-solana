@@ -9,6 +9,7 @@ import { shadowLiquidableValue } from '../../src/execution/shadowQuoteValue.js';
 import { createQuantHubs } from '../../src/hubs/runtimeHubs.js';
 import { fixtureMint } from '../fixtures/physicalPool.js';
 import { fixtureTaker, shadow4dFixture } from '../fixtures/shadow4d.js';
+import { unsignedFeeOrder } from '../../src/execution/unsignedFeeProof.testFixture.js';
 
 // SQL-boundary fixture, not PostgreSQL: preserve rows over a simulated process restart.
 function memorySql() {
@@ -70,7 +71,10 @@ function memorySql() {
 
 function quote(amount: number, minimum: number, id: string) {
   return { inAmount: amount, outAmount: minimum + 5_000, requestId: id, priceImpactPct: 0,
-    rawQuote: { otherAmountThreshold: String(minimum), feeBps: 0,
+    rawQuote: { inAmount: String(amount), outAmount: String(minimum + 5_000),
+      inputMint: fixtureMint.toBase58(), outputMint: 'So11111111111111111111111111111111111111112',
+      otherAmountThreshold: String(minimum), feeBps: 0,
+      taker: fixtureTaker, transaction: unsignedFeeOrder(fixtureTaker),
       signatureFeeLamports: 5_000, signatureFeePayer: fixtureTaker,
       prioritizationFeeLamports: 0, prioritizationFeePayer: fixtureTaker,
       rentFeeLamports: 0, rentFeePayer: fixtureTaker } };
@@ -95,6 +99,7 @@ test('offline discovery -> physical 20 SOL -> 4D -> durable SHADOW -> TP1/TP2 ->
   let ledger = new PostgresPositionLedger(db.pool as any, restore);
   const admission = new EntryAdmission(f.preflight, ledger);
   const input = { candidate, stakeLamports: 25_000_000, availableLamports: 100_000_000,
+    capitalObservation: { available: true, lamports: 100_000_000, slot: 123, observedAtMs: Date.now(), provenance: 'FRESH_CONFIRMED_RPC' },
     reservedGasLamports: 5_000_000, verifySecurity: async () => ({ safe: true }) };
   const decision = await admission.attempt(input);
   assert.equal(decision.accepted, true, JSON.stringify(decision));
@@ -161,7 +166,7 @@ test('composed admission rejects corrupted physical vault before entry quotes or
   const result = await new EntryAdmission(f.preflight, new PostgresPositionLedger(db.pool as any))
     .attempt({ candidate: { mint: fixtureMint.toBase58(), symbol: 'FIX', name: 'Fixture',
       priceUsd: 0.01, liquidityUsd: 30000, pairAddress: f.physical.address.toBase58() },
-      stakeLamports: 25_000_000, availableLamports: 100_000_000, reservedGasLamports: 5_000_000,
+      stakeLamports: 25_000_000, availableLamports: 100_000_000, capitalObservation: { available: true, lamports: 100_000_000, slot: 123, observedAtMs: Date.now(), provenance: 'FRESH_CONFIRMED_RPC' }, reservedGasLamports: 5_000_000,
       verifySecurity: async () => ({ safe: true }) });
   assert.equal(result.accepted, false);
   assert.equal(f.calls.length, 0);
@@ -188,7 +193,7 @@ for (const [name, options] of [
     const result = await new EntryAdmission(f.preflight, new PostgresPositionLedger(db.pool as any))
       .attempt({ candidate: { mint: fixtureMint.toBase58(), symbol: 'FIX', name: 'Fixture',
         priceUsd: 0.01, liquidityUsd: 30000, pairAddress: f.physical.address.toBase58() },
-        stakeLamports: 25_000_000, availableLamports: 100_000_000, reservedGasLamports: 5_000_000,
+        stakeLamports: 25_000_000, availableLamports: 100_000_000, capitalObservation: { available: true, lamports: 100_000_000, slot: 123, observedAtMs: Date.now(), provenance: 'FRESH_CONFIRMED_RPC' }, reservedGasLamports: 5_000_000,
         verifySecurity: async () => ({ safe: true }) });
     assert.equal(result.accepted, false);
     assert.equal(db.queries.some(sql => sql.startsWith('INSERT')), false);

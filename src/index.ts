@@ -190,6 +190,14 @@ const exitOrderInFlight = new Set<string>();
 const uncertainExitMints = new Set<string>();
 /** Circuit breaker em memória: impede novas entradas após uma execução V2 inconclusiva. */
 let executionUncertainReason: string | null = null;
+let bootstrapComplete = false;
+let shadowRestoreFailed = false;
+const releaseReadiness = () => ({
+  ready: bootstrapComplete && !executionUncertainReason && !NEXUS_MAINTENANCE_MODE,
+  reason: shadowRestoreFailed ? 'SHADOW_LEDGER_UNAVAILABLE' : !bootstrapComplete ? 'BOOT_NOT_CONFIRMED'
+    : executionUncertainReason ? 'EXECUTION_RECONCILIATION_REQUIRED'
+    : NEXUS_MAINTENANCE_MODE ? 'MAINTENANCE_MODE' : 'BOOT_COMPLETE'
+});
 
 const jupiterEngine = new JupiterExecutionEngine({
   connection: hubConnection,
@@ -1088,6 +1096,7 @@ function updateDashboardViews() {
 // Inicia servidor HTTP modular para Healthcheck, API REST e Dashboard Web
 const server = http.createServer(async (req, res) => {
   const handled = await handleApiRoutes(req, res, {
+    getReadiness: releaseReadiness,
     latestState,
     dailyPnlState: dailyPnlTracker.getState(),
     executeExitOrder: (mint, reason, pnlPct, exitSolValue, options) =>
@@ -1303,7 +1312,8 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           'So11111111111111111111111111111111111111112',
           tokenAtomicAmount,
           500,
-          priorityForJupiterWork('EXIT_CONFIRMATION')
+          priorityForJupiterWork('EXIT_CONFIRMATION'),
+          pos.accountingMode === 'SHADOW' ? OFFICIAL_PHANTOM_WALLET : undefined
         );
         const marketSnapshot = exitTelemetry.read(`${pos.mint}:${pos.entryPairAddress || ''}`);
         const physicalSnapshot = await physicalSnapshotPromise;
@@ -1431,6 +1441,7 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           Date.now(),
           {
             physicalReservoirDrained,
+            initialGrossPoolEvidence: physicalSnapshot?.ok === true ? physicalSnapshot.evidence : null,
             currentLiquidityUsd: pos.accountingMode === 'SHADOW' ? undefined : marketSnapshot?.liquidityUsd,
             currentVolume5m: marketSnapshot?.volume5mUsd
           }
@@ -1475,7 +1486,7 @@ async function runUltraFastExitMonitor(onlyMint: string) {
               getQuote: () => jupiterEngine.getQuote(pos.mint,
                 'So11111111111111111111111111111111111111112',
                 assertStoredAtomicNumberToNumber(exitSignal.exitTokenAmount || pos.tokenAmount),
-                500, priorityForJupiterWork('PROTECTIVE_EXIT')),
+                500, priorityForJupiterWork('PROTECTIVE_EXIT'), OFFICIAL_PHANTOM_WALLET),
               persist: fill => positionLedger.appendExitFill(fill),
               apply: result => {
                 if (result.position.status === 'FULLY_CLOSED') positionEngine.removePosition(pos.mint);
@@ -1593,7 +1604,15 @@ async function executeAutonomousCycle() {
     console.log(`====================================================`);
 
     // Ciclo 1: Leitura de Vitalidade On-Chain
-    const balanceSol = await wallet.getBalanceSol();
+    const capitalObservation = await wallet.readFreshBalance();
+    latestState.walletBalanceAvailable = capitalObservation.available;
+    if (!capitalObservation.available) {
+      latestState.balanceSol = null;
+      latestState.vitalityState = 'UNKNOWN';
+      console.warn('[ENTRY_CAPITAL_UNAVAILABLE] Discovery requires fresh confirmed balance.');
+      return;
+    }
+    const balanceSol = capitalObservation.lamports / 1e9;
     const vitalityState = getAgentVitalityState(balanceSol);
     console.log(`📊 Saldo On-Chain: ${balanceSol.toFixed(4)} SOL | Estado Vital: [${vitalityState}]`);
 
@@ -1743,7 +1762,7 @@ async function executeAutonomousCycle() {
       if (!Number.isSafeInteger(stakeLamports) || stakeLamports <= 0) continue;
       let securityAudit: Awaited<ReturnType<typeof entryGatekeeper.auditToken>> | undefined;
       const decision = await entryAdmission.attempt({ candidate, stakeLamports,
-        availableLamports: Math.floor(balanceSol * 1e9),
+        availableLamports: capitalObservation.lamports, capitalObservation,
         reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
         poolHints: [token.pairAddress],
         verifySecurity: async facts => {
@@ -2105,8 +2124,13 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       await sentinelHandoffScanner.release(mint, leaseId, 'ENTRY_CAPACITY_UNAVAILABLE');
       return;
     }
-    const balanceSol = await wallet.getBalanceSol();
+    const capitalObservation = await wallet.readFreshBalance();
     await token.assertLeaseActive();
+    if (!capitalObservation.available) {
+      await sentinelHandoffScanner.release(mint, leaseId, 'ENTRY_CAPITAL_UNAVAILABLE');
+      return;
+    }
+    const balanceSol = capitalObservation.lamports / 1e9;
     const activePositions = positionEngine.getAllPositions();
     const capitalPolicy = buildEquitySizingPolicy({
       cashBalanceSol: balanceSol,
@@ -2128,7 +2152,7 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     }
     const stakeLamports = Math.floor(capitalPolicy.ladderSol[0] * 1e9);
     const decision = await entryAdmission.attempt({ candidate, stakeLamports,
-      availableLamports: Math.floor(balanceSol * 1e9),
+      availableLamports: capitalObservation.lamports, capitalObservation,
       reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
       poolHints: [poolEvidence.poolAddress, ...token.poolHints],
       signal: token.leaseSignal,
@@ -2235,8 +2259,10 @@ async function main() {
     try {
       for (const state of await positionLedger.readOpenShadowPositions()) restoreShadowPosition(state);
     } catch (error) {
-      executionUncertainReason = `SHADOW ledger unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      shadowRestoreFailed = true;
+      executionUncertainReason = 'SHADOW ledger unavailable';
       console.error(`[SHADOW_LEDGER_UNAVAILABLE] ${executionUncertainReason}`);
+      console.error(JSON.stringify({ event: 'QUANT_READINESS', ...releaseReadiness() }));
     }
   }
 
@@ -2283,6 +2309,9 @@ async function main() {
   }, 250);
 
   // 4. Executa o primeiro ciclo de scanner imediatamente
+  bootstrapComplete = true;
+  console.log(JSON.stringify({ event: 'QUANT_READINESS', ...releaseReadiness(),
+    scope: 'BOOTSTRAP_ONLY_NOT_PROVIDER_OR_PROFITABILITY_PROOF' }));
   await executeAutonomousCycle();
 
   // 5. Loop Independente de Scanner de Novos Tokens a cada 30s
@@ -2309,6 +2338,7 @@ process.on('SIGINT', async () => {
 });
 
 main().catch(err => {
+  console.error(JSON.stringify({ event: 'QUANT_READINESS', ready: false, reason: 'BOOTSTRAP_FAILED' }));
   console.error('❌ Falha fatal ao inicializar o agente:', err);
   process.exit(1);
 });
