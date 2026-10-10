@@ -51,22 +51,66 @@ test('PositionExitEngine: parcial só altera estado depois da confirmação do s
   const eval1 = engine.evaluateExitBySol(mint, 0.02025); // +35%
   assert.strictEqual(eval1.shouldExit, true);
   assert.strictEqual(eval1.type, 'PARTIAL_TAKE_PROFIT_50');
-  assert.strictEqual(eval1.exitTokenAmount, 500);
+  assert.strictEqual(eval1.exitTokenAmount, 741);
   assert.strictEqual(eval1.shouldCloseAta, false);
 
   let pos = engine.getPosition(mint);
   assert.notStrictEqual(pos?.partialTaken, true, 'sinal não pode fingir venda antes da confirmação');
   assert.strictEqual(pos?.tokenAmount, 1000);
 
-  assert.strictEqual(engine.commitPartialExit(mint, 500, 0.02025), true);
+  assert.strictEqual(engine.commitPartialExit(mint, 741, 0.02025), true);
   pos = engine.getPosition(mint);
   assert.strictEqual(pos?.partialTaken, true);
-  assert.strictEqual(pos?.tokenAmount, 500);
-  assert.strictEqual(pos?.entrySol, 0.0075);
-  assert.strictEqual(pos?.stopLossPct, 0.01);
+  assert.strictEqual(pos?.tokenAmount, 259);
+  assert.strictEqual(pos?.entrySol, 0.003885);
+  assert.strictEqual(pos?.stopLossPct, 0);
 });
 
-test('PositionExitEngine: deve mover SL para Breakeven (+1%) ao atingir +12% de pico pré-parcial', () => {
+test('confirmed physical reservoir drain exits fully while unknown reserve does not invent drain', () => {
+  const engine = new PositionExitEngine();
+  engine.addPosition({ mint: 'physical', symbol: 'PHY', tokenAmount: 1000,
+    entryPriceUsd: 1, entryTimestamp: Date.now(), entrySol: 1 });
+  assert.equal(engine.evaluateExitBySol('physical', 1.1, Date.now(), {}).shouldExit, false);
+  const drain = engine.evaluateExitBySol('physical', 1.1, Date.now(),
+    { physicalReservoirDrained: true });
+  assert.equal(drain.shouldExit, true);
+  assert.equal(drain.type, 'STOP_LOSS');
+  assert.equal(drain.exitTokenAmount, 1000);
+  assert.match(drain.reasonDetail || '', /PHYSICAL_RESERVOIR_DRAIN/);
+});
+
+test('TP1 triggers at exactly 35%, sells the atomic ceiling of principal recovery, and leaves pre-TP2 runner untrailed', () => {
+  const engine = new PositionExitEngine();
+  engine.addPosition({ mint: 'exact', symbol: 'EXACT', tokenAmount: 1000,
+    entryPriceUsd: 1, entryTimestamp: Date.now(), entrySol: 1 });
+  assert.equal(engine.evaluateExitBySol('exact', 1.349999).shouldExit, false);
+  const signal = engine.evaluateExitBySol('exact', 1.35);
+  assert.equal(signal.exitTokenAmount, 741); // ceil(1000 * 20/27)
+  assert.equal(signal.type, 'PARTIAL_TAKE_PROFIT_50');
+  engine.commitPartialExit('exact', 741, 1.35);
+  const remaining = engine.getPosition('exact')!;
+  assert.equal(remaining.highestTpStepReached, 1);
+  assert.equal(remaining.stopLossPct, 0);
+  assert.equal(engine.evaluateExitBySol('exact', 0.34).type, 'HOLD');
+});
+
+test('TP2 sells half the remaining atomic amount; only the moonbag then trails 10%', () => {
+  const engine = new PositionExitEngine();
+  engine.addPosition({ mint: 'moon', symbol: 'MOON', tokenAmount: 1000,
+    entryPriceUsd: 1, entryTimestamp: Date.now(), entrySol: 1 });
+  engine.evaluateExitBySol('moon', 1.35);
+  engine.commitPartialExit('moon', 741, 1.35);
+  const tp2 = engine.evaluateExitBySol('moon', 0.518);
+  assert.equal(tp2.exitTokenAmount, 130); // ceil(259/2)
+  engine.commitPartialExit('moon', 130, 0.518);
+  assert.equal(engine.getPosition('moon')?.tokenAmount, 129);
+  const held = engine.evaluateExitBySol('moon', 0.30);
+  assert.equal(held.type, 'HOLD');
+  const trail = engine.evaluateExitBySol('moon', 0.22);
+  assert.equal(trail.type, 'TRAILING_STOP');
+});
+
+test('pre-TP1 +12% peak retains the initial -12.5% stop', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestBreakevenTrigger';
   engine.addPosition({
@@ -81,17 +125,14 @@ test('PositionExitEngine: deve mover SL para Breakeven (+1%) ao atingir +12% de 
   // Sobe para +12%
   engine.evaluateExitBySol(mint, 0.0168);
   const pos = engine.getPosition(mint);
-  assert.strictEqual(pos?.stopLossPct, 0.01, 'Stop deve subir para +1% ao atingir +12%');
+  assert.strictEqual(pos?.stopLossPct, -0.125);
 
   // Breakeven crossed: stop loss now has priority over the armed trailing.
   const evalRecuo = engine.evaluateExitBySol(mint, 0.01507);
-  assert.strictEqual(evalRecuo.shouldExit, true);
-  assert.strictEqual(evalRecuo.type, 'STOP_LOSS');
-  assert.strictEqual(evalRecuo.reasonDetail, 'INITIAL_STOP_LOSS');
-  assert.strictEqual(evalRecuo.shouldCloseAta, true);
+  assert.strictEqual(evalRecuo.shouldExit, false);
 });
 
-test('PositionExitEngine: pos-parcial, deve encerrar TRAILING_STOP se recuar 10% do topo maximo', () => {
+test('trailing 10% activates only after TP2', () => {
   const engine = new PositionExitEngine();
   const mint = 'TestMintTrailing10';
   engine.addPosition({
@@ -105,9 +146,10 @@ test('PositionExitEngine: pos-parcial, deve encerrar TRAILING_STOP se recuar 10%
 
   const partial = engine.evaluateExitBySol(mint, 0.02025); // Sinaliza parcial de +35%
   engine.commitPartialExit(mint, partial.exitTokenAmount || 500, 0.02025);
-  engine.evaluateExitBySol(mint, 0.030);   // Pico sobe para 0.030 SOL
-  // Stop trailing a -10% de 0.030 = 0.027
-  const evalTrailing = engine.evaluateExitBySol(mint, 0.0269);
+  const tp2 = engine.evaluateExitBySol(mint, 0.008);
+  engine.commitPartialExit(mint, tp2.exitTokenAmount || 1, 0.008);
+  engine.evaluateExitBySol(mint, 0.010);
+  const evalTrailing = engine.evaluateExitBySol(mint, 0.0089);
   assert.strictEqual(evalTrailing.shouldExit, true);
   assert.strictEqual(evalTrailing.type, 'TRAILING_STOP');
   assert.strictEqual(evalTrailing.shouldCloseAta, true);
@@ -275,15 +317,15 @@ test('PositionExitEngine: deve exibir explicitamente SL Fixo e Trailing INATIVO 
 
   // Antes da parcial
   const statusPre = engine.getStopStatusText(mint);
-  assert.strictEqual(statusPre, 'Stop Ativo: SL Fixo (-20.00%) | Trailing: aguardando +8%');
+  assert.strictEqual(statusPre, 'Stop Ativo: Piso Fixo (-20.00%) | Trailing: INATIVO');
 
   // Sinaliza e confirma parcial em +100%
   const partial = engine.evaluateExitBySol(mint, 0.030);
   engine.commitPartialExit(mint, partial.exitTokenAmount || 500, 0.030);
 
-  // Pós-parcial
+  // TP1 keeps trailing inactive; TP2 arms it.
   const statusPost = engine.getStopStatusText(mint);
-  assert.ok(statusPost.includes('Stop Ativo: Trailing Dinâmico (-10% do Topo:'));
+  assert.ok(statusPost.includes('Trailing: INATIVO'));
 });
 
 test('PositionExitEngine (Watchdog): deve emitir aviso em 5 falhas e disparar contingência em 8 falhas', () => {
@@ -327,7 +369,7 @@ test('PositionExitEngine (Watchdog): deve emitir aviso em 5 falhas e disparar co
 });
 
 
-test('PositionExitEngine: trailing de momentum protege ganho antes da parcial', () => {
+test('pre-TP1 momentum does not activate a conflicting early trailing stop', () => {
   const engine = new PositionExitEngine();
   const mint = 'EarlyMomentumTrailing';
   engine.addPosition({
@@ -343,10 +385,7 @@ test('PositionExitEngine: trailing de momentum protege ganho antes da parcial', 
   assert.strictEqual(peak.shouldExit, false);
 
   const reversal = engine.evaluateExitBySol(mint, 0.01545); // +3%, abaixo do trailing de 6% do topo
-  assert.strictEqual(reversal.shouldExit, true);
-  assert.strictEqual(reversal.type, 'TRAILING_STOP');
-  assert.strictEqual(reversal.shouldCloseAta, true);
-  assert.strictEqual(reversal.reasonDetail, 'EARLY_MOMENTUM_TRAILING');
+  assert.strictEqual(reversal.shouldExit, false);
 });
 
 
@@ -361,6 +400,7 @@ test('PositionExitEngine: deve reidratar watermark persistido do trailing após 
     entryTimestamp: Date.now(),
     entrySol: 0.015,
     partialTaken: true,
+    highestTpStepReached: 2,
     peakSolValue: 0.030
   });
 
@@ -438,7 +478,7 @@ test('partial confirmation preserves proportional executable high-water mark',()
  engine.evaluateExitBySol('Peak',0.04);
  assert.strictEqual(engine.commitPartialExit('Peak',500,0.03),true);
  assert.strictEqual(engine.getPosition('Peak')?.executablePeakSolValue,0.02);
- assert.strictEqual(engine.evaluateExitBySol('Peak',0.015).type,'TRAILING_STOP');
+ assert.strictEqual(engine.evaluateExitBySol('Peak',0.015).type,'HOLD');
 });
 test('full protective exits precede profit partials after a pullback or liquidity drain',()=>{
  for (const kind of ['pullback','drain']) {
@@ -446,12 +486,13 @@ test('full protective exits precede profit partials after a pullback or liquidit
  engine.addPosition({mint:kind,symbol:kind,tokenAmount:1000,entryPriceUsd:1,entryTimestamp:Date.now(),entrySol:0.02,entryLiquidityUsd:1000});
  if(kind==='pullback')engine.evaluateExitBySol(kind,0.04);
  const signal=engine.evaluateExitBySol(kind,0.03,Date.now(),{currentLiquidityUsd:kind==='drain'?500:1000});
- assert.strictEqual(signal.shouldExit,true);assert.strictEqual(signal.exitTokenAmount,1000);
- assert.notStrictEqual(signal.type,'PARTIAL_TAKE_PROFIT_50');
+ if (kind === 'drain') { assert.strictEqual(signal.shouldExit,true);assert.strictEqual(signal.exitTokenAmount,1000);
+   assert.notStrictEqual(signal.type,'PARTIAL_TAKE_PROFIT_50'); }
+ else { assert.strictEqual(signal.type, 'PARTIAL_TAKE_PROFIT_50'); }
  }
 });
 
-test('PositionExitEngine (4D TP Ladder): deve executar escada completa TP1 (50%), TP2 (50%) e TP3 (100% hard cap)', () => {
+test('4D ladder recovers nominal principal then halves remaining, with no TP3 liquidation', () => {
   const engine = new PositionExitEngine();
   const mint = 'LadderMint4D';
   engine.addPosition({
@@ -467,35 +508,31 @@ test('PositionExitEngine (4D TP Ladder): deve executar escada completa TP1 (50%)
   const tp1 = engine.evaluateExitBySol(mint, 0.02025);
   assert.strictEqual(tp1.shouldExit, true);
   assert.strictEqual(tp1.type, 'PARTIAL_TAKE_PROFIT_50');
-  assert.strictEqual(tp1.exitTokenAmount, 500);
+  assert.strictEqual(tp1.exitTokenAmount, 741);
   assert.strictEqual(tp1.shouldCloseAta, false);
   assert.ok(tp1.reasonDetail?.includes('TP_LADDER_STEP_1_35PCT'));
-  engine.commitPartialExit(mint, 500, 0.02025);
+  engine.commitPartialExit(mint, 741, 0.02025);
 
   let pos = engine.getPosition(mint);
   assert.strictEqual(pos?.highestTpStepReached, 1);
-  assert.strictEqual(pos?.tokenAmount, 500);
-  assert.strictEqual(pos?.stopLossPct, 0.01, 'Stop Loss puxado para Breakeven (+1.0%)');
+  assert.strictEqual(pos?.tokenAmount, 259);
+  assert.strictEqual(pos?.stopLossPct, 0);
 
   // Degrau 2: +100% -> Vende 50% do saldo restante (50% de 500 = 250 tokens)
-  const tp2 = engine.evaluateExitBySol(mint, 0.0155); // PnL > +100% líquido sobre base ajustada (0.0075 SOL)
+  const tp2 = engine.evaluateExitBySol(mint, 0.008); // PnL > +100% sobre custo restante
   assert.strictEqual(tp2.shouldExit, true);
   assert.strictEqual(tp2.type, 'PARTIAL_TAKE_PROFIT_50');
-  assert.strictEqual(tp2.exitTokenAmount, 250);
+  assert.strictEqual(tp2.exitTokenAmount, 130);
   assert.strictEqual(tp2.shouldCloseAta, false);
   assert.ok(tp2.reasonDetail?.includes('TP_LADDER_STEP_2_100PCT'));
-  engine.commitPartialExit(mint, 250, 0.0155);
+  engine.commitPartialExit(mint, 130, 0.008);
 
   pos = engine.getPosition(mint);
   assert.strictEqual(pos?.highestTpStepReached, 2);
-  assert.strictEqual(pos?.tokenAmount, 250);
+  assert.strictEqual(pos?.tokenAmount, 129);
 
   // Degrau 3: +300% -> Vende 100% (250 tokens) e fecha ATA (Hard Cap / Rug Prevention)
-  const tp3 = engine.evaluateExitBySol(mint, 0.0155); // PnL > +300% líquido sobre base de 0.00375 SOL
-  assert.strictEqual(tp3.shouldExit, true);
-  assert.strictEqual(tp3.type, 'TAKE_PROFIT');
-  assert.strictEqual(tp3.exitTokenAmount, 250);
-  assert.strictEqual(tp3.shouldCloseAta, true);
-  assert.ok(tp3.reasonDetail?.includes('TP_LADDER_STEP_3_300PCT'));
+  const moonbag = engine.evaluateExitBySol(mint, 0.0155);
+  assert.strictEqual(moonbag.shouldExit, false);
 });
 

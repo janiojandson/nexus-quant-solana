@@ -70,3 +70,31 @@ test('temporary security and preflight exceptions retain their stage-specific de
   assert.deepEqual(await preflight.attempt({...input,verifySecurity:async()=>({safe:true})}),
     {accepted:false,reason:'PREFLIGHT_UNAVAILABLE'});
 });
+
+test('committed registration with lease lost after commit returns a durable reconciliation receipt, never acceptance', async () => {
+  let active = true;
+  const receipt = { durable: true as const, positionRegistered: true as const,
+    accountingMode: 'SHADOW' as const, entryIntentId: 'intent', traceId: 'trace' };
+  const admission = new EntryAdmission({ run: async () => accepted } as any,
+    { register: async () => { active = false; return receipt; } });
+  const result = await admission.attempt({ candidate, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000,
+    lease: { mint: 'mint', leaseId: 'old', assertLeaseActive: async () => {
+      if (!active) throw new Error('LEASE_LOST');
+    } }, verifySecurity: async () => ({ safe: true }) });
+  assert.deepEqual(result, { accepted: false, reason: 'DURABLE_COMMITTED_RECONCILE', receipt });
+});
+
+test('new fenced lease recovers an existing durable entry without re-running purchase preflight', async () => {
+  const receipt = { durable: true as const, positionRegistered: true as const,
+    accountingMode: 'SHADOW' as const, entryIntentId: 'intent', traceId: 'trace' };
+  const admission = new EntryAdmission({ run: async () => {
+    throw new Error('DUPLICATE_PREFLIGHT');
+  } } as any, { register: async () => { throw new Error('DUPLICATE_REGISTER'); },
+    recover: async () => receipt } as any);
+  const result = await admission.attempt({ candidate, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000,
+    lease: { mint: 'mint', leaseId: 'new', assertLeaseActive: async () => {} },
+    verifySecurity: async () => { throw new Error('DUPLICATE_SECURITY'); } });
+  assert.deepEqual(result, { accepted: true, receipt, recovered: true });
+});

@@ -5,7 +5,7 @@ export interface EntryCandidate {
   priceUsd: number; liquidityUsd: number; pairAddress: string;
 }
 export interface EntryLease {
-  mint: string; leaseId: string; assertLeaseActive(): Promise<void>;
+  mint: string; leaseId: string; sourceEventAt?: string; assertLeaseActive(): Promise<void>;
 }
 export interface DurableEntryReceipt {
   durable: true; positionRegistered: true; accountingMode: 'SHADOW';
@@ -20,6 +20,9 @@ export interface DurableEntryRegistrar {
     accountingMode: 'SHADOW'; abortSignal?: AbortSignal;
     lease?: EntryLease;
   }): Promise<DurableEntryReceipt>;
+  /** Recovery only reads an already committed active position under the current lease. */
+  recover?(input: { candidate: EntryCandidate; abortSignal?: AbortSignal;
+    lease?: EntryLease }): Promise<DurableEntryReceipt | null>;
 }
 export interface EntryAttempt {
   candidate: EntryCandidate; stakeLamports: number;
@@ -28,6 +31,8 @@ export interface EntryAttempt {
   signal?: AbortSignal; lease?: EntryLease;
 }
 export type EntryAdmissionResult = {accepted:false;reason:string}
+  | {accepted:false;reason:'DURABLE_COMMITTED_RECONCILE';receipt:DurableEntryReceipt}
+  | {accepted:true;receipt:DurableEntryReceipt;recovered:true}
   | {accepted:true;receipt:DurableEntryReceipt;preflight:Extract<PreflightResult,{accepted:true}>};
 
 /** Shared admission for discovery and Sentinel handoff. No registration means no acceptance. */
@@ -38,6 +43,7 @@ export class EntryAdmission {
   async attempt(input: EntryAttempt): Promise<EntryAdmissionResult> {
     const fail = (reason:string):EntryAdmissionResult => ({accepted:false,reason});
     let stage: 'security'|'preflight'|'persistence' = 'security';
+    let durableReceipt: DurableEntryReceipt | null = null;
     const guard = async () => {
       if (input.signal?.aborted) throw new Error('LEASE_LOST');
       await input.lease?.assertLeaseActive();
@@ -45,6 +51,14 @@ export class EntryAdmission {
     };
     try {
       await guard();
+      if (this.registrar?.recover) {
+        stage = 'persistence';
+        durableReceipt = await this.registrar.recover({ candidate: input.candidate,
+          abortSignal: input.signal, lease: input.lease });
+        await guard();
+        if (durableReceipt) return {accepted:true,receipt:durableReceipt,recovered:true};
+        stage = 'security';
+      }
       if (!Number.isSafeInteger(input.stakeLamports) || input.stakeLamports <= 0 ||
           !input.candidate.mint || !input.candidate.symbol || !input.candidate.name ||
           !Number.isFinite(input.candidate.priceUsd) || input.candidate.priceUsd <= 0 ||
@@ -67,12 +81,16 @@ export class EntryAdmission {
       const receipt = await this.registrar.register({candidate:input.candidate,
         stakeLamports:input.stakeLamports,accepted:preflight,
         accountingMode:'SHADOW',abortSignal:input.signal,lease:input.lease});
+      durableReceipt = receipt;
       await guard();
       if (receipt?.durable !== true || receipt.positionRegistered !== true ||
           receipt.accountingMode !== 'SHADOW' || !receipt.entryIntentId || !receipt.traceId)
         return fail('PERSISTENCE_UNAVAILABLE');
       return {accepted:true,receipt,preflight};
     } catch(error) {
+      if (durableReceipt?.durable === true && durableReceipt.positionRegistered === true &&
+          (input.signal?.aborted || (error instanceof Error && error.message === 'LEASE_LOST')))
+        return {accepted:false,reason:'DURABLE_COMMITTED_RECONCILE',receipt:durableReceipt};
       return fail(input.signal?.aborted || (error instanceof Error && error.message === 'LEASE_LOST')
         ? 'LEASE_LOST' : stage === 'security' ? 'SECURITY_UNAVAILABLE' :
           stage === 'preflight' ? 'PREFLIGHT_UNAVAILABLE' : 'PERSISTENCE_UNAVAILABLE');

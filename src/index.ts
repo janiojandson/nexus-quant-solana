@@ -18,6 +18,10 @@ import { createQuantHubs } from "./hubs/runtimeHubs.js";
 
 import { PreFlightEngine } from "./execution/preflightEngine.js";
 import { EntryAdmission } from './execution/entryAdmission.js';
+import { PostgresPositionLedger, type LedgerPositionState } from './database/positionLedger.js';
+import { validateConfirmedLiveExitEvidence, type ConfirmedWalletExitDelta } from './execution/confirmedLiveExitEvidence.js';
+import { AdaptiveExitPoller } from './execution/adaptiveExitPoller.js';
+import { commitShadowExitFromQuote } from './execution/shadowExitCommit.js';
 import { JupiterDiscoveryScanner } from "./scanner/jupiterDiscoveryScanner.js";
 
 import { ReproductionEngine } from './lifecycle/reproductionEngine.js';
@@ -53,6 +57,7 @@ import { scheduleEntryAdvisory } from './execution/entryAdvisory.js';
 import { resolveExecutionMode, readSigningSecretKey, isHypotheticalExecution } from './execution/executionMode.js';
 import { referencesProgram } from './execution/entryRoutePolicy.js';
 import { PUMP_PROGRAM_ID } from './pump/pumpBondingCurve.js';
+import { ConfirmedPoolReader } from './pump/confirmedPoolReader.js';
 
 
 dotenv.config();
@@ -127,7 +132,6 @@ const PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS = Math.max(
 );
 
 let isRunningScanner = false;
-let isRunningFastExit = false;
 let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
@@ -170,8 +174,8 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
 
 
 const shadowPreFlight = new PreFlightEngine(jupiterHub, rpcHub, OFFICIAL_PHANTOM_WALLET);
-// Task 5 will supply a durable registrar; until then no candidate can be accepted.
-const entryAdmission = new EntryAdmission(shadowPreFlight);
+const physicalExitPoolReader = new ConfirmedPoolReader(rpcHub);
+let entryAdmission: EntryAdmission;
 const scanner = new JupiterDiscoveryScanner(jupiterHub);
 
 const exitTelemetry = new NonBlockingTelemetry<any>();
@@ -245,6 +249,11 @@ const reproduction = new ReproductionEngine();
 const adaptiveSizer = new AdaptivePositionSizer(jupiterEngine.getAggregator());
 const postgresRepo = new SolanaPostgresRepository();
 const pgPool = postgresRepo.getPool();
+const positionLedger = new PostgresPositionLedger(pgPool, position => {
+  if (!position.mint || !position.traceId || position.status === 'FULLY_CLOSED') return;
+  restoreShadowPosition(position);
+});
+entryAdmission = new EntryAdmission(shadowPreFlight, IS_DRY_RUN ? positionLedger : undefined);
 const pumpStrategyRepository = new PumpStrategyRepository(pgPool as any);
 let latestShadowEntryLadderLamports = [PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS];
 const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
@@ -272,6 +281,29 @@ const journal = new DecisionLogger(pgPool, {
   flushIntervalMs: 5000,
   maxBufferSize: 100
 });
+
+function restoreShadowPosition(state: LedgerPositionState): void {
+  if (!state.mint || !state.traceId || !state.tokenAmount || state.status === 'FULLY_CLOSED') return;
+  positionEngine.addPosition({
+    mint: state.mint, symbol: state.symbol || state.mint,
+    tokenAmount: state.tokenAmount, initialTokenAmount: state.initialTokenAmount,
+    entryPriceUsd: state.entryPriceUsd || 0,
+    entryTimestamp: state.entryTimestamp || Date.now(),
+    entrySol: state.remainingCostSol, entrySolValue: state.initialCapitalSol,
+    entryLiquidityUsd: state.entryLiquidityUsd,
+    entryPhysicalSolLamports: state.entryPhysicalSolLamports,
+    entryPairAddress: state.entryPairAddress,
+    traceId: state.traceId, accountingMode: 'SHADOW',
+    highestTpStepReached: state.highestTpStepReached,
+    partialTaken: state.highestTpStepReached >= 1,
+    stopLossPct: state.stopLossPct,
+    peakSolValue: state.executablePeakSolValue,
+    executablePeakSolValue: state.executablePeakSolValue,
+    observablePeakSolValue: state.observablePeakSolValue,
+    lastJupiterExecutableSolValue: state.lastJupiterExecutableSolValue,
+    lastHealthyExitRouteAt: state.lastHealthyExitRouteAt
+  });
+}
 
 // Watermark persistente do trailing: grava de forma assíncrona e limitada para
 // não bloquear o loop de saída nem gerar write storm durante uma alta contínua.
@@ -524,12 +556,20 @@ async function executeExitOrderUnlocked(
   if (!pos) {
     return { success: false, error: 'Posição não encontrada no Gestor' };
   }
+  if (pos.accountingMode === 'SHADOW') {
+    return { success: false, error: 'SHADOW position has no signed or broadcast exit transport.' };
+  }
 
   const tokenAmountToSell = options?.exitTokenAmount || pos.tokenAmount;
   const isPartial = exitReason === 'PARTIAL_TAKE_PROFIT_50';
   const shouldCloseAta = options?.shouldCloseAta ?? !isPartial;
   const trafficPriority = options?.trafficPriority ?? priorityForJupiterWork('PROTECTIVE_EXIT');
   const initialSlippageBps = Math.min(750, Math.max(250, options?.initialSlippageBps ?? 500));
+  if (!pos.traceId || !Number.isFinite(pos.entrySolValue) || (pos.entrySolValue ?? 0) <= 0 ||
+      !Number.isFinite(pos.entrySol) || (pos.entrySol ?? 0) <= 0 ||
+      !Number.isSafeInteger(pos.initialTokenAmount) || (pos.initialTokenAmount ?? 0) <= 0) {
+    return { success: false, error: 'LIVE_POSITION_ACCOUNTING_PROOF_MISSING' };
+  }
 
   // Validação atômica ANTES de qualquer cotação. `tokenAmount` vem de
   // `swapSim.outAmount` (inteiro do Jupiter), mas um refactor futuro poderia
@@ -588,11 +628,20 @@ async function executeExitOrderUnlocked(
     }
   }
 
+  try {
+    await positionLedger.assertLiveExitReady(pos.traceId, pos.tokenAmount);
+  } catch (error) {
+    executionUncertainReason = `LIVE ledger unavailable for ${pos.mint}: ${error instanceof Error ? error.message : String(error)}`;
+    uncertainExitMints.add(pos.mint);
+    return { success: false, error: executionUncertainReason };
+  }
+
   console.log(`🚨 [EXECUÇÃO DE SAÍDA ON-CHAIN] ${pos.symbol} (${pos.mint}) | Motivo: ${exitReason} | Lote: ${exitAmountAtomic} (atomic) | PnL: ${(pnlPct * 100).toFixed(2)}%`);
   console.log(`⚡ [Jupiter Swap V2] Saída com slippage ${initialSlippageBps}bps e landing gerenciado...`);
 
   // 1. Swap Jupiter V2 — /order + assinatura local + /execute gerenciado
   const exitAttemptStartedAt = Date.now();
+  let reconciledLiveEvidence: ConfirmedWalletExitDelta | null = null;
   let exitSwap: RoutedExitAttempt = await jupiterEngine.executeSwap({
     inputMint: pos.mint,
     outputMint: 'So11111111111111111111111111111111111111112', // SOL
@@ -643,6 +692,7 @@ async function executeExitOrderUnlocked(
     if (reconciled) {
       const soldAtomic = Math.abs(Number(BigInt(reconciled.deltaAtomic)));
       if (Number.isSafeInteger(soldAtomic) && soldAtomic >= Math.floor(exitAmountAtomic * 0.99)) {
+        reconciledLiveEvidence = reconciled;
         const grossSolLamports = reconciled.walletLamportDelta + reconciled.feeLamports;
         exitSwap = {
           ...exitSwap,
@@ -801,12 +851,44 @@ async function executeExitOrderUnlocked(
     return { success: false, txSignature: '', error: failReason };
   }
 
+  const exitTypeMap: Record<string, DecisionType> = {
+    STOP_LOSS: 'EXIT_SL', PARTIAL_TAKE_PROFIT_50: 'EXIT_PARTIAL',
+    TRAILING_STOP: 'EXIT_TRAILING', TIME_STOP: 'EXIT_TIME_STOP',
+    MANUAL: 'EXIT_PANIC', TAKE_PROFIT: 'EXIT_PARTIAL',
+    LAYA_EXIT: 'EXIT_LAYA', WATCHDOG_EXIT: 'EXIT_WATCHDOG'
+  };
+  let confirmedFill;
+  let durableLiveFill;
+  try {
+    const evidence = reconciledLiveEvidence?.signature === exitSwap.txSignature
+      ? reconciledLiveEvidence
+      : await wallet.findRecentTokenDeltaTransaction(pos.mint, exitAttemptStartedAt, 'OUT');
+    confirmedFill = validateConfirmedLiveExitEvidence(evidence, exitSwap.txSignature, exitAmountAtomic);
+    durableLiveFill = await positionLedger.appendConfirmedLiveFill({
+      traceId: pos.traceId, mint: pos.mint, ...confirmedFill,
+      initialCapitalSol: pos.entrySolValue!, initialTokenAmount: pos.initialTokenAmount!,
+      entryPriceUsd: pos.entryPriceUsd, entryTimestamp: new Date(pos.entryTimestamp),
+      exitPriceUsd: pos.entryPriceUsd * (1 + pnlPct),
+      exitReason: exitTypeMap[exitReason] || 'EXIT_WATCHDOG',
+      nextStep: isPartial ? (pos.highestTpStepReached ?? 0) + 1 : (pos.highestTpStepReached ?? 0),
+      isFull: !isPartial
+    });
+  } catch (error) {
+    executionUncertainReason = `LIVE confirmed exit needs reconciliation for ${pos.mint}: ${error instanceof Error ? error.message : String(error)}`;
+    uncertainExitMints.add(pos.mint);
+    console.error(`🛑 [LIVE EXIT LEDGER UNCERTAIN] ${executionUncertainReason}`);
+    return { success: false, txSignature: exitSwap.txSignature, error: executionUncertainReason };
+  }
+  if (!durableLiveFill.applied) {
+    executionUncertainReason = `LIVE fill ${confirmedFill.fillId} already committed; reload position before further exits`;
+    uncertainExitMints.add(pos.mint);
+    return { success: false, txSignature: confirmedFill.fillId, error: executionUncertainReason };
+  }
+
   const tokenAmountBefore = pos.tokenAmount;
-  const soldRatio = Math.min(1, Math.max(0, exitAmountAtomic / tokenAmountBefore));
-  const costBasisSoldSol = (pos.entrySol || 0.015) * soldRatio;
-  const actualExitSolValue = exitSwap.outAmount > 0
-    ? exitSwap.outAmount / 1e9
-    : exitSolValue * soldRatio;
+  const soldRatio = Math.min(1, Math.max(0, confirmedFill.soldAtomic / tokenAmountBefore));
+  const costBasisSoldSol = pos.entrySol! * soldRatio;
+  const actualExitSolValue = confirmedFill.receivedLamports / 1e9;
   const realizedPnlSol = actualExitSolValue - costBasisSoldSol;
   const realizedPnlPct = costBasisSoldSol > 0
     ? realizedPnlSol / costBasisSoldSol
@@ -821,10 +903,16 @@ async function executeExitOrderUnlocked(
   );
 
   if (isPartial) {
-    const committed = positionEngine.commitPartialExit(pos.mint, exitAmountAtomic, impliedFullPositionSolValue);
-    if (!committed) {
+    const committed = positionEngine.commitPartialExit(pos.mint, confirmedFill.soldAtomic, impliedFullPositionSolValue);
+    if (!committed || pos.tokenAmount !== durableLiveFill.remainingTokenAmount ||
+        pos.highestTpStepReached !== durableLiveFill.highestTpStepReached) {
       console.error(`❌ [CONSISTÊNCIA] Swap parcial confirmou, mas o estado local não conseguiu aplicar a redução de ${exitAmountAtomic} unidades em ${pos.symbol}.`);
+      executionUncertainReason = `LIVE local position mismatch after durable fill ${confirmedFill.fillId}`;
+      uncertainExitMints.add(pos.mint);
+      return { success: false, txSignature: confirmedFill.fillId, error: executionUncertainReason };
     }
+    pos.entrySol = durableLiveFill.remainingCostSol;
+    pos.stopLossPct = durableLiveFill.stopLossPct;
   }
 
   // 3. Recuperação de Rent Exemption: fecha ATA ESTRITAMENTE em liquidações totais (100% vendido).
@@ -837,8 +925,7 @@ async function executeExitOrderUnlocked(
       const closeResult = await wallet.closeTokenAccount(pos.mint);
       ataClosed = closeResult.success;
       if (ataClosed) {
-        rentRecoveredActualSol = 0.00204;
-        console.log(`🧹 [Higiene On-Chain] Conta ATA de ${pos.symbol} encerrada. ~0.00204 SOL de caução recuperados!`);
+        console.log(`🧹 [Higiene On-Chain] Conta ATA de ${pos.symbol} encerrada; recuperação de rent não creditada sem delta confirmado separado.`);
       } else {
         console.warn(
           `⚠️ [Aviso Fechamento ATA] Swap de ${pos.symbol} confirmado, mas ATA permaneceu aberta. ` +
@@ -910,43 +997,7 @@ async function executeExitOrderUnlocked(
     txSignature: exitSwap.txSignature
   });
 
-  // 5.1 Registro assíncrono no Decision Journal (trade_outcomes) — ZERO bloqueio do loop de 1.5s
-  const exitTypeMap: Record<string, DecisionType> = {
-    STOP_LOSS: 'EXIT_SL',
-    PARTIAL_TAKE_PROFIT_50: 'EXIT_PARTIAL',
-    TRAILING_STOP: 'EXIT_TRAILING',
-    TIME_STOP: 'EXIT_TIME_STOP',
-    MANUAL: 'EXIT_PANIC',
-    TAKE_PROFIT: 'EXIT_PARTIAL',
-    LAYA_EXIT: 'EXIT_LAYA',
-    WATCHDOG_EXIT: 'EXIT_WATCHDOG',
-  };
-
-  const rentRecovered = rentRecoveredActualSol;
-  const feesSol = 0.00005;
-  const netPnlSol = pnlSol - feesSol + rentRecovered;
-  const tradeDurationS = Math.floor((Date.now() - pos.entryTimestamp) / 1000);
-
-  journal.logOutcome({
-    traceId: pos.traceId || randomUUID(),
-    mint: pos.mint,
-    entryPriceUsd: pos.entryPriceUsd,
-    entrySizeSol: costBasisSoldSol,
-    entryTimestamp: new Date(pos.entryTimestamp),
-    exitPriceUsd: pos.entryPriceUsd * (1 + realizedPnlPct),
-    exitSizeSol: actualExitSolValue,
-    exitTimestamp: new Date(),
-    exitReason: exitTypeMap[exitReason] || 'EXIT_WATCHDOG',
-    pnlSol,
-    pnlPct: realizedPnlPct * 100,
-    feesTotalSol: feesSol,
-    rentRecoveredSol: rentRecovered,
-    netPnlSol,
-    totalTradeDurationS: tradeDurationS,
-    status: shouldCloseAta
-      ? (exitReason === 'MANUAL' ? 'PANIC_CLOSED' : exitReason === 'WATCHDOG_EXIT' ? 'WATCHDOG_CLOSED' : 'FULLY_CLOSED')
-      : 'PARTIAL_CLOSED'
-  });
+  // O ledger LIVE já aplicou o fill imutável e o outcome cumulativo em uma transação.
 
   // Se for liquidação total, remove do Gestor de Posições
   if (shouldCloseAta) {
@@ -1207,13 +1258,11 @@ server.listen(PORT, '0.0.0.0', () => {
  * Monitora o valor real em SOL de cada token custodiado usando a cotação direta da Jupiter.
  * Se o valor cotado for <= 80% do investido (-20%), executa Stop-Loss imediato sem delay.
  */
-async function runUltraFastExitMonitor() {
+async function runUltraFastExitMonitor(onlyMint: string) {
   if (NEXUS_MAINTENANCE_MODE) return;
-  if (isRunningFastExit) return;
-  isRunningFastExit = true;
 
   try {
-    const openPositions = positionEngine.getAllPositions().sort((a, b) => {
+    const openPositions = positionEngine.getAllPositions().filter(p => p.mint === onlyMint).sort((a, b) => {
       // Com cota limitada da Jupiter, runners pós-parcial têm prioridade de leitura:
       // já carregam lucro não realizado e dependem do trailing para proteção.
       const partialPriority = Number(Boolean(b.partialTaken)) - Number(Boolean(a.partialTaken));
@@ -1227,6 +1276,7 @@ async function runUltraFastExitMonitor() {
     }
 
     for (const pos of openPositions) {
+      if (uncertainExitMints.has(pos.mint)) continue;
       try {
         // Verdade econômica de saída = valor executável Jupiter Token -> SOL.
         // DexScreener permanece como referência de mercado, mas nunca decide PnL/stop
@@ -1240,7 +1290,11 @@ async function runUltraFastExitMonitor() {
         // telemetria de liquidez/fluxo; Jupiter continua sendo a verdade econômica
         // para PnL e execução. Isso reduz latência e ativa de fato o gate de
         // drenagem de liquidez sem adicionar uma segunda chamada HTTP.
-        exitTelemetry.sample(`${pos.mint}:${pos.entryPairAddress || ''}`, async () => ({ priceUsd: 0, liquidityUsd: 20000, fdvUsd: 20000, pairCreatedAt: Date.now() - 3600000, url: '' }));
+        // Read the physical vault state alongside the executable quote. RPC
+        // absence is unknown, never a fabricated USD liquidity value.
+        const physicalSnapshotPromise = pos.accountingMode === 'SHADOW'
+          ? physicalExitPoolReader.read(pos.mint, pos.entryPairAddress ? [pos.entryPairAddress] : [])
+          : Promise.resolve(null);
         const tokenAtomicAmount = assertStoredAtomicNumberToNumber(pos.tokenAmount);
         const exitQuoteRequestedAt = Date.now();
         const executableQuote = await jupiterEngine.getQuote(
@@ -1251,6 +1305,10 @@ async function runUltraFastExitMonitor() {
           priorityForJupiterWork('EXIT_CONFIRMATION')
         );
         const marketSnapshot = exitTelemetry.read(`${pos.mint}:${pos.entryPairAddress || ''}`);
+        const physicalSnapshot = await physicalSnapshotPromise;
+        const physicalReservoirDrained = physicalSnapshot?.ok === false
+          ? physicalSnapshot.code === 'INSUFFICIENT_PHYSICAL_SOL'
+          : false;
         const dexPriceUsd = marketSnapshot?.priceUsd ?? null;
         const currentSolValue = (executableQuote.outAmount || 0) / 1e9;
         if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
@@ -1262,6 +1320,22 @@ async function runUltraFastExitMonitor() {
           jupiterExecutableSolValue: currentSolValue,
           healthyAtMs: Date.now()
         });
+        if (pos.accountingMode === 'SHADOW') {
+          const watermarks = positionEngine.getExitWatermarks(pos.mint);
+          try {
+            await positionLedger.updateShadowWatermarks(pos.traceId!, {
+              executablePeakSolValue: watermarks.executablePeakSolValue,
+              observablePeakSolValue: watermarks.observablePeakSolValue,
+              lastJupiterExecutableSolValue: currentSolValue,
+              lastHealthyExitRouteAt: watermarks.lastHealthyExitRouteAt || Date.now()
+            });
+          } catch (error) {
+            uncertainExitMints.add(pos.mint);
+            executionUncertainReason = `SHADOW watermark persistence unavailable for ${pos.mint}`;
+            console.error(`[SHADOW_WATERMARK_UNCERTAIN] ${pos.mint}:`, error);
+            continue;
+          }
+        }
         exitPathHealth.recordSuccess(pos.mint);
         latestState.exitPathHealth = exitPathHealth.snapshot();
         const pnlPct = (currentSolValue - entrySol) / entrySol;
@@ -1292,14 +1366,11 @@ async function runUltraFastExitMonitor() {
         // o mesmo pico logo abaixo; aqui evitamos uma defasagem visual de um ciclo.
         const peakSolValue = Math.max(positionEngine.getPeakSolValue(pos.mint), currentSolValue, entrySol);
         const peakPnlPct = (peakSolValue - entrySol) / entrySol;
-        const earlyTrailingActive = !pos.partialTaken &&
-          peakPnlPct >= PositionExitEngine.EARLY_TRAILING_TRIGGER_PCT;
-        const activeTrailingDistance = pos.partialTaken
-          ? PositionExitEngine.TRAILING_DISTANCE
-          : PositionExitEngine.EARLY_TRAILING_DISTANCE;
+        const earlyTrailingActive = false;
+        const activeTrailingDistance = PositionExitEngine.TRAILING_DISTANCE;
         const trailingStopSolValue = peakSolValue * (1 - activeTrailingDistance);
         const trailPnlPct = (trailingStopSolValue - entrySol) / entrySol;
-        const trailingStatus = (pos.partialTaken || earlyTrailingActive) ? 'ATIVO' : 'INATIVO';
+        const trailingStatus = (pos.highestTpStepReached ?? 0) >= 2 ? 'ATIVO' : 'INATIVO';
         const liquidityNow = marketSnapshot?.liquidityUsd;
         const liquidityDropPct = liquidityNow !== undefined && pos.entryLiquidityUsd && pos.entryLiquidityUsd > 0
           ? Math.max(0, (pos.entryLiquidityUsd - liquidityNow) / pos.entryLiquidityUsd)
@@ -1328,20 +1399,18 @@ async function runUltraFastExitMonitor() {
         // 📊 Log Sintético de Monitor de Posição (a cada ciclo de 1.5s)
         const pnlSign = pnlPct >= 0 ? '+' : '';
         const peakSign = peakPnlPct >= 0 ? '+' : '';
-        const partialLabel = pos.partialTaken ? ' [SUPER RUNNER / 50%]' : '';
+        const partialLabel = pos.partialTaken ? ' [RUNNER]' : '';
 
         // Exibição clara e não ambígua do status de proteção.
-        const stopStatusText = pos.partialTaken
+        const stopStatusText = (pos.highestTpStepReached ?? 0) >= 2
           ? `Stop Ativo: Trailing Dinâmico (-10% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
-          : earlyTrailingActive
-            ? `Stop Ativo: Trailing Momentum (-6% do Topo: ${trailPnlPct >= 0 ? '+' : ''}${(trailPnlPct * 100).toFixed(2)}%)`
-            : `Stop Ativo: SL Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: aguardando +8%`;
+          : `Stop Ativo: Piso Fixo (${(pos.stopLossPct * 100).toFixed(2)}%) | Trailing: INATIVO`;
 
         console.log(`🟡 [SNIPER ATIVO${partialLabel}] Token: ${pos.symbol} | Sensor PnL: ${pnlSign}${(pnlPct * 100).toFixed(2)}% | Pico: ${peakSign}${(peakPnlPct * 100).toFixed(2)}% | ${stopStatusText} | Tempo: ${elapsedMin}min`);
 
         // Propaga o estado real de proteção para o painel. Sem isto a coluna
         // "Trailing Stop" ficava em INATIVO mesmo com o trailing ativo.
-        pos.trailingActive = pos.partialTaken || earlyTrailingActive;
+        pos.trailingActive = (pos.highestTpStepReached ?? 0) >= 2;
         pos.stopStatusText = stopStatusText;
         pos.peakSolValue = peakSolValue;
         pos.trailingStopSolValue = trailingStopSolValue;
@@ -1353,13 +1422,14 @@ async function runUltraFastExitMonitor() {
           currentSolValue,
           Date.now(),
           {
-            currentLiquidityUsd: marketSnapshot?.liquidityUsd,
+            physicalReservoirDrained,
+            currentLiquidityUsd: pos.accountingMode === 'SHADOW' ? undefined : marketSnapshot?.liquidityUsd,
             currentVolume5m: marketSnapshot?.volume5mUsd
           }
         );
 
         if (!exitSignal.shouldExit || exitSignal.type === 'HOLD') {
-          persistPeakWatermark(pos, positionEngine.getPeakSolValue(pos.mint));
+          if (pos.accountingMode !== 'SHADOW') persistPeakWatermark(pos, positionEngine.getPeakSolValue(pos.mint));
           // O ciclo inteiro de leitura foi saudável; só agora zeramos o watchdog.
           // Antes isto ocorria ANTES da cotação executável de saída e mascarava
           // falhas consecutivas justamente no caminho crítico de liquidação.
@@ -1381,10 +1451,37 @@ async function runUltraFastExitMonitor() {
             `🎯 [EXIT CONFIRMADO JUPITER${detail}] ${pos.symbol}: ${exitSignal.type} | ` +
             `PnL executável: ${(pnlPct * 100).toFixed(2)}% | Valor: ${currentSolValue.toFixed(9)} SOL`
           );
-          await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue, {
-            exitTokenAmount: exitSignal.exitTokenAmount,
-            shouldCloseAta: exitSignal.shouldCloseAta
-          });
+          if (pos.accountingMode === 'SHADOW') {
+            try {
+              await commitShadowExitFromQuote({ position: {
+                mint: pos.mint, traceId: pos.traceId!, tokenAmount: pos.tokenAmount,
+                highestTpStepReached: pos.highestTpStepReached,
+                executablePeakSolValue: pos.executablePeakSolValue,
+                observablePeakSolValue: pos.observablePeakSolValue,
+                lastJupiterExecutableSolValue: pos.lastJupiterExecutableSolValue,
+                lastHealthyExitRouteAt: pos.lastHealthyExitRouteAt
+              }, exitTokenAmount: assertStoredAtomicNumberToNumber(exitSignal.exitTokenAmount || pos.tokenAmount),
+              monitorQuote: executableQuote, quoteAt: exitQuoteRequestedAt, now: Date.now,
+              getQuote: () => jupiterEngine.getQuote(pos.mint,
+                'So11111111111111111111111111111111111111112',
+                assertStoredAtomicNumberToNumber(exitSignal.exitTokenAmount || pos.tokenAmount),
+                500, priorityForJupiterWork('PROTECTIVE_EXIT')),
+              persist: fill => positionLedger.appendExitFill(fill),
+              apply: result => {
+                if (result.position.status === 'FULLY_CLOSED') positionEngine.removePosition(pos.mint);
+                else restoreShadowPosition(result.position);
+              } });
+            } catch (error) {
+              uncertainExitMints.add(pos.mint);
+              executionUncertainReason = `SHADOW ledger commit uncertain for ${pos.mint}; reconcile before another fill.`;
+              console.error(`[SHADOW_EXIT_UNCERTAIN] ${pos.mint}:`, error);
+            }
+          } else {
+            await executeExitOrder(pos.mint, exitSignal.type, pnlPct, currentSolValue, {
+              exitTokenAmount: exitSignal.exitTokenAmount,
+              shouldCloseAta: exitSignal.shouldCloseAta
+            });
+          }
 
           // Se a posição permaneceu aberta (parcial confirmada ou saída falhou),
           // persiste o watermark já ajustado ao lote/custo remanescente.
@@ -1392,7 +1489,7 @@ async function runUltraFastExitMonitor() {
           if (remainingPosition) {
             const partialWasCommitted =
               exitSignal.type === 'PARTIAL_TAKE_PROFIT_50' && remainingPosition.partialTaken === true;
-            persistPeakWatermark(
+            if (remainingPosition.accountingMode !== 'SHADOW') persistPeakWatermark(
               remainingPosition,
               positionEngine.getPeakSolValue(pos.mint),
               partialWasCommitted
@@ -1448,9 +1545,15 @@ async function runUltraFastExitMonitor() {
   } catch (err: any) {
     console.error('⚠️ [Erro Fast Exit Monitor]:', err?.message || err);
   } finally {
-    isRunningFastExit = false;
+    // The poller owns the per-mint in-flight guard.
   }
 }
+
+const adaptiveExitPoller = new AdaptiveExitPoller(Date.now,
+  async mint => runUltraFastExitMonitor(mint), event => {
+    if (event.outcome === 'ERROR' || event.latencyMs > 2500)
+      console.warn(`[ExitPoll] ${event.mint} ${event.outcome} latency=${event.latencyMs}ms ${event.error || ''}`);
+  });
 
 /**
  * 🔍 SCANNER AUTÔNOMO 24/7 (Ciclo Independente de 30s)
@@ -1682,6 +1785,9 @@ interface RecoverablePositionRecord {
   entrySizeSol: number;
   entryTimestamp: number;
   initialTokenAmountAtomic: number;
+  remainingTokenAmountAtomic: number;
+  remainingCostSol: number;
+  highestTpStepReached: number;
   entryLiquidityUsd: number;
   entryVolume5m: number;
   entryPairAddress?: string;
@@ -1709,7 +1815,9 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
         SELECT DISTINCT ON (dj.mint)
           dj.trace_id, dj.mint, dj.token_symbol, dj.pool_address, dj.liquidity_usd, dj.volume_5m_usd,
           dj.metadata, dj.created_at, o.entry_price_usd, o.entry_size_sol,
-          o.entry_timestamp, o.status, o.peak_sol_value,
+          o.entry_timestamp, o.status, o.accounting_mode, o.initial_capital_sol,
+          o.remaining_cost_sol, o.remaining_token_amount, o.highest_tp_step, o.stop_loss_pct,
+          o.peak_sol_value,
           o.observable_peak_sol_value, o.executable_peak_sol_value,
           o.last_jupiter_executable_sol_value, o.last_healthy_exit_route_at
         FROM decision_journal dj
@@ -1718,6 +1826,7 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
           AND dj.metadata->>'phase' = 'ENTRY_EXECUTED'
           AND COALESCE(dj.metadata->>'txSignature', '') <> ''
           AND COALESCE(dj.metadata->>'isDryRun', 'false') = 'false'
+          AND o.accounting_mode = 'LIVE'
         ORDER BY dj.mint, dj.created_at DESC
       )
       SELECT * FROM latest WHERE status IN ('OPEN', 'PARTIAL_CLOSED')
@@ -1727,14 +1836,23 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
       try {
         const metadata = row.metadata || {};
         const initialAtomic = assertAtomicAmountToNumber(String(metadata.outAmountAtomic || ''));
+        if (row.status === 'PARTIAL_CLOSED' &&
+            (row.initial_capital_sol == null || row.remaining_cost_sol == null ||
+             row.remaining_token_amount == null)) throw new Error('LEGACY_PARTIAL_REQUIRES_RECONCILIATION');
+        const remainingAtomic = row.remaining_token_amount == null ? initialAtomic :
+          assertAtomicAmountToNumber(String(row.remaining_token_amount));
+        if (remainingAtomic > initialAtomic) throw new Error('RECOVERY_AMOUNT_EXCEEDS_INITIAL');
         positions.set(row.mint, {
           traceId: String(row.trace_id),
           mint: String(row.mint),
           symbol: String(row.token_symbol || `${String(row.mint).slice(0, 4)}...${String(row.mint).slice(-4)}`),
           entryPriceUsd: Number(row.entry_price_usd),
-          entrySizeSol: Number(row.entry_size_sol),
+          entrySizeSol: Number(row.initial_capital_sol ?? row.entry_size_sol),
           entryTimestamp: new Date(row.entry_timestamp).getTime(),
           initialTokenAmountAtomic: initialAtomic,
+          remainingTokenAmountAtomic: remainingAtomic,
+          remainingCostSol: Number(row.remaining_cost_sol ?? row.entry_size_sol),
+          highestTpStepReached: Number(row.highest_tp_step ?? 0),
           entryLiquidityUsd: Number(row.liquidity_usd || 0),
           entryVolume5m: Number(row.volume_5m_usd || 0),
           entryPairAddress: row.pool_address ? String(row.pool_address) : undefined,
@@ -1747,7 +1865,7 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
           lastHealthyExitRouteAt: row.last_healthy_exit_route_at
             ? new Date(row.last_healthy_exit_route_at).getTime()
             : undefined,
-          stopLossPct: Number(metadata.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT),
+          stopLossPct: Number(row.stop_loss_pct ?? metadata.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT),
           takeProfitPct: Number(metadata.takeProfitPct ?? 0.35),
           partialTaken: row.status === 'PARTIAL_CLOSED',
           entryTxSignature: String(metadata.txSignature)
@@ -1806,17 +1924,15 @@ async function rehydratePositionsFromWalletOnBoot() {
 
       if (positionEngine.getPosition(spl.mint)) continue;
 
-      // Nunca adota unidades adicionadas manualmente depois da compra do bot.
-      // Em runner pós-parcial, a posição esperada não pode exceder ~50% do lote inicial.
-      const expectedCapAtomic = recovery.partialTaken
-        ? Math.ceil(recovery.initialTokenAmountAtomic / 2)
-        : recovery.initialTokenAmountAtomic;
+      // Nunca adota unidades adicionadas manualmente; partial é o saldo durável
+      // do fill confirmado, não uma fração presumida da entrada original.
+      const expectedCapAtomic = recovery.remainingTokenAmountAtomic;
       const managedAtomic = Math.min(currentAtomic, expectedCapAtomic);
       if (managedAtomic <= 0) continue;
 
-      const remainingRatio = managedAtomic / recovery.initialTokenAmountAtomic;
-      const remainingEntrySol = recovery.entrySizeSol * remainingRatio;
-      const effectiveStopLossPct = recovery.partialTaken ? 0.01 : (recovery.stopLossPct >= 0 ? recovery.stopLossPct : PositionExitEngine.DEFAULT_STOP_LOSS_PCT);
+      const remainingRatio = managedAtomic / recovery.remainingTokenAmountAtomic;
+      const remainingEntrySol = recovery.remainingCostSol * remainingRatio;
+      const effectiveStopLossPct = recovery.stopLossPct;
 
       positionEngine.addPosition({
         mint: spl.mint,
@@ -1838,7 +1954,8 @@ async function rehydratePositionsFromWalletOnBoot() {
         lastJupiterExecutableSolValue: recovery.lastJupiterExecutableSolValue,
         lastHealthyExitRouteAt: recovery.lastHealthyExitRouteAt,
         traceId: recovery.traceId,
-        partialTaken: recovery.partialTaken
+        partialTaken: recovery.partialTaken,
+        highestTpStepReached: recovery.highestTpStepReached
       });
 
       console.log(
@@ -1988,7 +2105,8 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
       poolHints: [poolEvidence.poolAddress, ...token.poolHints],
       signal: token.leaseSignal,
-      lease: { mint, leaseId, assertLeaseActive: token.assertLeaseActive },
+      lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(),
+        assertLeaseActive: token.assertLeaseActive },
       verifySecurity: async facts => {
         const audit = await entryGatekeeper.auditToken({ mint: facts.mint,
           pairAddress: facts.pairAddress, liquidityUsd: facts.liquidityUsd,
@@ -2086,6 +2204,15 @@ async function main() {
   // 1. Reidratação da Quarentena do Banco (Fim da Amnésia pós-Deploy)
   await rehydrateQuarantineFromDbOnBoot();
 
+  if (IS_DRY_RUN) {
+    try {
+      for (const state of await positionLedger.readOpenShadowPositions()) restoreShadowPosition(state);
+    } catch (error) {
+      executionUncertainReason = `SHADOW ledger unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(`[SHADOW_LEDGER_UNAVAILABLE] ${executionUncertainReason}`);
+    }
+  }
+
   // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
   await rehydratePositionsFromWalletOnBoot();
 
@@ -2120,8 +2247,11 @@ async function main() {
   await sentinelHandoffScanner.start();
   sentinelHandoffScanner.on('sentinelGraduationToken', handleSentinelGraduationDip);
 
-  // 3. Loop Ultra-Rápido Dedicado de Saída a cada 1.500ms (inicia IMEDIATAMENTE)
-  setInterval(runUltraFastExitMonitor, FAST_EXIT_INTERVAL_MS);
+  // 3. One position: 1.5s. Two positions: 2.5s each, staggered 1.25s.
+  setInterval(() => {
+    try { adaptiveExitPoller.tick(positionEngine.getAllPositions().map(p => p.mint)); }
+    catch (error) { console.error('[ExitPoll] scheduler rejected positions:', error); }
+  }, 250);
 
   // 4. Executa o primeiro ciclo de scanner imediatamente
   await executeAutonomousCycle();
