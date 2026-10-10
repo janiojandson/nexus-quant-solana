@@ -178,6 +178,32 @@ test('confirmed LIVE fill appends once and cumulative outcome keeps original ent
   assert.ok(calls.some(call => call.sql === 'COMMIT'));
 });
 
+test('LIVE cumulative arithmetic reads precise additive columns, not six-decimal legacy display', async () => {
+  const calls: Array<{ sql: string; args: unknown[] }> = [];
+  const row = { trace_id: 'trace', accounting_mode: 'LIVE', entry_size_sol: '1',
+    initial_capital_sol: '1', remaining_cost_sol: '0.5', remaining_token_amount: '500',
+    exit_size_sol: '1.000000', fees_total_sol: '0.000001',
+    cumulative_gross_proceeds_sol: '1.000000123456', cumulative_fee_sol: '0.000000123456',
+    highest_tp_step: 1, stop_loss_pct: '0', status: 'PARTIAL_CLOSED' };
+  const client = { query: async (sql: string, args: unknown[] = []) => {
+    calls.push({ sql: sql.trim(), args });
+    if (sql.includes('SELECT * FROM trade_outcomes')) return { rows: [row], rowCount: 1 };
+    if (sql.includes('INSERT INTO quant_live_exit_fills')) return { rows: [{ fill_id: 'sig2' }], rowCount: 1 };
+    if (sql.includes('UPDATE trade_outcomes')) return { rows: [row], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  }, release: () => {} };
+  const ledger = new PostgresPositionLedger({ connect: async () => client } as any);
+  await ledger.appendConfirmedLiveFill({ traceId: 'trace', mint: 'mint', fillId: 'sig2',
+    soldAtomic: 500, receivedLamports: 1_000_000_000, feeLamports: 100_000,
+    initialCapitalSol: 1, initialTokenAmount: 1000, entryPriceUsd: 1,
+    entryTimestamp: new Date(0), exitPriceUsd: 2, exitReason: 'EXIT_TRAILING',
+    nextStep: 1, isFull: true });
+  const update = calls.find(call => call.sql.startsWith('UPDATE trade_outcomes'))!;
+  assert.match(update.sql, /cumulative_gross_proceeds_sol/);
+  assert.equal(update.args[7], 2.000100123456);
+  assert.equal(update.args[11], 0.000100123456);
+});
+
 test('confirmed LIVE signature is idempotent after a full close', async () => {
   const calls: string[] = [];
   const row = { trace_id: 'trace', accounting_mode: 'LIVE', entry_size_sol: '1',

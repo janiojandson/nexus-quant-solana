@@ -20,6 +20,7 @@ import { PreFlightEngine } from "./execution/preflightEngine.js";
 import { EntryAdmission } from './execution/entryAdmission.js';
 import { PostgresPositionLedger, type LedgerPositionState } from './database/positionLedger.js';
 import { validateConfirmedLiveExitEvidence, type ConfirmedWalletExitDelta } from './execution/confirmedLiveExitEvidence.js';
+import { shadowLiquidableValue } from './execution/shadowQuoteValue.js';
 import { AdaptiveExitPoller } from './execution/adaptiveExitPoller.js';
 import { commitShadowExitFromQuote } from './execution/shadowExitCommit.js';
 import { JupiterDiscoveryScanner } from "./scanner/jupiterDiscoveryScanner.js";
@@ -1310,7 +1311,12 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           ? physicalSnapshot.code === 'INSUFFICIENT_PHYSICAL_SOL'
           : false;
         const dexPriceUsd = marketSnapshot?.priceUsd ?? null;
-        const currentSolValue = (executableQuote.outAmount || 0) / 1e9;
+        const liquidable = pos.accountingMode === 'SHADOW'
+          ? shadowLiquidableValue(executableQuote, tokenAtomicAmount, OFFICIAL_PHANTOM_WALLET)
+          : null;
+        const currentSolValue = liquidable
+          ? liquidable.netLamports / 1e9
+          : (executableQuote.outAmount || 0) / 1e9;
         if (!Number.isFinite(currentSolValue) || currentSolValue <= 0) {
           throw new Error('Jupiter sem valor executável válido para monitor de saída');
         }
@@ -1344,7 +1350,9 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           confirmedProceeds: pos.partialTaken ? undefined : 0,
           executableValue: currentSolValue, peakValue: Math.max(pos.peakSolValue || entrySol, currentSolValue),
           remainingFraction: pos.tokenAmount / (pos.initialTokenAmount || pos.tokenAmount),
-          quoteAgeMs: Date.now() - exitQuoteRequestedAt, estimatedExitFee: 0, maxSlippageBps: 750
+          quoteAgeMs: Date.now() - exitQuoteRequestedAt,
+          estimatedExitFee: liquidable ? liquidable.feeLamports / 1e9 : 0,
+          maxSlippageBps: 750
         });
         const sensorSource = 'JUPITER_EXECUTABLE';
         const sensorPriceUsd = dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0
@@ -1455,13 +1463,15 @@ async function runUltraFastExitMonitor(onlyMint: string) {
             try {
               await commitShadowExitFromQuote({ position: {
                 mint: pos.mint, traceId: pos.traceId!, tokenAmount: pos.tokenAmount,
+                initialCapitalSol: pos.entrySolValue,
                 highestTpStepReached: pos.highestTpStepReached,
                 executablePeakSolValue: pos.executablePeakSolValue,
                 observablePeakSolValue: pos.observablePeakSolValue,
                 lastJupiterExecutableSolValue: pos.lastJupiterExecutableSolValue,
                 lastHealthyExitRouteAt: pos.lastHealthyExitRouteAt
               }, exitTokenAmount: assertStoredAtomicNumberToNumber(exitSignal.exitTokenAmount || pos.tokenAmount),
-              monitorQuote: executableQuote, quoteAt: exitQuoteRequestedAt, now: Date.now,
+              monitorQuote: executableQuote, taker: OFFICIAL_PHANTOM_WALLET,
+              quoteAt: exitQuoteRequestedAt, now: Date.now,
               getQuote: () => jupiterEngine.getQuote(pos.mint,
                 'So11111111111111111111111111111111111111112',
                 assertStoredAtomicNumberToNumber(exitSignal.exitTokenAmount || pos.tokenAmount),
@@ -1612,6 +1622,7 @@ async function executeAutonomousCycle() {
       for (const spl of splAccounts) {
         const tracked = positionEngine.getPosition(spl.mint);
         if (!tracked) continue;
+        if (tracked.accountingMode === 'SHADOW') continue;
 
         const atomicAmount = assertAtomicAmountToNumber(spl.atomicAmount);
         if (atomicAmount < tracked.tokenAmount) {
@@ -1954,6 +1965,7 @@ async function rehydratePositionsFromWalletOnBoot() {
         lastJupiterExecutableSolValue: recovery.lastJupiterExecutableSolValue,
         lastHealthyExitRouteAt: recovery.lastHealthyExitRouteAt,
         traceId: recovery.traceId,
+        accountingMode: 'LIVE',
         partialTaken: recovery.partialTaken,
         highestTpStepReached: recovery.highestTpStepReached
       });
@@ -2069,6 +2081,21 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       await sentinelHandoffScanner.release(mint, leaseId, 'DADOS_INSUFICIENTES');
       return;
     }
+    const candidate = { mint, symbol: discovered.symbol, name: discovered.name,
+      priceUsd: discovered.priceUsd, liquidityUsd: discovered.liquidityUsd,
+      pairAddress: poolEvidence.poolAddress };
+    // Recovery is read-only and fenced to this source event/lease. It must run
+    // before the gate for a NEW position: the durable entry already owns a slot.
+    const recovered = IS_DRY_RUN ? await positionLedger.recover({ candidate,
+      abortSignal: token.leaseSignal,
+      lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(),
+        assertLeaseActive: token.assertLeaseActive } }) : null;
+    await token.assertLeaseActive();
+    if (recovered) {
+      if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId))
+        console.warn(`[SentinelHandoff] ${symbol}: durable recovery complete, ACK failed.`);
+      return;
+    }
     if (executionUncertainReason || latestState.circuitBreakerActive ||
         positionEngine.getAllPositions().length >= MAX_CONCURRENT_POSITIONS ||
         !exitPathHealth.snapshot().canOpenNewPosition) {
@@ -2097,9 +2124,6 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       return;
     }
     const stakeLamports = Math.floor(capitalPolicy.ladderSol[0] * 1e9);
-    const candidate = { mint, symbol: discovered.symbol, name: discovered.name,
-      priceUsd: discovered.priceUsd, liquidityUsd: discovered.liquidityUsd,
-      pairAddress: poolEvidence.poolAddress };
     const decision = await entryAdmission.attempt({ candidate, stakeLamports,
       availableLamports: Math.floor(balanceSol * 1e9),
       reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
@@ -2213,8 +2237,9 @@ async function main() {
     }
   }
 
-  // 2. Reidratação On-Chain Imediata no Boot (protege ativos já comprados contra restart)
-  await rehydratePositionsFromWalletOnBoot();
+  // 2. Apenas LIVE gerencia saldos SPL como posições; em SHADOW, a wallet
+  // permanece na visão de custódia, nunca consome os dois slots hipotéticos.
+  if (!IS_DRY_RUN) await rehydratePositionsFromWalletOnBoot();
 
   if (NEXUS_MAINTENANCE_MODE) {
     console.warn(
@@ -2249,7 +2274,8 @@ async function main() {
 
   // 3. One position: 1.5s. Two positions: 2.5s each, staggered 1.25s.
   setInterval(() => {
-    try { adaptiveExitPoller.tick(positionEngine.getAllPositions().map(p => p.mint)); }
+    try { adaptiveExitPoller.tick(positionEngine.getAllPositions().filter(p =>
+      p.accountingMode === (IS_DRY_RUN ? 'SHADOW' : 'LIVE')).map(p => p.mint)); }
     catch (error) { console.error('[ExitPoll] scheduler rejected positions:', error); }
   }, 250);
 

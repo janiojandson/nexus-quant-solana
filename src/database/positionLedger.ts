@@ -21,6 +21,9 @@ export interface LedgerFill {
 }
 export interface DurableExitFill extends LedgerFill {
   accountingMode: 'SHADOW'; traceId: string;
+  quoteEvidence?: { expectedOutLamports: number; minimumOutLamports: number;
+    bpsHaircutLamports: number; networkFeeLamports: number;
+    rentReserveLamports: number; conservativeNetLamports: number };
   executablePeakSolValue?: number; observablePeakSolValue?: number;
   lastJupiterExecutableSolValue?: number; lastHealthyExitRouteAt?: number;
 }
@@ -246,11 +249,12 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
       const current = fromRow(found.rows[0]);
       const inserted = await client.query(`INSERT INTO quant_position_exit_fills
         (accounting_mode, trace_id, fill_id, token_amount, gross_proceeds_sol,
-         fee_sol, rent_recovered_sol, next_step, is_full)
-        VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8)
+         fee_sol, rent_recovered_sol, next_step, is_full, quote_evidence)
+        VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,$9::jsonb)
         ON CONFLICT (accounting_mode, trace_id, fill_id) DO NOTHING RETURNING fill_id`,
         [fill.accountingMode, fill.traceId, fill.fillId, String(fill.tokenAmount),
-          fill.grossProceedsSol, fill.feeSol, fill.nextStep, fill.isFull]);
+          fill.grossProceedsSol, fill.feeSol, fill.nextStep, fill.isFull,
+          JSON.stringify(fill.quoteEvidence ?? {})]);
       if (inserted.rowCount === 0) {
         await client.query('COMMIT');
         return { applied: false, position: current };
@@ -294,7 +298,9 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
     if (!this.pool) throw new Error('LIVE_LEDGER_UNAVAILABLE');
     await this.pool.query(`SELECT 1 FROM quant_live_exit_fills LIMIT 0`);
     await this.pool.query(`SELECT accounting_mode, initial_capital_sol,
-      remaining_cost_sol, remaining_token_amount, highest_tp_step, stop_loss_pct
+      remaining_cost_sol, remaining_token_amount, highest_tp_step, stop_loss_pct,
+      cumulative_gross_proceeds_sol, cumulative_fee_sol,
+      cumulative_net_proceeds_sol, cumulative_pnl_sol
       FROM trade_outcomes LIMIT 0`);
     if (traceId) {
       const existing = await this.pool.query(`SELECT accounting_mode,status,remaining_cost_sol,
@@ -330,8 +336,10 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
       await client.query(`INSERT INTO trade_outcomes
         (trace_id,mint,entry_price_usd,entry_size_sol,entry_timestamp,
          accounting_mode,initial_capital_sol,remaining_cost_sol,
-         remaining_token_amount,highest_tp_step,stop_loss_pct,status)
-        VALUES ($1,$2,$3,$4,$5,'LIVE',$4,$4,$6,0,-0.125,'OPEN')
+         remaining_token_amount,highest_tp_step,stop_loss_pct,status,
+         cumulative_gross_proceeds_sol,cumulative_fee_sol,
+         cumulative_net_proceeds_sol,cumulative_pnl_sol)
+        VALUES ($1,$2,$3,$4,$5,'LIVE',$4,$4,$6,0,-0.125,'OPEN',0,0,0,0)
         ON CONFLICT (trace_id) DO NOTHING`,
         [fill.traceId, fill.mint, fill.entryPriceUsd, fill.initialCapitalSol,
           fill.entryTimestamp, String(fill.initialTokenAmount)]);
@@ -367,10 +375,11 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
       const nextAmount = currentAmount - fill.soldAtomic;
       const nextCost = nextAmount === 0 ? 0 : precise(currentCost * nextAmount / currentAmount);
       const realizedCost = initialCapital - nextCost;
-      const gross = precise(Number(row.exit_size_sol ?? 0) +
+      const gross = precise(Number(row.cumulative_gross_proceeds_sol ?? row.exit_size_sol ?? 0) +
         (fill.receivedLamports + fill.feeLamports) / 1e9);
-      const fees = precise(Number(row.fees_total_sol ?? 0) + fill.feeLamports / 1e9);
-      const net = gross - fees;
+      const fees = precise(Number(row.cumulative_fee_sol ?? row.fees_total_sol ?? 0) +
+        fill.feeLamports / 1e9);
+      const net = precise(gross - fees);
       const pnl = precise(net - realizedCost);
       const status = fill.isFull ? 'FULLY_CLOSED' : 'PARTIAL_CLOSED';
       const stop = fill.nextStep >= 1 ? Math.max(Number(row.stop_loss_pct ?? -0.125), 0) :
@@ -382,11 +391,13 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
         exit_price_usd = $7, exit_size_sol = $8, exit_timestamp = NOW(),
         exit_reason = $9::decision_type, pnl_sol = $10,
         pnl_pct = $11, fees_total_sol = $12, rent_recovered_sol = 0,
-        net_pnl_sol = $10, status = $13
+        net_pnl_sol = $10, status = $13,
+        cumulative_gross_proceeds_sol = $8, cumulative_fee_sol = $12,
+        cumulative_net_proceeds_sol = $14, cumulative_pnl_sol = $10
         WHERE trace_id = $1 AND accounting_mode = 'LIVE'`,
         [fill.traceId, initialCapital, nextCost, String(nextAmount), fill.nextStep,
           stop, fill.exitPriceUsd, gross, fill.exitReason, pnl,
-          realizedCost > 0 ? pnl / realizedCost * 100 : 0, fees, status]);
+          realizedCost > 0 ? pnl / realizedCost * 100 : 0, fees, status, net]);
       if (updated.rowCount !== 1) throw new Error('LIVE_OUTCOME_UPDATE_FAILED');
       await client.query('COMMIT');
       return { applied: true, remainingTokenAmount: nextAmount, remainingCostSol: nextCost,

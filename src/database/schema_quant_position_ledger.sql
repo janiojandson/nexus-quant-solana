@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS quant_position_exit_fills (
   gross_proceeds_sol NUMERIC(24,12) NOT NULL CHECK (gross_proceeds_sol >= 0),
   fee_sol NUMERIC(24,12) NOT NULL CHECK (fee_sol >= 0),
   rent_recovered_sol NUMERIC(24,12) NOT NULL DEFAULT 0,
+  quote_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
   next_step SMALLINT NOT NULL CHECK (next_step BETWEEN 0 AND 2),
   is_full BOOLEAN NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -66,15 +67,12 @@ ALTER TABLE trade_outcomes
   ADD COLUMN IF NOT EXISTS initial_capital_sol NUMERIC(24,12),
   ADD COLUMN IF NOT EXISTS remaining_cost_sol NUMERIC(24,12),
   ADD COLUMN IF NOT EXISTS remaining_token_amount NUMERIC(20,0),
+  ADD COLUMN IF NOT EXISTS cumulative_gross_proceeds_sol NUMERIC(24,12),
+  ADD COLUMN IF NOT EXISTS cumulative_fee_sol NUMERIC(24,12),
+  ADD COLUMN IF NOT EXISTS cumulative_net_proceeds_sol NUMERIC(24,12),
+  ADD COLUMN IF NOT EXISTS cumulative_pnl_sol NUMERIC(24,12),
   ADD COLUMN IF NOT EXISTS highest_tp_step SMALLINT NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS stop_loss_pct NUMERIC(12,9) NOT NULL DEFAULT -0.125;
-ALTER TABLE trade_outcomes
-  ALTER COLUMN entry_size_sol TYPE NUMERIC(24,12),
-  ALTER COLUMN exit_size_sol TYPE NUMERIC(24,12),
-  ALTER COLUMN pnl_sol TYPE NUMERIC(24,12),
-  ALTER COLUMN fees_total_sol TYPE NUMERIC(24,12),
-  ALTER COLUMN rent_recovered_sol TYPE NUMERIC(24,12),
-  ALTER COLUMN net_pnl_sol TYPE NUMERIC(24,12);
 
 CREATE TABLE IF NOT EXISTS quant_live_exit_fills (
   accounting_mode TEXT NOT NULL DEFAULT 'LIVE' CHECK (accounting_mode = 'LIVE'),
