@@ -108,6 +108,13 @@ const state: DashboardState = {
   lastUpdated: new Date().toISOString()
 };
 
+test('SHADOW labels USD as hypothetical and unavailable wallet balance never displays observed zero', () => {
+  const html = renderDashboardHtml({ ...state, dryRun: true, balanceSol: null, walletBalanceAvailable: false });
+  assert.match(html, /Estimativa USD hipotética/);
+  assert.match(html, /preço de entrada × retorno líquido em SOL/);
+  assert.match(html, /id="wallet-balance"[^>]*>Indisponível/);
+});
+
 test('Dashboard Executivo reflete o layout limpo sem seções legadas poluidoras', () => {
   const html = renderDashboardHtml(state);
 

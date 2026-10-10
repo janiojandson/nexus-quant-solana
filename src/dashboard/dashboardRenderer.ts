@@ -32,7 +32,8 @@ export interface WalletHoldingView {
 export interface DashboardState {
   agent: string;
   wallet: string;
-  balanceSol: number;
+  balanceSol: number | null;
+  walletBalanceAvailable?: boolean;
   initialDepositSol: number;
   vitalityState: string;
   dryRun: boolean;
@@ -371,7 +372,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         <!-- Saldo -->
         <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-4 py-2 flex items-center gap-3 shadow-inner">
           <div class="text-xs text-slate-400 uppercase tracking-wider font-semibold">Saldo</div>
-          <div id="wallet-balance" class="text-lg md:text-xl font-bold font-mono text-emerald-400">${Number(state.balanceSol || 0).toFixed(4)} SOL</div>
+          <div id="wallet-balance" class="text-lg md:text-xl font-bold font-mono text-emerald-400">${state.balanceSol === null || state.walletBalanceAvailable === false ? 'Indisponível' : Number(state.balanceSol).toFixed(4) + ' SOL'}</div>
         </div>
 
       </div>
@@ -484,7 +485,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             <tr>
               <th class="py-3 px-4 md:px-6">Token / Origem</th>
               <th class="py-3 px-4">Preço Entrada</th>
-              <th class="py-3 px-4">Preço Atual</th>
+              <th class="py-3 px-4" title="${state.dryRun ? 'Derivada: preço de entrada × retorno líquido em SOL; não é cotação USD observada. Atualização: ' + state.lastUpdated : 'Preço atual'}">${state.dryRun ? 'Estimativa USD hipotética' : 'Preço Atual'}</th>
               <th class="py-3 px-4">PnL Líquido</th>
               <th class="py-3 px-4">Break-Even / SL</th>
               <th class="py-3 px-4">Trailing Stop</th>
@@ -752,7 +753,7 @@ export function renderDashboardHtml(state: DashboardState): string {
         if (tsEl) tsEl.textContent = new Date().toLocaleTimeString();
         const bal = data.wallet?.balanceSol ?? data.balanceSol;
         const balEl = document.getElementById('wallet-balance');
-        if (balEl && bal !== undefined) balEl.textContent = Number(bal).toFixed(4) + ' SOL';
+        if (balEl) balEl.textContent = bal === null || bal === undefined ? 'Indisponível' : Number(bal).toFixed(4) + ' SOL';
 
         // 2. Sentinel
         const sentinelStatus = data.sentinel?.status ?? data.macroRegime ?? 'NORMAL';

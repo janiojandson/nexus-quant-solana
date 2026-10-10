@@ -10,6 +10,7 @@ import { getAdminAuthToken, handleAdminAuthRoutes } from '../auth/adminAuthRoute
 export type ExitReason = 'TAKE_PROFIT' | 'PARTIAL_TAKE_PROFIT_50' | 'STOP_LOSS' | 'TRAILING_STOP' | 'TIME_STOP' | 'MANUAL';
 
 export interface RouteContext {
+  getReadiness?: () => { ready: boolean; reason: string } | undefined;
   latestState: DashboardState;
   dailyPnlState?: { tier: string; dailyPnlSol: number; dailyTradeCount: number; pausedUntil: number | null; lastResetDate: string };
   executeExitOrder?: (mint: string, reason: ExitReason | string, pnlPct: number, exitSolValue: number, options?: { exitTokenAmount?: number; shouldCloseAta?: boolean }) => Promise<any>;
@@ -161,6 +162,8 @@ export async function handleApiRoutes(
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'ONLINE',
+      liveness: true,
+      readiness: ctx.getReadiness?.() ?? { ready: false, reason: 'BOOT_NOT_CONFIRMED' },
       agent: ctx.latestState.agent,
       wallet: ctx.latestState.wallet,
       balanceSol: ctx.latestState.balanceSol,

@@ -4,6 +4,19 @@ import { handleApiRoutes } from './routes.js';
 
 const TEST_ADMIN_TOKEN = 'unit-test-admin-token';
 
+test('health exposes unknown bootstrap and failed restore without claiming strategy ready', async () => {
+  for (const readiness of [undefined, { ready: false, reason: 'SHADOW_LEDGER_UNAVAILABLE' },
+    { ready: true, reason: 'BOOT_COMPLETE' }]) {
+    let body = '';
+    await handleApiRoutes({ url: '/health', method: 'GET', headers: {} } as any,
+      { writeHead() {}, end(data: string) { body = data; } } as any,
+      { latestState: { positions: [] }, getReadiness: () => readiness } as any);
+    const payload = JSON.parse(body);
+    assert.deepEqual(payload.readiness, readiness ?? { ready: false, reason: 'BOOT_NOT_CONFIRMED' });
+    assert.equal(payload.liveness, true);
+  }
+});
+
 test('handleApiRoutes: deve responder 200 OK na rota /api/status', async () => {
   const mockReq = { url: '/api/status', method: 'GET', headers: {} } as any;
   let statusCode = 0;
