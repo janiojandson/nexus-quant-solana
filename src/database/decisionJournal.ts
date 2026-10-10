@@ -6,7 +6,7 @@
 
 import { Pool, PoolClient } from 'pg';
 import { randomUUID } from 'crypto';
-import { DECISION_JOURNAL_DDL } from './schemaSql.js';
+import { assertJournalSchema } from './journalSchemaCompatibility.js';
 
 // ──────────────────────────────────────────────
 // TIPOS E INTERFACES
@@ -247,33 +247,22 @@ export class DecisionLogger {
    * Inicializa o schema no banco se necessário
    */
   async initSchema(): Promise<void> {
-    if (!this.pool || this.isSchemaInitialized) return;
+    if (this.isSchemaInitialized) return;
     try {
-      // Cria partição atual automaticamente para garantir escrita
-      const now = new Date();
-      const year = now.getUTCFullYear();
-      const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-      const partitionName = `decision_journal_${year}_${month}`;
-
-      const nextMonthDate = new Date(Date.UTC(year, now.getUTCMonth() + 1, 1));
-      const nextYear = nextMonthDate.getUTCFullYear();
-      const nextMonth = String(nextMonthDate.getUTCMonth() + 1).padStart(2, '0');
-
-      const startDate = `${year}-${month}-01`;
-      const endDate = `${nextYear}-${nextMonth}-01`;
-
-      // CORREÇÃO P3 + DOCKER: DDL embutido como constante TypeScript (elimina ENOENT)
-      await this.pool.query(DECISION_JOURNAL_DDL);
-      
-      // Cria partição para o mês atual se não existir (específico para runtime)
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS ${partitionName} PARTITION OF decision_journal
-          FOR VALUES FROM ('${startDate}') TO ('${endDate}');
-      `);
+      await assertJournalSchema(this.pool);
       this.isSchemaInitialized = true;
-    } catch (err: any) {
-      console.warn('⚠️ [DecisionJournal] Aviso na inicialização de tabelas (não-bloqueante):', err.message);
+      this.schemaDisabledReason = null;
+    } catch (err) {
+      this.schemaDisabledReason = err instanceof Error ? err.message : 'JOURNAL_SCHEMA_READ_UNAVAILABLE';
+      console.error(JSON.stringify({ event: 'JOURNAL_SCHEMA_NOT_READY', ready: false,
+        reason: this.schemaDisabledReason }));
+      throw err;
     }
+  }
+
+  private schemaDisabledReason: string | null = 'JOURNAL_SCHEMA_NOT_CHECKED';
+  getSchemaReadiness(): { ready: boolean; reason: string | null } {
+    return { ready: this.isSchemaInitialized, reason: this.schemaDisabledReason };
   }
 
   /**
