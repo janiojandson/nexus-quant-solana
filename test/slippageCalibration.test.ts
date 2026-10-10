@@ -1,6 +1,5 @@
 import { describe, it, afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert';
-import axios from 'axios';
 import {
   computeCollisionUsd,
   describeSlippageParams,
@@ -70,7 +69,14 @@ describe('Calibracao de autoSlippageCollisionUsdValue', () => {
 });
 
 describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
-  const origGet = axios.get;
+  let responseBody: Record<string, unknown>;
+  let requestCalls = 0;
+  const hub = { request: async (_work: unknown, endpoint: string, params: unknown) => {
+    requestCalls++;
+    sentUrl = endpoint;
+    sent = params;
+    return { status: 200, headers: { get: () => null }, body: responseBody };
+  } };
   let sent: any = null;
   let sentUrl = '';
   const logs: string[] = [];
@@ -81,29 +87,23 @@ describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
     sentUrl = '';
     logs.length = 0;
     console.log = (...a: any[]) => { logs.push(a.join(' ')); };
-    axios.get = (async (url: string, cfg: any) => {
-      sentUrl = url;
-      sent = cfg.params;
-      return {
-        data: {
+    requestCalls = 0;
+    responseBody = {
           inAmount: '20000000',
           outAmount: '12345',
           priceImpactPct: '0.002',
           slippageBps: 42,
           router: 'metis',
           mode: 'ultra'
-        }
-      };
-    }) as any;
+    };
   });
   afterEach(() => {
-    axios.get = origGet;
     console.log = origLog;
   });
 
   it('autoSlippage V2 não envia parâmetros legados de colisão', async () => {
     const dex = new DexAggregatorService('https://fake.invalid', {
-      rateLimitMs: 0,
+      hub: hub as any, rateLimitMs: 0,
       cacheTtlMs: 0
     });
     await dex.getQuote({
@@ -115,7 +115,7 @@ describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
       maxAutoSlippageBps: 750
     });
 
-    assert.strictEqual(sentUrl, 'https://fake.invalid/order');
+    assert.strictEqual(sentUrl, '/swap/v2/order');
     assert.strictEqual(sent.slippageBps, undefined);
     assert.strictEqual(sent.autoSlippageCollisionUsdValue, undefined);
     assert.strictEqual(sent.maxAutoSlippageBps, undefined);
@@ -125,7 +125,7 @@ describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
 
   it('telemetria de colisão continua variando conforme liquidez', async () => {
     const dex = new DexAggregatorService('https://fake.invalid', {
-      rateLimitMs: 0,
+      hub: hub as any, rateLimitMs: 0,
       cacheTtlMs: 0
     });
     await dex.getQuote({
@@ -144,7 +144,7 @@ describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
 
   it('saída com slippage explícito envia 500bps', async () => {
     const dex = new DexAggregatorService('https://fake.invalid', {
-      rateLimitMs: 0,
+      hub: hub as any, rateLimitMs: 0,
       cacheTtlMs: 0
     });
     const quote = await dex.getQuote({
@@ -160,13 +160,8 @@ describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
   });
 
   it('maxAutoSlippage acima de 750 falha antes do HTTP', async () => {
-    let calls = 0;
-    axios.get = (async () => {
-      calls++;
-      return { data: {} };
-    }) as any;
     const dex = new DexAggregatorService('https://fake.invalid', {
-      rateLimitMs: 0,
+      hub: hub as any, rateLimitMs: 0,
       cacheTtlMs: 0
     });
 
@@ -180,22 +175,20 @@ describe('DexAggregatorService V2 delega autoSlippage ao RTSE', () => {
       }),
       /Slippage maximo excedido/
     );
-    assert.strictEqual(calls, 0);
+    assert.strictEqual(requestCalls, 0);
   });
 
   it('RTSE retornado acima de 750 falha fechado', async () => {
-    axios.get = (async () => ({
-      data: {
+    responseBody = {
         inAmount: '1000000',
         outAmount: '500000',
         slippageBps: 800,
         router: 'metis',
         mode: 'ultra'
-      }
-    })) as any;
+    };
 
     const dex = new DexAggregatorService('https://fake.invalid', {
-      rateLimitMs: 0,
+      hub: hub as any, rateLimitMs: 0,
       cacheTtlMs: 0
     });
 

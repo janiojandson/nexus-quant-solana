@@ -133,21 +133,21 @@ test('Dashboard Executivo reflete o layout limpo sem seções legadas poluidoras
   assert.match(html, /⚡ Fila Sentinel/);
   assert.match(html, /id="metric-sentinel-queue"/);
 
-  // Laya Live Gatekeeper
-  assert.match(html, /LIVE GATEKEEPER/);
-  assert.match(html, /Laya Sistema 1 LIVE GATEKEEPER/);
+  // User removed Laya as an entry authority; preserve the actual 4D status card.
+  assert.doesNotMatch(html, /Laya Sistema 1 LIVE GATEKEEPER/);
+  assert.match(html, /Pre-Flight Engine \(Micro-Momentum\)/);
 
   // Posições Ativas com Badges de Origem
   assert.match(html, /Posições Ativas sob Gestão/);
-  assert.match(html, /🎯 DEX 5m/);
+  assert.match(html, /Jupiter V2 Discovery/);
   assert.match(html, /⚡ Sentinel/);
   assert.match(html, /RAYDOGE/);
   assert.match(html, /SENTINELPUMP/);
-  assert.match(html, /Varrer contas SPL vazias/);
+  assert.match(html, /adminFetch\('\/api\/wallet\/sweep-rent'/);
 
   // Histórico de Trades Fechados com Breakdown por Origem
   assert.match(html, /Histórico de Trades Fechados/);
-  assert.match(html, /DEX 5m — PnL/);
+  assert.match(html, /Jupiter V2 Discovery — PnL/);
   assert.match(html, /⚡ Sentinel — PnL/);
   assert.match(html, /Taxa de Acerto Global/);
   assert.match(html, /CLOSEDEX/);
@@ -161,7 +161,7 @@ test('Dashboard Executivo reflete o layout limpo sem seções legadas poluidoras
 test('Dashboard possui controles de segurança e login administrativo', () => {
   const html = renderDashboardHtml(state);
 
-  assert.match(html, /ENTRAR ADMIN/);
+  assert.match(html, /onclick="submitAdminLogin\(\)"/);
   assert.match(html, /PÂNICO GERAL/);
   assert.match(html, /LIQUIDAR POSIÇÃO/);
   assert.match(html, /adminFetch\('\/api\/positions\//);

@@ -26,7 +26,8 @@ function scenario(options: {metadata?: boolean; decision?: {accepted:boolean;rea
       acknowledgeAccepted:async()=>{events.push('ack');return true;}},
     scanner:{fetchCandidate:async()=>{events.push('metadata');if(options.loseAfterMetadata)active=false;
       return options.metadata===false?null:{mint:'mint',symbol:'SYM',name:'Name',priceUsd:0.01,liquidityUsd:30000};}},
-    executionUncertainReason:null,
+    executionUncertainReason:null, IS_DRY_RUN:true,
+    positionLedger:{recover:async()=>null},
     positionEngine:{getAllPositions:()=>[]},MAX_CONCURRENT_POSITIONS:2,
     exitPathHealth:{snapshot:()=>({canOpenNewPosition:true})},
     wallet:{getBalanceSol:async()=>1},

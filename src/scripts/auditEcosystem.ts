@@ -21,14 +21,9 @@ const OFFICIAL_PHANTOM_WALLET =
 const LAYA_URL =
   process.env.SOLANA_LAYA_NATIVE_URL || 'http://nexus-decisor-laya.railway.internal:8001';
 
-const DB_URL =
-  process.env.DATABASE_URL ||
-  process.env.DATABASE_PUBLIC_URL ||
-  'postgresql://postgres:RqTVXNATEwQOMryilqbZZOUttNTQuJmk@zephyr.proxy.rlwy.net:25561/railway';
+const DB_URL = process.env.DATABASE_URL || process.env.DATABASE_PUBLIC_URL || (() => { throw new Error('DATABASE_URL_REQUIRED'); })();
 
-const RPC_URL =
-  process.env.HELIUS_RPC_URL ||
-  'https://mainnet.helius-rpc.com/?api-key=b84d44ce-1e66-49f9-8b5e-0193cf14b1ae';
+const RPC_URL = process.env.HELIUS_RPC_URL || (() => { throw new Error('HELIUS_RPC_URL_REQUIRED'); })();
 
 async function runAudit(): Promise<void> {
   console.log('═══════════════════════════════════════════════════════════════════════════');

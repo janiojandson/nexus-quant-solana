@@ -36,7 +36,7 @@ describe('MemeRiskGatekeeper - Auditoria determinística de Memecoins + Laya sha
     assert.match(audit.reason || '', /Liquidez insuficiente/);
   });
 
-  it('deve bloquear quando o Sentinel estiver indisponível, independente da Laya shadow', async () => {
+  it('aprova fatos críticos completos sem depender do macro Sentinel removido', async () => {
     const mockRugCheck = {
       auditToken: async () => ({
         mint: 'Meme333333333333333333333333333333333333333',
@@ -68,9 +68,9 @@ describe('MemeRiskGatekeeper - Auditoria determinística de Memecoins + Laya sha
     };
 
     const audit = await gatekeeper.auditToken(token);
-    assert.strictEqual(audit.safe, false);
-    assert.strictEqual(audit.validatedBy, 'MACRO_CIRCUIT_BREAKER');
-    assert.match(audit.reason || '', /SENTINEL_UNAVAILABLE/);
+    assert.strictEqual(audit.safe, true);
+    assert.strictEqual(audit.validatedBy, 'DETERMINISTIC_SOLANA_PIPELINE');
+    assert.strictEqual(audit.rugCheckReport?.factsComplete, true);
 
   });
 
@@ -219,7 +219,7 @@ it('Laya nativa em shadow pode falhar sem bloquear entrada já aprovada pelos ga
   } finally { axios.get = originalGet; }
 });
 
-it('ABSTAIN de baixa confiança da Laya shadow não substitui os gates determinísticos', async () => {
+it('fatos incompletos de RugCheck vetam sem fabricar decisão Laya', async () => {
   const originalGet = axios.get;
   try {
     axios.get = (async () => ({
@@ -231,7 +231,7 @@ it('ABSTAIN de baixa confiança da Laya shadow não substitui os gates determin�
         mint: 'ShadowAbstain1111111111111111111111111111111',
         score: 100, risks: [], isRugged: false, isSafe: true, verified: true,
         mintAuthority: null, freezeAuthority: null, holdersCount: 500,
-        factsComplete: true, lpLockedPct: 100, topHoldersPct: 10
+        factsComplete: false, lpLockedPct: 100, topHoldersPct: 10
       })
     };
     const shadowDecision = {
@@ -253,9 +253,9 @@ it('ABSTAIN de baixa confiança da Laya shadow não substitui os gates determin�
       volumeBuysM5: 18_000, volumeSellsM5: 7_000, priceUsd: 0.001, h1HighPriceUsd: 0.0011
     });
 
-    assert.strictEqual(audit.safe, true);
-    assert.strictEqual(audit.validatedBy, 'DETERMINISTIC_SOLANA_PIPELINE');
-    assert.strictEqual(audit.layaNativeShadow?.route, 'ABSTAIN');
-    assert.strictEqual(audit.layaNativeShadow?.routeConfidence, 0.55);
+    assert.strictEqual(audit.safe, false);
+    assert.strictEqual(audit.validatedBy, 'RUGCHECK_API');
+    assert.match(audit.reason || '', /fatos críticos/);
+    assert.strictEqual(audit.layaNativeShadow, undefined);
   } finally { axios.get = originalGet; }
 });
