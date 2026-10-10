@@ -12,6 +12,8 @@ import {
 } from './jupiterTrafficCoordinator.js';
 
 export interface SwapQuoteParams {
+  /** Required for fee-bearing economics; omitting it is price/momentum only. */
+  taker?: string;
   inputMint: string;
   outputMint: string;
   amountLamports: number;
@@ -145,6 +147,7 @@ export class DexAggregatorService {
       outputMint: params.outputMint,
       amount: String(params.amountLamports)
     };
+    if (params.taker) queryParams.taker = params.taker;
 
     if (params.autoSlippage) {
       // Swap V2 /order aplica RTSE automaticamente quando não há override.

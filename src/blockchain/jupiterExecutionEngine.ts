@@ -143,14 +143,16 @@ export class JupiterExecutionEngine {
     outputMint: string,
     amountLamports: number,
     slippageBps = 400,
-    trafficPriority: JupiterPriority = 3
+    trafficPriority: JupiterPriority = 3,
+    taker?: string
   ) {
     return this.dexAggregator.getQuote({
       inputMint,
       outputMint,
       amountLamports,
       slippageBps,
-      trafficPriority
+      trafficPriority,
+      taker
     });
   }
 

@@ -5,12 +5,14 @@ import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
 import { ConfirmedPoolReader, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
 import { PUMP_PROGRAM_ID } from '../pump/pumpBondingCurve.js';
 import { observeEntryMomentum, type EntryMomentumResult } from './entryMomentumGate.js';
+import { publicTakerFeeEstimate } from './publicTakerFeeProof.js';
 import { assembleV0AccountKeys, hasBoundSwapCpi, isJupiterRouteInstruction,
   referencesProgram, validateEntryAuxiliaries } from './entryRoutePolicy.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const DEADLINE_MS = 10_000;
 interface V2Order {
+  taker?: string;
   requestId?: string; transaction?: string | null; inAmount?: string; outAmount?: string;
   otherAmountThreshold?: string; slippageBps?: number; feeBps?: number;
   routePlan?: unknown; errorCode?: number; transactionVersion?: number;
@@ -39,15 +41,7 @@ const positiveInteger = (raw: unknown): bigint | null =>
   typeof raw === 'string' && /^[0-9]+$/.test(raw) && BigInt(raw) > 0n ? BigInt(raw) : null;
 const deny = (reason: string): PreflightResult => ({ accepted: false, reason });
 function feeEstimate(order: V2Order, taker: string): {network: number; rent: number} | null {
-  const fields = [
-    [order.signatureFeeLamports, order.signatureFeePayer],
-    [order.prioritizationFeeLamports, order.prioritizationFeePayer],
-    [order.rentFeeLamports, order.rentFeePayer]
-  ] as const;
-  if (fields.some(([amount,payer]) => !Number.isSafeInteger(amount) || amount! < 0 ||
-      (amount! > 0 && (typeof payer !== 'string' || !payer)))) return null;
-  const paid = fields.map(([amount,payer]) => payer === taker ? amount! : 0);
-  return {network: paid[0] + paid[1], rent: paid[2]};
+  return publicTakerFeeEstimate(order as unknown as Record<string, unknown>, taker);
 }
 function directRouteMatches(order: V2Order, inputMint: string, outputMint: string,
   amount: string, poolAddress: string): boolean {
@@ -138,13 +132,14 @@ export class PreFlightEngine {
       const forwardMin = positiveInteger(forward.otherAmountThreshold);
       if (!out || !forwardMin || forwardMin > out || positiveInteger(forward.inAmount) !== BigInt(inputAmount))
         return deny('FORWARD_QUOTE_INVALID');
-      const reverse = await getOrder(mint, SOL_MINT, out.toString());
+      const reverse = await getOrder(mint, SOL_MINT, out.toString(), Date.now() + DEADLINE_MS, this.walletPublicKey);
       const minOut = positiveInteger(reverse.otherAmountThreshold);
       if (!minOut || positiveInteger(reverse.inAmount) !== out || !positiveInteger(reverse.outAmount))
         return deny('REVERSE_QUOTE_INVALID');
       // The expected output and the guaranteed forward minimum are distinct
       // swap sizes. Price both explicitly; never extrapolate an AMM curve.
-      const adverse = forwardMin === out ? reverse : await getOrder(mint, SOL_MINT, forwardMin.toString());
+      const adverse = forwardMin === out ? reverse : await getOrder(mint, SOL_MINT, forwardMin.toString(),
+        Date.now() + DEADLINE_MS, this.walletPublicKey);
       const adverseMin = positiveInteger(adverse.otherAmountThreshold);
       if (!adverseMin || positiveInteger(adverse.inAmount) !== forwardMin || !positiveInteger(adverse.outAmount))
         return deny('ADVERSE_REVERSE_QUOTE_INVALID');

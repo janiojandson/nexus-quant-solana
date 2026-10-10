@@ -1,3 +1,6 @@
+import type { ConfirmedPoolEvidence } from '../pump/confirmedPoolReader.js';
+import { physicalGrossSpotMark } from './physicalGrossPrice.js';
+
 export interface PositionTracking {
   mint: string;
   symbol: string;
@@ -340,7 +343,7 @@ export class PositionExitEngine {
     currentSolValue: number,
     currentTimestamp: number = Date.now(),
     context?: { currentLiquidityUsd?: number; currentVolume5m?: number;
-      physicalReservoirDrained?: boolean }
+      physicalReservoirDrained?: boolean; initialGrossPoolEvidence?: ConfirmedPoolEvidence | null }
   ): ExitSignal {
     const position = this.activePositions.get(mint);
     const entrySol = position?.entrySol || 0.015;
@@ -376,6 +379,27 @@ export class PositionExitEngine {
         reasonDetail: 'PHYSICAL_RESERVOIR_DRAIN' };
     }
 
+    const tpStep = position.highestTpStepReached ?? (position.partialTaken ? 1 : 0);
+    const useGrossInitialStop = position.accountingMode === 'SHADOW' && tpStep === 0;
+    if (useGrossInitialStop) {
+      const gross = physicalGrossSpotMark(context?.initialGrossPoolEvidence, position.mint,
+        position.entryPairAddress, position.tokenAmount, currentTimestamp);
+      const nominalCostLamports = Math.round(entrySol * 1e9);
+      if (!gross || !Number.isSafeInteger(nominalCostLamports) || nominalCostLamports <= 0) {
+        // Perdas exigem confirmação física cruzada; lucro líquido roteável não
+        // depende da prova de pool — o stop só protege o downside.
+        if (pnlPct < 0)
+          return { shouldExit: false, type: 'HOLD', pnlPct, currentPriceUsd: currentSolValue,
+            reasonDetail: 'GROSS_STOP_PROOF_UNAVAILABLE' };
+      } else if (gross.numeratorLamports * 8n <= BigInt(nominalCostLamports) * gross.denominator * 7n) {
+        // Exact rational -12.5% boundary. Flooring the mark would incorrectly
+        // trigger a value fractionally above the approved boundary.
+        return { shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd: currentSolValue,
+          exitTokenAmount: position.tokenAmount, shouldCloseAta: true,
+          peakSolValue: newPeak, trailingStopSolValue, reasonDetail: 'INITIAL_STOP_LOSS' };
+      }
+    }
+
     // ==========================================
     // Protecoes de saida total precedem colheitas parciais
     // ==========================================
@@ -398,7 +422,7 @@ export class PositionExitEngine {
       }
     }
 
-    if (pnlPct <= -0.30) {
+    if (!useGrossInitialStop && pnlPct <= -0.30) {
       return {
         shouldExit: true,
         type: 'STOP_LOSS',
@@ -413,7 +437,7 @@ export class PositionExitEngine {
     }
 
     // Stops protect both initial positions and runners before any trailing classification.
-    if (pnlPct <= position.stopLossPct) {
+    if (!useGrossInitialStop && pnlPct <= position.stopLossPct) {
       return {
         shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd: currentSolValue,
         exitTokenAmount: position.tokenAmount, shouldCloseAta: true,
@@ -457,8 +481,6 @@ export class PositionExitEngine {
     // ==========================================
     // 🧠 AYLA SENTINELA DE SAÍDA ADAPTATIVA
     // ==========================================
-    const tpStep = position.highestTpStepReached ?? (position.partialTaken ? 1 : 0);
-
     // ==========================================
     // 🪜 ESCADA DE REALIZAÇÃO 4D (TP LADDER)
     // ==========================================
@@ -523,7 +545,7 @@ export class PositionExitEngine {
     // ==========================================
     if (!position.partialTaken) {
       // 1. Stop-Loss Lógico (-6%, efetivo ~-8% a -9% com slippage)
-      if (pnlPct <= position.stopLossPct) {
+      if (!useGrossInitialStop && pnlPct <= position.stopLossPct) {
         // CORREÇÃO: Log de debug para stop loss
         console.log(`🛑 [STOP LOSS DISPARADO] ${position.symbol} | PnL: ${(pnlPct * 100).toFixed(2)}% | SL: ${(position.stopLossPct * 100).toFixed(0)}% | Valor: ${currentSolValue.toFixed(4)} SOL`);
         return {

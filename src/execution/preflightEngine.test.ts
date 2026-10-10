@@ -69,15 +69,18 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
   setupMalice?: 'owner'|'destination'|'amount'|'cleanup'; cpiWrongUserAta?: boolean;
   expensiveCompute?: boolean; finalRentFee?: number; lease?: () => Promise<void> } = {}) {
   const calls: string[] = [];
+  const requests: any[] = [];
   const mintData = Buffer.alloc(82);
   mintData[44] = 6;
   const prices = ['1000000', '996016', '992063', '988142'];
   let forward = 0;
   const jupiter = { request: async (work: string, endpoint: string, payload: any, options: any) => {
+    requests.push({ ...payload });
     calls.push(`${work}:${endpoint}`);
     assert.equal(work, 'ENTRY'); assert.equal(endpoint, '/swap/v2/order');
     assert.ok(options.deadlineMs > Date.now());
     if (payload.inputMint === mint) return { status: 200, headers: noHeaders, body: {
+      taker: payload.taker, transaction: payload.taker ? unsignedOrder() : '', transactionVersion: 0,
       inAmount: payload.amount, outAmount: '24500000',
       otherAmountThreshold: payload.amount === overrides.forwardMin && overrides.adverseReverseMin
         ? overrides.adverseReverseMin : overrides.reverseMin ?? '24000000', feeBps: 0,
@@ -89,6 +92,7 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
         rentFeeLamports: 0, rentFeePayer: taker } : {})
     } };
     if (payload.taker) return { status: 200, headers: noHeaders, body: {
+      taker: payload.taker,
       requestId: 'order-1', inAmount: '25000000', outAmount: '988142', otherAmountThreshold: overrides.finalMin ?? '988142',
       slippageBps: overrides.finalSlippageBps ?? 100, routePlan: [{ swapInfo: { ammKey: pool,
         programId: PUMP_SWAP_PROGRAM.toBase58(), inputMint: payload.inputMint,
@@ -149,8 +153,19 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
       slot: poolReads > 1 ? 124 : 123
     } };
   } };
-  return { preflight: new PreFlightEngine(jupiter as any, rpc as any, taker, poolReader as any), calls };
+  return { preflight: new PreFlightEngine(jupiter as any, rpc as any, taker, poolReader as any), calls, requests };
 }
+
+test('reverse and adverse fee-bearing preflight orders include public taker while momentum remains quote-only', async () => {
+  const f = fixture({ forwardMin: '980000' });
+  const result = await f.preflight.run({ mint, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000 });
+  assert.equal(result.accepted, true, JSON.stringify(result));
+  const reverse = f.requests.filter(request => request.inputMint === mint);
+  assert.equal(reverse.length, 2);
+  assert.equal(reverse.every(request => request.taker === taker), true);
+  assert.equal(f.requests.slice(0, 4).every(request => request.taker === undefined), true);
+});
 
 test('4D accepts real 25M lamport size with unsigned final compiled order and no execute endpoint', async () => {
   const { preflight, calls } = fixture();

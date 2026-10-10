@@ -86,6 +86,7 @@ export function shadow4dFixture(overrides: { mintOwner?: string; simulationError
       slippageBps: 100, routePlan: [{ swapInfo: { ammKey: pool, inputMint: mint,
         outputMint: 'So11111111111111111111111111111111111111112', inAmount: payload.amount,
         outAmount: '24500000' } }],
+      taker: fixtureTaker, transaction: unsignedOrder(),
       ...(!overrides.missingFees ? { signatureFeeLamports: overrides.reverseNetworkFee ?? 5000,
         signatureFeePayer: fixtureTaker, prioritizationFeeLamports: 0, prioritizationFeePayer: fixtureTaker,
         rentFeeLamports: 0, rentFeePayer: fixtureTaker } : {})
@@ -95,6 +96,7 @@ export function shadow4dFixture(overrides: { mintOwner?: string; simulationError
       slippageBps: overrides.finalSlippageBps ?? 100, routePlan: [{ swapInfo: { ammKey: pool,
         programId: PUMP_SWAP_PROGRAM.toBase58(), inputMint: payload.inputMint,
         outputMint: payload.outputMint, inAmount: payload.amount, outAmount: '988142' } }],
+      taker: fixtureTaker,
       transaction: unsignedOrder({ payer: overrides.wrongTaker ? key(13) : undefined,
         unusedPool: overrides.unusedPool, wrongDiscriminator: overrides.wrongDiscriminator,
         wrongAmount: overrides.wrongAmount, unrelatedInstruction: overrides.unrelatedInstruction,

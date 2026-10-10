@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { shadowLiquidableValue } from './shadowQuoteValue.js';
+import { feeQuoteFixture, TEST_TAKER, unsignedFeeOrder } from './unsignedFeeProof.testFixture.js';
 
-const taker = 'wallet';
+const taker = TEST_TAKER;
 const quote = { inAmount: 1000, outAmount: 1_400_000_000, requestId: 'q',
-  rawQuote: { otherAmountThreshold: '1350000000', feeBps: 100,
+  rawQuote: { ...feeQuoteFixture('1350000000', 1000, 1_400_000_000), feeBps: 100,
+    transaction: unsignedFeeOrder(taker),
     signatureFeeLamports: 5000, signatureFeePayer: taker,
     prioritizationFeeLamports: 10000, prioritizationFeePayer: taker,
     rentFeeLamports: 0, rentFeePayer: taker } };
