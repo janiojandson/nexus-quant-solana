@@ -210,3 +210,33 @@ test('RugCheck invalid authority and null counts remain unknown', async () => {
   assert.strictEqual(report.holdersCount,undefined);
   assert.strictEqual(report.lpLockedPct,undefined);
 });
+
+test('RugCheck markets null + resolveLpBurn true aprova sem lpLockedPct', async () => {
+  const service = new RugCheckService({
+    resolveLpBurn: async () => true,
+    fetchClient: async () => ({ data: {
+      token: { mintAuthority: null, freezeAuthority: null },
+      totalHolders: 500, topHolders: [{ pct: 5 }],
+      markets: null, risks: [], rugged: false
+    }})
+  });
+  const r = await service.auditToken('mint', undefined, { origin: 'PUMP_FUN' });
+  assert.strictEqual(r.isSafe, true);
+  assert.strictEqual(r.factsComplete, true);
+  assert.strictEqual(r.lpLockedPct, 100);
+});
+
+test('RugCheck markets null + resolveLpBurn false permanece fail-closed', async () => {
+  const service = new RugCheckService({
+    resolveLpBurn: async () => false,
+    fetchClient: async () => ({ data: {
+      token: { mintAuthority: null, freezeAuthority: null },
+      totalHolders: 500, topHolders: [{ pct: 5 }],
+      markets: null, risks: [], rugged: false
+    }})
+  });
+  const r = await service.auditToken('mint', undefined, { origin: 'RAYDIUM' });
+  assert.strictEqual(r.isSafe, false);
+  assert.strictEqual(r.factsComplete, false);
+  assert.match(r.risks.join(' | '), /lpLockedPct/);
+});

@@ -15,6 +15,8 @@ import {
 } from './blockchain/adaptivePositionSizer.js';
 import { buildEquitySizingPolicy } from './blockchain/equitySizingPolicy.js';
 import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
+import { RugCheckService } from './risk/rugCheckService.js';
+import { createLpBurnResolver } from './risk/lpBurnResolver.js';
 import { createQuantHubs } from "./hubs/runtimeHubs.js";
 
 import { PreFlightEngine } from "./execution/preflightEngine.js";
@@ -204,7 +206,9 @@ const scanner = new JupiterDiscoveryScanner(jupiterHub);
 
 const exitTelemetry = new NonBlockingTelemetry<any>();
 // DEX e Sentinel agendam advisory separadamente; shadow nativo não atrasa os hard gates.
-const entryGatekeeper = new MemeRiskGatekeeper({});
+const entryGatekeeper = new MemeRiskGatekeeper({
+  rugCheckService: new RugCheckService({ resolveLpBurn: createLpBurnResolver(rpcHub) })
+});
 const layaPositionLastCheck = new Map<string, number>();
 const layaPositionInFlight = new Set<string>();
 /** Serializa qualquer liquidação por mint, independentemente da origem (hard gate, Laya ou manual). */
@@ -2182,7 +2186,7 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       signal: token.leaseSignal,
       lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(), assertLeaseActive: token.assertLeaseActive },
       verifySecurity: async facts => {
-        const audit = await entryGatekeeper.auditToken({ mint: facts.mint, pairAddress: facts.pairAddress, sentinelJupiterDepthVerified: true, liquidityUsd: facts.liquidityUsd, priceUsd: facts.priceUsd });
+        const audit = await entryGatekeeper.auditToken({ mint: facts.mint, pairAddress: facts.pairAddress, sentinelJupiterDepthVerified: true, liquidityUsd: facts.liquidityUsd, priceUsd: facts.priceUsd, origin: 'PUMP_FUN' });
         return { safe: audit.safe, reason: audit.reason };
       }
     });

@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { RugCheckService, type RugCheckReport } from './rugCheckService.js';
+import type { TokenOrigin } from './lpBurnResolver.js';
 import type { SolanaLayaAdapter, SolanaLayaDecision, SolanaLayaFacts } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
@@ -7,6 +8,8 @@ export interface TokenSecurityMetadata {
   pairAddress?: string;
   /** Internal Sentinel flag: executable Jupiter depth replaces DEX liquidity/candles only. */
   sentinelJupiterDepthVerified?: true;
+  /** Origem do candidato; usada para resolver prova de LP queimada on-chain. */
+  origin?: TokenOrigin;
   liquidityUsd: number;
   mintAuthority?: string | null;
   freezeAuthority?: string | null;
@@ -120,7 +123,7 @@ export class MemeRiskGatekeeper {
     // 0. Macro Sentinel check removed by user request
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
-    const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress);
+    const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress, { origin: token.origin });
     if (!rugReport.isSafe) {
       return {
       rugCheckReport: rugReport,

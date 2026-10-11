@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { TokenOrigin } from './lpBurnResolver.js';
 
 export interface RugCheckReport {
   mint: string;
@@ -19,11 +20,14 @@ export interface RugCheckReport {
 export interface RugCheckOptions {
   fetchClient?: (url: string) => Promise<{ data: any }>;
   retryDelayMs?: number;
+  /** Prova on-chain de LP queimada; se true, supre a ausência de lpLockedPct no RugCheck. */
+  resolveLpBurn?: (mint: string, pairAddress?: string, origin?: TokenOrigin) => Promise<boolean>;
 }
 
 export class RugCheckService {
   private fetchClient: (url: string) => Promise<{ data: any }>;
   private readonly retryDelayMs: number;
+  private readonly resolveLpBurn?: (mint: string, pairAddress?: string, origin?: TokenOrigin) => Promise<boolean>;
   private static readonly RUGCHECK_BASE_URL = 'https://api.rugcheck.xyz/v1/tokens';
   public static readonly DANGER_SCORE_THRESHOLD = 500;
 
@@ -39,13 +43,14 @@ export class RugCheckService {
 
   constructor(options?: RugCheckOptions) {
     this.retryDelayMs = options?.retryDelayMs ?? 1000;
+    this.resolveLpBurn = options?.resolveLpBurn;
     this.fetchClient = options?.fetchClient || (async (url: string) => axios.get(url, {
       timeout: 8000,
       headers: { 'Accept': 'application/json', 'User-Agent': 'NexusQuantSolana/1.0' }
     }));
   }
 
-  public async auditToken(mint: string, targetPairAddress?: string): Promise<RugCheckReport> {
+  public async auditToken(mint: string, targetPairAddress?: string, options?: { origin?: TokenOrigin }): Promise<RugCheckReport> {
     try {
       const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
       let response: {data:any};
@@ -106,6 +111,17 @@ export class RugCheckService {
         if (percentages.every((pct: number) => Number.isFinite(pct) && pct >= 0 && pct <= 100)) {
           const sum = percentages.sort((a: number, b: number) => b - a).slice(0, 5).reduce((acc: number, pct: number) => acc + pct, 0);
           if (sum <= 100) topHoldersPct = sum;
+        }
+      }
+
+      // On-chain LP burn resolution: when RugCheck no longer returns lpLockedPct,
+      // let the caller supply a verified proof instead of vetoing.
+      if (lpLockedPct === undefined && this.resolveLpBurn) {
+        try {
+          const verified = await this.resolveLpBurn(mint, targetPairAddress, options?.origin);
+          if (verified) lpLockedPct = 100;
+        } catch {
+          // resolver error leaves lpLockedPct undefined -> fail closed below
         }
       }
 
