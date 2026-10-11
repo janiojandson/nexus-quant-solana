@@ -1,5 +1,7 @@
 import type { JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
 import { hubWorkForPriority } from './jupiterPriorityPolicy.js';
+import { getJupiterApiKeyPool, type JupiterApiKeyPool } from './jupiterApiKeyPool.js';
+import axios from 'axios';
 import { Connection, Keypair, VersionedTransaction } from '@solana/web3.js';
 import { DexAggregatorService, SwapQuoteResult } from './dexAggregator.js';
 import { referencesProgram } from '../execution/entryRoutePolicy.js';
@@ -32,6 +34,7 @@ export interface SwapExecutionRequest {
   forbiddenProgramIds?: readonly string[];
   /** Audited entry pool; every final order must reference it before signing. */
   requiredPoolAddress?: string;
+  maxPriceImpactPct?: number;
 }
 
 export interface SwapExecutionResponse {
@@ -104,6 +107,7 @@ export class JupiterExecutionEngine {
   private executionEnv: ExecutionEnvironment;
   private dexAggregator: DexAggregatorService;
   private hub?: Pick<JupiterOrgHub,'request'>;
+  private apiKeys: JupiterApiKeyPool;
   private v2BaseUrl: string;
   private executeTimeoutMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
@@ -118,7 +122,7 @@ export class JupiterExecutionEngine {
     this.hub = config.jupiterHub;
     this.dexAggregator = config.jupiterHub ? new DexAggregatorService(undefined, {hub:config.jupiterHub}) : config.dexAggregator || new DexAggregatorService();
     this.trafficCoordinator = config.trafficCoordinator || this.dexAggregator.getTrafficCoordinator();
-
+    this.apiKeys = getJupiterApiKeyPool(config.apiKey);
     this.v2BaseUrl = (
       config.v2BaseUrl ||
       process.env.JUPITER_V2_BASE_URL ||
@@ -144,7 +148,8 @@ export class JupiterExecutionEngine {
     amountLamports: number,
     slippageBps = 400,
     trafficPriority: JupiterPriority = 3,
-    taker?: string
+    taker?: string,
+    signal?: AbortSignal
   ) {
     return this.dexAggregator.getQuote({
       inputMint,
@@ -152,7 +157,8 @@ export class JupiterExecutionEngine {
       amountLamports,
       slippageBps,
       trafficPriority,
-      taker
+      taker,
+      signal
     });
   }
 
@@ -188,6 +194,16 @@ export class JupiterExecutionEngine {
     if (slippageBps !== undefined) params.slippageBps = slippageBps;
 
     const order = (await this.hub.request(hubWorkForPriority(req.trafficPriority ?? 4), '/swap/v2/order', params)).body as JupiterV2OrderResponse;
+    if (req.maxPriceImpactPct !== undefined) {
+      const raw = (order as any).priceImpact ?? (order.priceImpactPct == null ? NaN : Number(order.priceImpactPct) * 100);
+      const impact = Number(raw);
+      if (!Number.isFinite(impact) || Math.abs(impact) > req.maxPriceImpactPct) throw new Error('Jupiter order price impact exceeds entry cap or is unknown');
+      if (req.requiredPoolAddress) {
+        const pools = [...new Set((order.routePlan || []).filter((r: any) => r?.swapInfo?.outputMint === req.outputMint)
+          .map((r: any) => r?.swapInfo?.ammKey))];
+        if (pools.length !== 1 || pools[0] !== req.requiredPoolAddress) throw new Error('Jupiter order destination pool differs from audited pool or is split');
+      }
+    }
     for (const program of req.forbiddenProgramIds || []) {
       if (referencesProgram(order.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
     }
@@ -362,6 +378,15 @@ export class JupiterExecutionEngine {
           trafficPriority: req.trafficPriority ?? 5
         });
 
+        if (req.maxPriceImpactPct !== undefined) {
+          const raw = quote.rawQuote;
+          const known = raw?.priceImpact != null && Number.isFinite(Number(raw.priceImpact)) || raw?.priceImpactPct != null && Number.isFinite(Number(raw.priceImpactPct));
+          if (!known || !Number.isFinite(quote.priceImpactPct) || Math.abs(quote.priceImpactPct) > req.maxPriceImpactPct) throw new Error('Jupiter dry-run price impact exceeds cap or is unknown');
+          if (req.requiredPoolAddress) {
+            const pools = [...new Set((raw?.routePlan || []).filter((r:any)=>r?.swapInfo?.outputMint===req.outputMint).map((r:any)=>r.swapInfo.ammKey))];
+            if (pools.length!==1 || pools[0]!==req.requiredPoolAddress) throw new Error('Jupiter dry-run destination pool differs from audited pool');
+          }
+        }
         for (const program of req.forbiddenProgramIds || []) {
           if (referencesProgram(quote.rawQuote?.routePlan, program)) throw new Error(`Forbidden entry program: ${program}`);
         }

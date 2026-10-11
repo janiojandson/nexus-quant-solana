@@ -80,6 +80,12 @@ export class PostgresCandidateStore implements CandidateStore {
   }
 }
 
+export type SentinelHandoffOutcome =
+  | 'DISCARDED_WARMUP_TIMEOUT' | 'DISCARDED_RUGCHECK' | 'DISCARDED_MOMENTUM_STALE'
+  | 'DISCARDED_PRICE_IMPACT' | 'EXECUTED_BUY_SUCCESS' | 'FAILED_SWAP' | 'DISCARDED_RISK_UNAVAILABLE'
+  | 'DISCARDED_ENTRY_GUARD' | 'DISCARDED_WINDOW_EXPIRED' | 'DISCARDED_ROUTE'
+  | 'DRY_RUN_BUY_SUCCESS' | 'FAILED_HANDLER' | 'SWAP_SUBMITTED_UNCONFIRMED';
+
 export class SentinelHandoffScanner extends EventEmitter {
   private readonly store:CandidateStore|null;
   private readonly reader:PoolEvidenceReader|null;
@@ -106,6 +112,28 @@ export class SentinelHandoffScanner extends EventEmitter {
     } catch {console.warn('[SentinelHandoff] HANDOFF_STORE_UNAVAILABLE');}
     finally {this.isPolling=false;}
   }
+
+  public async recordHandoffOutcome(mint: string, outcome: SentinelHandoffOutcome, detail?: string): Promise<void> {
+    if (!this.pgPool) {
+      console.error(`[SentinelHandoffScanner] Sem Postgres para gravar outcome de ${mint}: ${outcome}`);
+      return;
+    }
+    try {
+      const update = {
+        text: `UPDATE sentinel_handoff
+         SET quant_outcome = $1, quant_outcome_detail = $2, outcome_recorded_at = NOW()
+         WHERE mint = $3
+           AND (COALESCE(quant_outcome, 'PENDING') NOT IN ('EXECUTED_BUY_SUCCESS', 'DRY_RUN_BUY_SUCCESS')
+                OR $1 IN ('EXECUTED_BUY_SUCCESS', 'DRY_RUN_BUY_SUCCESS'))`,
+        values: [outcome, detail || null, mint],
+        query_timeout: 5_000
+      };
+      await this.pgPool.query(update);
+    } catch (err) {
+      console.error(`[SentinelHandoffScanner] Erro ao gravar outcome para ${mint}:`, err);
+    }
+  }
+
   async acknowledgeAccepted(mint:string,leaseId:string):Promise<boolean> {
     return this.store?this.store.acknowledgeAccepted(mint,leaseId):false;
   }

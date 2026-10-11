@@ -2,6 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { RugCheckService, RugCheckReport } from './rugCheckService.js';
 
+test('RugCheck retries transient throttling once and recovers real report', async () => {
+  let calls=0;
+  const service=new RugCheckService({retryDelayMs:0,fetchClient:async()=>{
+    if (++calls===1) throw {response:{status:429},message:'rate limited'};
+    return {data:{token:{mintAuthority:null,freezeAuthority:null},totalHolders:500,topHolders:[{pct:10}],markets:[{lp:{lpLockedPct:100}}]}};
+  }});
+  const report=await service.auditToken('mint');
+  assert.equal(calls,2);assert.equal(report.isSafe,true);
+});
+
+test('RugCheck exhausted outage stays fail-closed and differs from a measured risk veto', async () => {
+  let calls=0;
+  const service=new RugCheckService({retryDelayMs:0,fetchClient:async()=>{calls++;throw {response:{status:503},message:'unavailable'};}});
+  const report=await service.auditToken('mint');
+  assert.equal(calls,2);assert.equal(report.isSafe,false);assert.equal(report.providerUnavailable,true);
+});
+
 for (const [name, markets, expected] of [
   ['rejects unlocked target despite another locked pool', [{ pubkey: 'other', lp: { lpLockedPct: 100 } }, { pubkey: 'target', lp: { lpLockedPct: 0 } }], false],
   ['accepts burned target despite another unlocked pool', [{ pubkey: 'other', lp: { lpLockedPct: 0 } }, { pubkey: 'target', lp: { lpBurnedPct: 95 } }], true],

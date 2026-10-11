@@ -694,3 +694,10 @@ test('handleApiRoutes: JWT inválido não cai para autorização se token legado
   assert.strictEqual(statusCode, 401);
   assert.strictEqual(executorCalled, false);
 });
+
+test('status exposes segregated slots and preserves position source',async()=>{
+  let body='';await handleApiRoutes({url:'/api/status',method:'GET',headers:{}} as any,{writeHead(){},end(s:string){body=s;}} as any,
+    {latestState:{positions:[{mint:'a',entrySource:'DEX',pnlPct:0,stopLossPct:-.125},{mint:'b',entrySource:'SENTINEL',isSentinelHandoff:true,pnlPct:0,stopLossPct:-.125}],closedTrades:[],recentAudits:[]}} as any);
+  const data=JSON.parse(body);assert.deepStrictEqual(data.slots,{total:4,active:2,dex:{active:1,max:2},sentinel:{active:1,max:2}});
+  assert.equal(data.positions[1].entrySource,'SENTINEL');assert.equal(data.positions[1].isSentinelHandoff,true);
+});

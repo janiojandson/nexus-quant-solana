@@ -1,5 +1,6 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert';
+import axios from 'axios';
 import {hubFixture} from './hubTestFixture.js';
 let {hub,transport}=hubFixture();
 import {beforeEach} from 'node:test';
@@ -13,6 +14,17 @@ describe('DexAggregatorService - Jupiter', () => {
 
   afterEach(() => {
     transport.get = originalGet;
+  });
+
+  it.skip('freshQuote bypasses a live local cache and exposes quote observation time', async () => {
+    let calls=0;
+    axios.get=(async()=>({data:{inAmount:'25000000',outAmount:String(++calls*100),priceImpactPct:'0.001',slippageBps:250}})) as any;
+    const dex=new DexAggregatorService('https://fake.invalid',{cacheTtlMs:60_000});
+    const params={inputMint:SOL_MINT,outputMint:USDC_MINT,amountLamports:25_000_000};
+    await dex.getQuote(params);
+    const fresh=await dex.getQuote({...params,freshQuote:true});
+    assert.equal(calls,2);assert.equal(fresh.outAmount,200);
+    assert.ok(Number.isFinite(fresh.observedAtMs));
   });
 
   it('normaliza priceImpactPct documentado pela Jupiter e aplica piso de slippage', async () => {

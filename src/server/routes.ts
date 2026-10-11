@@ -1,3 +1,6 @@
+import { getGlobalJupiterTrafficCoordinator } from '../blockchain/jupiterTrafficCoordinator.js';
+import { getJupiterApiKeyPool } from '../blockchain/jupiterApiKeyPool.js';
+import { EntrySlotPolicy } from '../execution/entrySlotPolicy.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import type { Pool } from 'pg';
@@ -189,6 +192,8 @@ export async function handleApiRoutes(
     }
     const formattedPositions = (s.positions || []).map(p => ({
       mint: p.mint,
+      entrySource: p.entrySource ?? (p.isSentinelHandoff ? 'SENTINEL' : 'DEX'),
+      isSentinelHandoff: p.entrySource === 'SENTINEL' || Boolean(p.isSentinelHandoff),
       symbol: p.symbol,
       tokenAmount: p.tokenAmount,
       entryPriceUsd: p.entryPriceUsd,
@@ -242,6 +247,7 @@ export async function handleApiRoutes(
     }));
 
     const responsePayload = {
+      slots: s.slots ?? new EntrySlotPolicy().snapshot(s.positions || []),
       sentinelHandoffQueue: s.sentinelHandoffQueue ?? 0,
       // Formato exigido para clientes avançados / ordem de execução
       wallet: {
@@ -286,7 +292,7 @@ export async function handleApiRoutes(
         maintenanceMode: Boolean(s.maintenanceMode),
         adminAuth: s.auth || { configured: false, needsBootstrap: false },
         rentRecovery: s.rentRecovery || null,
-        laya: s.laya || null,
+        strategy: {mode:'DETERMINISTIC',dexMinPoolAgeSeconds:300,dexMaxPoolAgeSeconds:3600,dexMinLiquidityUsd:15000,dexM5Range:[3,85],sentinelPollingMs:2000,sentinelRouteWindowMs:45000,sentinelMaxPriceImpactPercent:2.5},
         exitCapacity: s.exitCapacity || null,
         exitPathHealth: s.exitPathHealth || null,
         pumpDirectSellFallback: s.pumpDirectSellFallback || {
@@ -297,6 +303,8 @@ export async function handleApiRoutes(
           fallbackReason: null
         },
         jupiter: {
+          keyCount: getJupiterApiKeyPool().size(),
+          traffic: getGlobalJupiterTrafficCoordinator().snapshot(),
           version: 'V2',
           mode: 'META_AGGREGATOR',
           rtse: true,

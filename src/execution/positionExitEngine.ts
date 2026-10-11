@@ -2,6 +2,7 @@ import type { ConfirmedPoolEvidence } from '../pump/confirmedPoolReader.js';
 import { physicalGrossSpotMark } from './physicalGrossPrice.js';
 
 export interface PositionTracking {
+  entrySource?: 'DEX' | 'SENTINEL';
   mint: string;
   symbol: string;
   tokenAmount: number;
@@ -102,6 +103,8 @@ export class PositionExitEngine {
   /** Rastreia o pico máximo de valor em SOL atingido por posição durante a custódia */
   private peakSolValues = new Map<string, number>();
   public static readonly DEFAULT_TIME_STOP_MS = 10 * 60 * 1000; // 10 minutos (hard limit ágil condicional)
+  public static readonly SENTINEL_BASE_TIME_STOP_MS = 90 * 60 * 1000;
+  public static readonly SENTINEL_MAX_TIME_STOP_MS = 105 * 60 * 1000;
   public static readonly DEFAULT_STOP_LOSS_PCT = -0.125;        // Initial loss trigger relative to actual entry cost.
   public static readonly DEFAULT_TAKE_PROFIT_PCT = 0.35;        // +35% Parcial de 50%
 
@@ -142,7 +145,7 @@ export class PositionExitEngine {
       ...position,
       stopLossPct: position.stopLossPct ?? PositionExitEngine.DEFAULT_STOP_LOSS_PCT,
       takeProfitPct: position.takeProfitPct ?? PositionExitEngine.DEFAULT_TAKE_PROFIT_PCT,
-      maxHoldDurationMs: position.maxHoldDurationMs || PositionExitEngine.DEFAULT_TIME_STOP_MS,
+      maxHoldDurationMs: position.maxHoldDurationMs || (position.entrySource === 'SENTINEL' ? PositionExitEngine.SENTINEL_BASE_TIME_STOP_MS : PositionExitEngine.DEFAULT_TIME_STOP_MS),
       initialTokenAmount: position.initialTokenAmount || position.tokenAmount,
       highestTpStepReached: position.highestTpStepReached ?? (position.partialTaken ? 1 : 0),
       partialTaken: Boolean(position.partialTaken || (position.highestTpStepReached && position.highestTpStepReached >= 1))
@@ -365,6 +368,9 @@ export class PositionExitEngine {
     const newPeak = this.peakSolValues.get(mint) || previousPeak;
 
     const pnlPct = (currentSolValue - entrySol) / entrySol;
+    const peakPnlPct = Math.round(((newPeak - entrySol) / entrySol) * 100000) / 100000;
+    const elapsedMs = currentTimestamp - position.entryTimestamp;
+    const elapsedMinutes = elapsedMs / (60 * 1000);
 
     // CORREÇÃO: Log de debug para avaliação de saída
     console.log(`[ExitEngine] ${position.symbol} | PnL: ${(pnlPct * 100).toFixed(2)}% | SL: ${(position.stopLossPct * 100).toFixed(0)}% | partialTaken: ${position.partialTaken} | Valor: ${currentSolValue.toFixed(4)} SOL`);
@@ -481,6 +487,12 @@ export class PositionExitEngine {
     // ==========================================
     // 🧠 AYLA SENTINELA DE SAÍDA ADAPTATIVA
     // ==========================================
+    const sentinelTimeExit = (): ExitSignal => ({
+      shouldExit:true,type:'TIME_STOP',pnlPct,currentPriceUsd:currentSolValue,
+      exitTokenAmount:position.tokenAmount,shouldCloseAta:true,peakSolValue:newPeak,trailingStopSolValue,
+      reasonDetail:`SENTINEL_TIME_STOP: ${elapsedMinutes.toFixed(1)}min | janela 90min; teto 105min | PnL ${(pnlPct*100).toFixed(2)}%`
+    });
+    if (position.entrySource === 'SENTINEL' && elapsedMs >= PositionExitEngine.SENTINEL_MAX_TIME_STOP_MS) return sentinelTimeExit();
     // ==========================================
     // 🪜 ESCADA DE REALIZAÇÃO 4D (TP LADDER)
     // ==========================================
@@ -518,8 +530,12 @@ export class PositionExitEngine {
     }
 
     // b) Time-Stop Dinâmico: Se após 5 minutos o volume estagnar e o PnL flutuar negativo entre -5% e -10%, encerra preventivamente
-    const elapsedMs = currentTimestamp - position.entryTimestamp;
-    const elapsedMinutes = elapsedMs / (60 * 1000);
+    if (position.entrySource === 'SENTINEL') {
+      // The live executable quote confirms an exit route. Missing indexed volume
+      // is not classified as stagnation; neutral/positive positions get 15min extra.
+      if (elapsedMs >= PositionExitEngine.SENTINEL_BASE_TIME_STOP_MS && pnlPct < -0.03) return sentinelTimeExit();
+      return {shouldExit:false,type:'HOLD',pnlPct,currentPriceUsd:currentSolValue,peakSolValue:newPeak,trailingStopSolValue};
+    }
     if (!position.partialTaken && elapsedMinutes >= 5 && pnlPct <= -0.05 && pnlPct >= -0.10) {
       const isVolumeStagnant = context?.currentVolume5m !== undefined && position.entryVolume5m !== undefined
         ? context.currentVolume5m <= position.entryVolume5m * 1.05
@@ -613,7 +629,7 @@ export class PositionExitEngine {
       return { shouldExit: false, type: 'HOLD', pnlPct: 0, currentPriceUsd };
     }
 
-    const pnlPct = Math.round(((currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 100000) / 100000;
+    const pnlPct = Math.round(((currentPriceUsd - position.entryPriceUsd) / position.entryPriceUsd) * 1e9) / 1e9;
 
     if (pnlPct <= -0.30 || pnlPct <= position.stopLossPct) {
       return { shouldExit: true, type: 'STOP_LOSS', pnlPct, currentPriceUsd,

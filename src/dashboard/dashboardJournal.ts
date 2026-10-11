@@ -370,7 +370,7 @@ export function renderJournalSection(): string {
                   decisionLabel = 'ENTRY_EXECUTED';
                   reason = 'Swap Jupiter executado e confirmado.';
                 } else if (phase === 'READY_FOR_JUPITER_SWAP') {
-                  reason = 'Hard gates + Momentum + Laya + sizing aprovados. Pronto para envio ao Jupiter.';
+                  reason = 'Hard gates + Momentum Jupiter + sizing aprovados. Pronto para envio ao Jupiter.';
                 } else {
                   decisionLabel = 'PRECHECK_LEGACY';
                   reason = 'Hard gates aprovados em registro legado; não comprova Momentum, chamada da Laya ou execução Jupiter.';

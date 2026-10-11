@@ -2,6 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { PositionExitEngine } from './positionExitEngine.js';
 
+test('Sentinel graduation holds through old 5/10 minute timers but keeps initial loss protection',()=>{
+  const engine=new PositionExitEngine();
+  engine.addPosition({mint:'sentinel',symbol:'S',entrySource:'SENTINEL',tokenAmount:100,entryPriceUsd:1,entrySol:1,entryTimestamp:0});
+  assert.equal(engine.evaluateExitBySol('sentinel',0.93,6*60_000).shouldExit,false);
+  assert.equal(engine.evaluateExitBySol('sentinel',0.9992,10*60_000).shouldExit,false);
+  assert.equal(engine.evaluateExitBySol('sentinel',0.87,11*60_000).type,'STOP_LOSS');
+});
+test('Sentinel base duration is 90 minutes and neutral executable positions stop by 105',()=>{
+  const engine=new PositionExitEngine();
+  engine.addPosition({mint:'sentinel',symbol:'S',entrySource:'SENTINEL',tokenAmount:100,entryPriceUsd:1,entrySol:1,entryTimestamp:0});
+  assert.equal(engine.evaluateExitBySol('sentinel',0.9992,90*60_000).shouldExit,false);
+  const end=engine.evaluateExitBySol('sentinel',0.9992,105*60_000);
+  assert.equal(end.type,'TIME_STOP');assert.match(end.reasonDetail||'',/SENTINEL/);
+});
+test('Sentinel deterioration below minus 3 percent does not extend the 90 minute time budget',()=>{
+  const engine=new PositionExitEngine();
+  engine.addPosition({mint:'sentinel',symbol:'S',entrySource:'SENTINEL',tokenAmount:100,entryPriceUsd:1,entrySol:1,entryTimestamp:0});
+  assert.equal(engine.evaluateExitBySol('sentinel',0.96,90*60_000).type,'TIME_STOP');
+});
+
 for (const [value, detail] of [[0.00047, 'SOLANA_SOL_DRAIN'], [0.01225, 'SOLANA_SOL_DRAIN'], [0.0153125, 'INITIAL_STOP_LOSS']] as const) {
   test(`PUMP regression: armed trailing must yield to loss at ${value} SOL`, () => {
     const engine = new PositionExitEngine();
@@ -536,3 +556,12 @@ test('4D ladder recovers nominal principal then halves remaining, with no TP3 li
   assert.strictEqual(moonbag.shouldExit, false);
 });
 
+
+test('Sentinel longer time budget preserves early trailing and catastrophic drain exits',()=>{
+  for(const kind of ['trailing','drain']){
+    const engine=new PositionExitEngine();engine.addPosition({mint:kind,symbol:'S',entrySource:'SENTINEL',tokenAmount:100,entryPriceUsd:1,entrySol:1,entryTimestamp:0,highestTpStepReached:2});
+    engine.evaluateExitBySol(kind,1.1,60_000);
+    const result=engine.evaluateExitBySol(kind,kind==='trailing'?0.98:.6,2*60_000);
+    assert.equal(result.type,kind==='trailing'?'TRAILING_STOP':'STOP_LOSS');
+  }
+});

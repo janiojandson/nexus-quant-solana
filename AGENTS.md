@@ -2,14 +2,14 @@
 **Módulo:** Nexus Quant Solana
 **Versão do Agente:** 1.0.0
 **Porta do Serviço:** 3009 (`nexus-quant-solana.railway.internal:3009`)
-**Sistema 1 advisory:** Laya upstream ✅ (endpoint obrigatório via `SOLANA_LAYA_NATIVE_URL`; sem fallback hardcoded)
+**Política operacional:** Regras determinísticas; integração Laya removida por solicitação do usuário.
 **Carteira Phantom Oficial:** `FBx2SKLDLsdeLM8owxU8MNVPKAfJpLpmpHHRgiZDqBoi`
 
 ---
 
 ## 🎯 1. MISSÃO E ESCOPO
 
-- **Objetivo Primário:** Varredura on-chain contínua 24/7 (DexScreener), auditoria determinística anti-rug (autoridades + RugCheck + fatos on-chain) e roteamento de swaps protegidos via Jupiter. A Laya upstream atua somente em shadow/advisory e nunca autoriza execução financeira.
+- **Objetivo Primário:** Varredura on-chain contínua 24/7 (DexScreener), auditoria determinística anti-rug (autoridades + RugCheck + fatos on-chain) e roteamento de swaps protegidos via Jupiter. Nenhuma inferência de IA participa do runtime de trading.
 - **Porta Oficial Estrita:** Porta `3009` (bind `0.0.0.0` com fallback para `process.env.PORT`). Rota `/health` e `/` para probe de vitalidade do Railway.
 - **Limites de Contenção:** Proibido invadir portas 3000-3003, 4000, 8000 ou 8080.
 - **Zero-Knowledge de Credenciais:** Proibido expor chaves privadas (`AGENT_SOLANA_PRIVATE_KEY`) no console, logs ou GitHub.
@@ -26,7 +26,6 @@ Loop Contínuo (a cada 30 segundos)
       1. Pré-filtro local: autoridades de mint/freeze, liquidez e holders.
       2. Momentum/order flow + disjuntor macro antes de nova exposição.
       3. RugCheck + completude dos fatos críticos on-chain em fail-closed.
-      4. Laya upstream: somente triagem System 1 em shadow/advisory; sua resposta não aprova nem veta trade.
   → ETAPA 4 — EXECUÇÃO JUPITER V6:
       - DRY_RUN=true: Roteia cotação exata e simula trade sem assinar na rede.
       - DRY_RUN=false: Assina e transmite swap com slippage protegido (teto máx 5%).
@@ -58,7 +57,6 @@ Loop Contínuo (a cada 30 segundos)
 | **nexus-cerebro** | **3000** | `nexus-cerebro.railway.internal:3000` | Orquestrador Central |
 | **Mercado Financeiro** | **4000** | `operacional.railway.internal:4000` | MarketFlow Pro / Bybit |
 | **Postgres Principal** | **5432** | `postgres.railway.internal:5432` | Banco Central (Auditoria e Posições) |
-| **Laya upstream canônica** | dinâmica | `SOLANA_LAYA_NATIVE_URL` | Sistema 1 advisory; nunca contém estratégia Solana |
 
 ---
 

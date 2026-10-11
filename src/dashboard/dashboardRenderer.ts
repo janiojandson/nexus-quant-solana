@@ -1,3 +1,4 @@
+import { EntrySlotPolicy, type EntrySlotSnapshot } from '../execution/entrySlotPolicy.js';
 import { renderJournalSection } from './dashboardJournal.js';
 import type { PumpObservatorySnapshot } from '../pump/pumpObservatory.js';
 
@@ -30,6 +31,7 @@ export interface WalletHoldingView {
 }
 
 export interface DashboardState {
+  slots?: EntrySlotSnapshot;
   agent: string;
   wallet: string;
   balanceSol: number | null;
@@ -151,6 +153,7 @@ export interface DashboardState {
     lastChangedAt: string;
   };
   positions: Array<{
+    entrySource?: 'DEX' | 'SENTINEL';
     mint: string;
     symbol: string;
     tokenAmount: number;
@@ -321,6 +324,7 @@ export function renderDashboardHtml(state: DashboardState): string {
   const discardsCount = state.incubator?.technicalDiscards ?? 0;
   const entryEligibleCount = state.incubator?.entryEligible ?? 0;
   const sentinelQueueCount = state.sentinelHandoffQueue ?? 0;
+  const slots = state.slots ?? new EntrySlotPolicy().snapshot(state.positions);
 
   return `<!DOCTYPE html>
 <html lang="pt-BR" class="dark">
@@ -375,6 +379,30 @@ export function renderDashboardHtml(state: DashboardState): string {
           <div id="wallet-balance" class="text-lg md:text-xl font-bold font-mono text-emerald-400">${state.balanceSol === null || state.walletBalanceAvailable === false ? 'Indisponível' : Number(state.balanceSol).toFixed(4) + ' SOL'}</div>
         </div>
 
+        <!-- Sentinel State Badge -->
+        <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-3 py-2 flex items-center gap-2">
+          <span id="sentinel-dot" class="h-2.5 w-2.5 rounded-full ${state.circuitBreakerActive ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500 animate-pulse'}"></span>
+          <div class="text-xs">
+            <span class="text-slate-400 font-medium">Sentinel:</span>
+            <strong id="sentinel-text" class="${state.circuitBreakerActive ? 'text-rose-400' : 'text-emerald-400'} ml-1 font-mono">${state.circuitBreakerActive ? 'DISJUNTOR ATIVO' : (state.macroRegime || 'SEGURO')}</strong>
+          </div>
+        </div>
+
+        <!-- Deterministic strategy badge -->
+        <div class="text-xs text-cyan-300">Regras determinísticas · Jupiter executável</div>
+
+        <!-- Admin + Panico -->
+        <button id="admin-login-button" onclick="openAdminModal()" class="bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 font-bold text-xs md:text-sm px-4 py-2.5 rounded-xl border border-cyan-500/30 flex items-center gap-2 transition">
+          <span class="text-base">🔐</span>
+          <span id="admin-login-label">ENTRAR ADMIN</span>
+        </button>
+        <div id="admin-session-controls" class="hidden flex items-center gap-2">
+          <span id="admin-session-name" class="text-xs text-emerald-300 font-mono"></span>
+          <button id="panic-all-button" onclick="panicAll()" class="bg-rose-600 hover:bg-rose-500 text-white font-black text-xs px-4 py-2.5 rounded-xl border border-rose-400/40 shadow-lg shadow-rose-950/30">
+            🚨 PÂNICO GERAL
+          </button>
+          <button onclick="logoutAdmin()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-2.5 rounded-xl border border-slate-700">SAIR</button>
+        </div>
       </div>
     </header>
 
@@ -410,6 +438,20 @@ export function renderDashboardHtml(state: DashboardState): string {
             <div class="font-bold text-xs ${state.preFlightEngine?.verdict === 'Aprovado' ? 'text-emerald-400' : state.preFlightEngine?.verdict === 'Vetado' ? 'text-rose-400' : 'text-amber-400'}">${state.preFlightEngine?.verdict || 'Ocioso'}</div>
           </div>
         </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Regras determinísticas</div>
+        <div class="mt-1 font-bold text-emerald-400">DEX + Sentinel</div>
+        <div class="text-[10px] text-slate-500 mt-1">DEX: pools 5–60 min · Sentinel: eventos de curva · slots 2+2</div><div id="op-hub-traffic" class="text-[10px] text-cyan-300 mt-1">Hub Jupiter: aguardando telemetria</div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Rent Recovery</div>
+        <div id="op-rent-status" class="mt-1 font-bold ${state.rentRecovery?.autoEnabled ? 'text-emerald-400' : 'text-slate-400'}">${state.rentRecovery?.autoEnabled ? 'AUTO ATIVO' : 'AUTO DESLIGADO'}</div>
+        <div id="op-rent-detail" class="text-[10px] text-slate-500 mt-1">${(state.rentRecovery?.totalReclaimedSolActual || 0).toFixed(9)} SOL rent observado</div>
+      </div>
+      <div class="bg-slate-900/70 border border-slate-800 rounded-xl p-3">
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">Admin</div>
+        <div id="op-auth-status" class="mt-1 font-bold ${state.auth?.configured ? 'text-cyan-400' : 'text-rose-400'}">${state.auth?.configured ? (state.auth.needsBootstrap ? 'CADASTRO NECESSÁRIO' : 'LOGIN DISPONÍVEL') : 'AUTH INDISPONÍVEL'}</div>
+        <div id="op-auth-detail" class="text-[10px] text-slate-500 mt-1">Pânico e ações manuais exigem ADMIN</div>
       </div>
     </section>
 
@@ -472,8 +514,9 @@ export function renderDashboardHtml(state: DashboardState): string {
         <div>
           <h2 class="text-base md:text-lg font-bold text-white flex items-center gap-2">
             <span>⚡ Posições Ativas sob Gestão</span>
-            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">${state.positions.length} / 2 (Teto Seguro Org 1)</span>
+            <span id="active-positions-badge" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">${slots.active} / ${slots.total}</span>
           </h2>
+          <p id="position-slots-breakdown" class="text-xs text-slate-300 mt-1">(DEX: ${slots.dex.active}/${slots.dex.max} | Sentinel: ${slots.sentinel.active}/${slots.sentinel.max})</p>
           <p class="text-xs text-slate-400 mt-0.5">PnL/Stop Jupiter executável 1.5s · SL inicial: -12.5% · Trailing momentum: +8%/-6% do topo · Runner pós-parcial: -10% do topo</p>
         </div>
 
@@ -502,7 +545,7 @@ export function renderDashboardHtml(state: DashboardState): string {
             ` : state.positions.map(p => {
               const pnlVal = Number(p.pnlPct || 0);
               const isProfit = pnlVal >= 0;
-              const originBadge = p.isSentinelHandoff
+              const originBadge = p.entrySource === 'SENTINEL' || p.isSentinelHandoff
                 ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-sans">⚡ Sentinel</span>`
                 : `<span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-sans">🎯 Jupiter V2</span>`;
               const breakEvenPct = p.stopLossPct ? (Number(p.stopLossPct) * 100).toFixed(1) + '%' : 'N/D';
@@ -765,31 +808,17 @@ export function renderDashboardHtml(state: DashboardState): string {
 
         // 3. Estado operacional
         const operational = data.operational || {};
+        const hub=operational.jupiter || {}, traffic=hub.traffic || {}, general=traffic.general || {}, execute=traffic.execute || {};
+        const hubEl=document.getElementById('op-hub-traffic');
+        if(hubEl)hubEl.textContent='Hub: '+Number(hub.keyCount || 0)+' chaves · fila '+(Number(general.queued || 0)+Number(execute.queued || 0))+' · concluídas '+(Number(general.completed || 0)+Number(execute.completed || 0))+' · 429 '+(Number(general.rateLimited || 0)+Number(execute.rateLimited || 0));
         const auth = operational.adminAuth || {};
         const rent = operational.rentRecovery || {};
-        const laya = operational.laya || {};
         const exitHealth = operational.exitPathHealth || {};
         adminAuthStatus.configured = Boolean(auth.configured);
         adminAuthStatus.needsBootstrap = Boolean(auth.needsBootstrap);
 
         const execEl = document.getElementById('op-execution-mode');
         if (execEl) { execEl.textContent = operational.maintenanceMode ? 'MODO MANUTENÇÃO' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'REAL ON-CHAIN' : 'DRY-RUN'); execEl.className = 'mt-1 font-bold ' + (operational.maintenanceMode ? 'text-amber-300' : (operational.executionMode === 'REAL_ON_CHAIN' ? 'text-emerald-400' : 'text-amber-400')); }
-        const layaEl = document.getElementById('op-laya-status');
-        const layaCardEl = document.getElementById('op-laya-card-status');
-        const layaDetail = document.getElementById('op-laya-detail');
-        const isLayaLive = (laya.tacticalMode || 'LIVE') === 'LIVE';
-        const layaText = isLayaLive
-          ? (laya.health === 'OK' ? 'LIVE GATEKEEPER' : ((laya.health || 'UNKNOWN') + ' · LIVE GATEKEEPER'))
-          : ((laya.health || 'UNKNOWN') + ' · ' + (laya.tacticalMode || 'OFF'));
-        if (layaEl) {
-          layaEl.textContent = layaText;
-          layaEl.className = 'text-xs ' + (laya.health === 'OK' ? 'text-cyan-300 font-bold' : 'text-amber-300 font-bold');
-        }
-        if (layaCardEl) {
-          layaCardEl.textContent = layaText;
-          layaCardEl.className = 'mt-1 font-bold ' + (laya.health === 'OK' ? 'text-emerald-400' : 'text-amber-400');
-        }
-        if (layaDetail) layaDetail.textContent = (laya.loaded || []).join(',') || 'checkpoint nao confirmado';
         const exitHealthEl = document.getElementById('op-exit-health-status');
         const exitHealthDetail = document.getElementById('op-exit-health-detail');
         if (exitHealthEl) { const s = exitHealth.state || 'HEALTHY'; exitHealthEl.textContent = s; exitHealthEl.className = 'mt-1 font-bold ' + (s === 'HEALTHY' ? 'text-emerald-400' : s === 'EMERGENCY' ? 'text-rose-400' : 'text-amber-400'); }
@@ -818,7 +847,10 @@ export function renderDashboardHtml(state: DashboardState): string {
         const positions = data.positions || [];
         const posTbody = document.getElementById('positions-tbody');
         const posBadge = document.getElementById('active-positions-badge');
-        if (posBadge) posBadge.textContent = positions.length + ' / 2';
+        const slots = data.slots;
+        if (posBadge && slots) posBadge.textContent = slots.active + ' / ' + slots.total;
+        const slotBreakdown = document.getElementById('position-slots-breakdown');
+        if (slotBreakdown && slots) slotBreakdown.textContent = '(DEX: ' + slots.dex.active + '/' + slots.dex.max + ' | Sentinel: ' + slots.sentinel.active + '/' + slots.sentinel.max + ')';
         if (posTbody) {
           if (positions.length === 0) {
             posTbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-sans">Varredura ativa. Aguardando candidato aprovado pelos filtros determinísticos (DEX 5m) ou Sentinel Handoff (Graduation Dip)...</td></tr>';
@@ -828,7 +860,7 @@ export function renderDashboardHtml(state: DashboardState): string {
               const pnlPct = p.pnlPercent !== undefined ? p.pnlPercent : (p.pnlPct ? p.pnlPct * 100 : 0);
               const isProfit = pnlPct >= 0;
               const stopLoss = p.stopLossPercent !== undefined ? p.stopLossPercent : (p.stopLossPct !== undefined ? p.stopLossPct : -6);
-              const originBadge = p.isSentinelHandoff
+              const originBadge = p.entrySource === 'SENTINEL' || p.isSentinelHandoff
                 ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-sans">⚡ Sentinel</span>'
                 : '<span class="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30 font-sans">🎯 DEX 5m</span>';
               return '<tr id="pos-row-' + p.mint + '" class="hover:bg-slate-800/30 transition">' +

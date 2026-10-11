@@ -1,10 +1,12 @@
 import axios from 'axios';
 import { RugCheckService, type RugCheckReport } from './rugCheckService.js';
-import { SolanaLayaAdapter, sanitizeSolanaLayaFacts, type SolanaLayaDecision, type SolanaLayaFacts } from './solanaLayaAdapter.js';
+import type { SolanaLayaAdapter, SolanaLayaDecision, SolanaLayaFacts } from './solanaLayaAdapter.js';
 
 export interface TokenSecurityMetadata {
   mint: string;
   pairAddress?: string;
+  /** Internal Sentinel flag: executable Jupiter depth replaces DEX liquidity/candles only. */
+  sentinelJupiterDepthVerified?: true;
   liquidityUsd: number;
   mintAuthority?: string | null;
   freezeAuthority?: string | null;
@@ -55,12 +57,12 @@ export class MemeRiskGatekeeper {
     this.minLiquidityUsd = config?.minLiquidityUsd || 15000;
     this.minHolders = config?.minHolders || 100;
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
+    // Legacy AI configuration is deliberately ignored.
   }
 
 
   public async auditToken(token: TokenSecurityMetadata): Promise<SecurityAuditResult> {
     const startTime = Date.now();
-    let layaNativeShadow: SolanaLayaDecision | undefined;
 
     // 1. Pré-Filtro Local Imediato (0ms): Honeypot e Risco de Rug Pull
     if (typeof token.mintAuthority === 'string' && token.mintAuthority.length > 0) {
@@ -83,7 +85,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    if (token.liquidityUsd < this.minLiquidityUsd) {
+    if (!token.sentinelJupiterDepthVerified && token.liquidityUsd < this.minLiquidityUsd) {
       return {
         safe: false,
         reason: `Liquidez insuficiente: $${token.liquidityUsd} < Mínimo seguro de $${this.minLiquidityUsd}.`,
@@ -105,7 +107,7 @@ export class MemeRiskGatekeeper {
 
     // 1.1 Motor determinístico de Momentum e Order Flow do Solana (Price Action)
     const momentumCheck = this.validatePriceMomentum(token);
-    if (!momentumCheck.valid) {
+    if (!token.sentinelJupiterDepthVerified && !momentumCheck.valid) {
       return {
         safe: false,
         reason: momentumCheck.reason || 'Filtro Solana: Momentum ou Order Flow reprovado',
@@ -152,35 +154,14 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    const layaFacts: SolanaLayaFacts = sanitizeSolanaLayaFacts({
-      mint: token.mint,
-      liquidityUsd: token.liquidityUsd,
-      holdersCount: rugReport.holdersCount,
-      mintAuthorityRevoked: rugReport.mintAuthority === null,
-      freezeAuthorityRevoked: rugReport.freezeAuthority === null,
-      rugCheckScore: rugReport.score,
-      lpLockedPct: rugReport.lpLockedPct,
-      topHoldersPct: rugReport.topHoldersPct,
-      priceChangeM5: token.priceChangeM5,
-      buysM5: token.buysM5,
-      sellsM5: token.sellsM5,
-      volumeBuysM5: token.volumeBuysM5,
-      volumeSellsM5: token.volumeSellsM5,
-      priceUsd: token.priceUsd,
-      h1HighPriceUsd: token.h1HighPriceUsd
-    });
-
-
 
     return {
         rugCheckReport: rugReport,
       safe: true,
-      reason: 'Filtros determinísticos Solana aprovados. Laya nativa registrada apenas em shadow/advisory.',
+      reason: 'Filtros determinísticos Solana aprovados.',
       score: rugReport.score,
       validatedBy: 'DETERMINISTIC_SOLANA_PIPELINE',
-      latencyMs: Date.now() - startTime,
-      layaNativeShadow,
-      layaFacts
+      latencyMs: Date.now() - startTime
     };
   }
 

@@ -1,5 +1,7 @@
 import { JupiterHubError, type JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
 import { hubWorkForPriority } from './jupiterPriorityPolicy.js';
+import { getJupiterApiKeyPool, type JupiterApiKeyPool } from './jupiterApiKeyPool.js';
+import axios from 'axios';
 import {
   computeCollisionUsd,
   describeSlippageParams,
@@ -14,6 +16,9 @@ import {
 export interface SwapQuoteParams {
   /** Required for fee-bearing economics; omitting it is price/momentum only. */
   taker?: string;
+  /** Bypass local cache for execution preflight samples. */
+  freshQuote?: boolean;
+  signal?: AbortSignal;
   inputMint: string;
   outputMint: string;
   amountLamports: number;
@@ -26,6 +31,7 @@ export interface SwapQuoteParams {
 }
 
 export interface SwapQuoteResult {
+  observedAtMs?: number;
   inputMint: string;
   outputMint: string;
   inAmount: number;
@@ -73,6 +79,7 @@ export class DexAggregatorService {
   private jupiterApiBaseUrl: string;
   private hub?: Pick<JupiterOrgHub,'request'>;
   private apiKey?: string;
+  private apiKeys: JupiterApiKeyPool;
   private rateLimitMs: number;
   private cacheTtlMs: number;
   private trafficCoordinator: JupiterTrafficCoordinator;
@@ -88,13 +95,14 @@ export class DexAggregatorService {
     this.jupiterApiBaseUrl = jupiterApiBaseUrl.replace(/\/$/, '');
     this.hub = config.hub;
     this.apiKey = config.apiKey;
+    this.apiKeys = getJupiterApiKeyPool(config.apiKey);
     const isTestEndpoint = /fake\.invalid/i.test(this.jupiterApiBaseUrl);
     const configuredRateLimitMs = config.rateLimitMs ??
-      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKey ? 1050 : 2100)));
+      (isTestEndpoint ? 0 : Number(process.env.JUPITER_RATE_LIMIT_MS || (this.apiKeys.hasKeys() ? 1050 : 2100)));
 
     this.rateLimitMs = isTestEndpoint
       ? configuredRateLimitMs
-      : (this.apiKey ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
+      : (this.apiKeys.hasKeys() ? configuredRateLimitMs : Math.max(configuredRateLimitMs, 2100));
     this.trafficCoordinator = config.trafficCoordinator ??
       ((isTestEndpoint || config.rateLimitMs !== undefined)
         ? new JupiterTrafficCoordinator({ generalIntervalMs: this.rateLimitMs, executeIntervalMs: 0 })
@@ -167,7 +175,7 @@ export class DexAggregatorService {
 
     const cacheKey = JSON.stringify({work, queryParams, slippageCapBps: requestedSlippageBps});
     const cached = this.quoteCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    if (!params.freshQuote && cached && cached.expiresAt > Date.now()) return cached.result;
     if (cached) this.quoteCache.delete(cacheKey);
 
     let data: any;
@@ -203,6 +211,7 @@ export class DexAggregatorService {
       : priceImpactFromPercent;
 
     const result: SwapQuoteResult = {
+      observedAtMs: Date.now(),
       inputMint: params.inputMint,
       outputMint: params.outputMint,
       inAmount: Number(data.inAmount),

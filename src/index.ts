@@ -1,3 +1,4 @@
+import { waitForSentinelJupiterRoute, sentinelQuoteImpactAllowed } from './execution/sentinelJupiterPreflight.js';
 import { buildContractGates } from './audit/contractGates.js';
 import { NonBlockingTelemetry } from './protection/nonBlockingTelemetry.js';
 import { reportProfitProtectionShadow } from './protection/profitProtectionShadow.js';
@@ -32,6 +33,7 @@ import { TokenClassifier, AntiSpamMemory } from './scanner/tokenClassifier.js';
 import { CerebroIntegrationService } from './core/cerebroIntegration.js';
 import { PositionExitEngine, type PositionTracking } from './execution/positionExitEngine.js';
 import { evaluateExitCapacity } from './execution/exitCapacityPolicy.js';
+import { EntrySlotPolicy } from './execution/entrySlotPolicy.js';
 import { ExitPathHealth } from './execution/exitPathHealth.js';
 import { buildWatchdogExitPlan } from './execution/watchdogExitPolicy.js';
 import { ExitRouter, type RoutedExitAttempt } from './execution/exitRouter.js';
@@ -45,8 +47,7 @@ import { startCalibrationCron, runCalibrationNow } from './calibration/calibrati
 import { runMaintenance } from './database/maintenanceJob.js';
 import { DailyPnlTracker } from './risk/dailyPnlTracker.js';
 import { assertAtomicAmountToNumber, assertStoredAtomicNumberToNumber } from './execution/atomicAmount.js';
-import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
-import { SolanaLayaAdapter, normalizeSolanaLayaTacticalMode } from './risk/solanaLayaAdapter.js';
+import { observeJupiterEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG } from './execution/entryMomentumGate.js';
 import { SolanaAdminAuthService } from './auth/adminAuthService.js';
 import { PumpObservatory, type PumpRpc } from './pump/pumpObservatory.js';
 import { PumpDexTimingTracker } from './pump/pumpDexTiming.js';
@@ -68,8 +69,14 @@ const EXECUTION_MODE = resolveExecutionMode(process.env);
 const IS_DRY_RUN = EXECUTION_MODE.shadow;
 const SCAN_INTERVAL_MS = parseInt(process.env.SCAN_INTERVAL_MS || '30000', 10);
 const FAST_EXIT_INTERVAL_MS = 1500; // 1.5 segundos para Ultra-Fast Exit Monitor
-const JUPITER_GENERAL_RPS = Math.max(0.1, Number(process.env.JUPITER_GENERAL_RPS || 1));
-const MAX_CONCURRENT_POSITIONS = 2; // Permite operar até 2 posições simultâneas
+const jupiterOrganizationKeys = (process.env.JUPITER_API_KEYS || process.env.JUPITER_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+const JUPITER_ORGANIZATION_COUNT = new Set(jupiterOrganizationKeys).size || 1;
+const configuredJupiterInterval = Number(process.env.JUPITER_RATE_LIMIT_MS);
+const JUPITER_HUB_INTERVAL_MS = Number.isFinite(configuredJupiterInterval) && configuredJupiterInterval > 0 ? configuredJupiterInterval : (jupiterOrganizationKeys.length ? 1050 : 2100);
+const JUPITER_HUB_RPS = JUPITER_ORGANIZATION_COUNT * 1000 / JUPITER_HUB_INTERVAL_MS;
+const configuredJupiterRps = Number(process.env.JUPITER_GENERAL_RPS);
+const JUPITER_GENERAL_RPS = Number.isFinite(configuredJupiterRps) && configuredJupiterRps > 0 ? Math.min(JUPITER_HUB_RPS, configuredJupiterRps) : JUPITER_HUB_RPS;
+const MAX_CONCURRENT_POSITIONS = EntrySlotPolicy.TOTAL; // Two DEX slots plus two exclusive Sentinel slots.
 const ENTRY_EQUITY_PCT = Math.min(0.25, Math.max(0.01, Number(process.env.ENTRY_EQUITY_PCT || 0.10)));
 const MAX_TOTAL_ALLOCATION_PCT = Math.min(0.50, Math.max(ENTRY_EQUITY_PCT, Number(process.env.MAX_TOTAL_ALLOCATION_PCT || 0.20)));
 const MIN_EXECUTABLE_ENTRY_SOL = Math.max(0.0001, Number(process.env.MIN_EXECUTABLE_ENTRY_SOL || 0.001));
@@ -80,8 +87,8 @@ const MAX_TOTAL_ALLOCATION_SOL = Math.max(MAX_TRADE_AMOUNT_SOL, Number(process.e
 const PORT = Number(process.env.PORT) || 3009;
 const ACTIVE_SOLANA_RPC_URL = 'https://mainnet.helius-rpc.com/'; // Hub-owned transport only.
 const ENTRY_MOMENTUM_GATE_ENABLED = true; // Mandatory live momentum for conventional DEX entries.
-const ENTRY_MOMENTUM_SAMPLES = Math.max(3, Number(process.env.ENTRY_MOMENTUM_SAMPLES || DEFAULT_ENTRY_MOMENTUM_CONFIG.samples));
-const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS || DEFAULT_ENTRY_MOMENTUM_CONFIG.intervalMs));
+const ENTRY_MOMENTUM_SAMPLES = Math.max(2, Number(process.env.ENTRY_JUPITER_SAMPLES || 2));
+const ENTRY_MOMENTUM_INTERVAL_MS = Math.max(250, Number(process.env.ENTRY_JUPITER_INTERVAL_MS || 1000));
 const ENTRY_MOMENTUM_MIN_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.minRisePct);
 const ENTRY_MOMENTUM_MAX_RISE_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_RISE_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxRisePct);
 const ENTRY_MOMENTUM_MAX_PULLBACK_PCT = Number(process.env.ENTRY_MOMENTUM_MAX_PULLBACK_PCT || DEFAULT_ENTRY_MOMENTUM_CONFIG.maxPullbackPct);
@@ -133,9 +140,26 @@ const PUMP_STRATEGY_PRIORITY_FEE_LAMPORTS = Math.max(
 );
 
 let isRunningScanner = false;
+let isRunningFastExit = false;
+const fastExitInFlight = new Set<string>();
 let pumpStateSyncTimer: ReturnType<typeof setInterval> | null = null;
 const antiSpamMemory = new AntiSpamMemory(60); // Padrão 60 minutos
 const positionEngine = new PositionExitEngine();
+const entrySlots = new EntrySlotPolicy();
+function buildEntryCapitalPolicy(balanceSol: number, excludeMint?: string, exactSentinelLot = false) {
+  const positions = positionEngine.getAllPositions();
+  const reservedCount = entrySlots.unfilledReservations(positions, excludeMint).length;
+  return buildEquitySizingPolicy({
+    cashBalanceSol: Math.max(0,balanceSol-reservedCount*BUY_AMOUNT_SOL),
+    positions: [...positions.map(p=>({costBasisSol:Math.max(0,p.entrySol||0),executableValueSol:p.lastJupiterExecutableSolValue||p.entrySol})),
+      ...Array.from({length:reservedCount},()=>({costBasisSol:BUY_AMOUNT_SOL,executableValueSol:BUY_AMOUNT_SOL}))],
+    maxPositions:MAX_CONCURRENT_POSITIONS,entryEquityPct:ENTRY_EQUITY_PCT,maxTotalAllocationPct:MAX_TOTAL_ALLOCATION_PCT,
+    maxEntrySol:BUY_AMOUNT_SOL,maxTotalAllocationSol:MAX_TOTAL_ALLOCATION_SOL,
+    minExecutableEntrySol:exactSentinelLot?BUY_AMOUNT_SOL:MIN_EXECUTABLE_ENTRY_SOL,
+    gasReserveEquityPct:GAS_RESERVE_EQUITY_PCT,minGasReserveSol:MIN_GAS_RESERVE_SOL,maxGasReserveSol:MAX_GAS_RESERVE_SOL
+  });
+}
+console.log('[ENTRY_POLICY] slots=DEX:2,SENTINEL:2 sentinelTimeStop=90/105min jupiterOrganizations=' + JUPITER_ORGANIZATION_COUNT + ' generalRps=' + JUPITER_GENERAL_RPS);
 console.log('[RISK_POLICY] initialStopLossPct=' + PositionExitEngine.DEFAULT_STOP_LOSS_PCT + ' gateEvidenceVersion=2');
 const exitPathHealth = new ExitPathHealth({
   emergencyFailures: PositionExitEngine.WATCHDOG_EMERGENCY_FAILURES
@@ -172,7 +196,6 @@ const pumpDexTimingRuntime = new PumpDexTimingRuntime(pumpDexTimingTracker, {
   enabled: PUMP_OBSERVATORY_ENABLED,
   intervalMs: PUMP_DEX_TIMING_INTERVAL_MS
 });
-
 
 const shadowPreFlight = new PreFlightEngine(jupiterHub, rpcHub, OFFICIAL_PHANTOM_WALLET);
 const physicalExitPoolReader = new ConfirmedPoolReader(rpcHub);
@@ -372,6 +395,7 @@ const dailyPnlTracker = new DailyPnlTracker();
 
 // Estado compartilhado em memória para o Dashboard
 const latestState: DashboardState = {
+  slots: entrySlots.snapshot([]),
   sentinelHandoffQueue: 0,
   agent: 'NEXUS_QUANT_SOLANA_V1',
   wallet: OFFICIAL_PHANTOM_WALLET,
@@ -397,12 +421,6 @@ const latestState: DashboardState = {
     totalReclaimedSolEst: 0,
     totalReclaimedSolActual: 0,
     lastErrors: []
-  },
-  laya: {
-    tacticalMode: SOLANA_LAYA_TACTICAL_MODE,
-    privateService: process.env.SOLANA_LAYA_PRIVATE_PROXY === 'true',
-    health: 'UNKNOWN',
-    loaded: []
   },
   positions: [],
   walletHoldings: [],
@@ -446,6 +464,7 @@ void adminAuthService.initSchema()
     console.warn(`⚠️ [AdminAuth] inicialização falhou: ${err?.message || err}`);
   });
 
+// Decisions and operational health have no AI service dependency.
 
 let rentRecoverySweepInFlight = false;
 async function runRentRecoverySweep(source: 'AUTO' | 'MANUAL'): Promise<Awaited<ReturnType<RentRecoveryService['sweepOrphanAccounts']>>> {
@@ -1037,21 +1056,16 @@ async function executeExitOrderUnlocked(
   return { success: true, txSignature: exitSwap.txSignature };
 }
 
-async function maybeRunLayaTacticalPositionDecision(
-  pos: PositionTracking,
-  currentSolValue: number,
-  pnlPct: number,
-  currentPriceUsd: number
-): Promise<void> {
-  // Laya logic removed
-}
 
 function updateDashboardViews() {
   const currentPositions = positionEngine.getAllPositions();
+  latestState.slots = entrySlots.snapshot(currentPositions);
   latestState.positions = currentPositions.map(p => {
     const existing = latestState.positions.find(prev => prev.mint === p.mint);
     return {
       mint: p.mint,
+      entrySource: p.entrySource ?? 'DEX',
+      isSentinelHandoff: p.entrySource === 'SENTINEL',
       symbol: p.symbol,
       tokenAmount: p.tokenAmount,
       entryPriceUsd: p.entryPriceUsd,
@@ -1095,6 +1109,7 @@ function updateDashboardViews() {
 
 // Inicia servidor HTTP modular para Healthcheck, API REST e Dashboard Web
 const server = http.createServer(async (req, res) => {
+  updateDashboardViews();
   const handled = await handleApiRoutes(req, res, {
     getReadiness: releaseReadiness,
     latestState,
@@ -1292,9 +1307,7 @@ async function runUltraFastExitMonitor(onlyMint: string) {
         // DexScreener permanece como referência de mercado, mas nunca decide PnL/stop
         // quando diverge da rota efetivamente vendável.
         const entrySol = pos.entrySol || 0.015;
-        if (!pos.entryPriceUsd || pos.entryPriceUsd <= 0) {
-          throw new Error('Posição sem preço USD de entrada para monitor de saída');
-        }
+        // Stops and PnL use entry SOL; USD can be unknown for fresh Sentinel pools.
 
         // Inicia a leitura de mercado em paralelo à Jupiter. DexScreener é
         // telemetria de liquidez/fluxo; Jupiter continua sendo a verdade econômica
@@ -1369,7 +1382,7 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           ? dexPriceUsd
           : pos.entryPriceUsd * (1 + pnlPct);
 
-        if (dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0) {
+        if (dexPriceUsd && Number.isFinite(dexPriceUsd) && dexPriceUsd > 0 && pos.entryPriceUsd > 0) {
           const dexPnlPct = (dexPriceUsd / pos.entryPriceUsd) - 1;
           const divergencePctPoints = Math.abs(dexPnlPct - pnlPct) * 100;
           if (divergencePctPoints >= 15) {
@@ -1453,12 +1466,6 @@ async function runUltraFastExitMonitor(onlyMint: string) {
           // Antes isto ocorria ANTES da cotação executável de saída e mascarava
           // falhas consecutivas justamente no caminho crítico de liquidação.
           positionEngine.recordQuoteSuccess(pos.mint);
-          void maybeRunLayaTacticalPositionDecision(
-            pos,
-            currentSolValue,
-            pnlPct,
-            Number(sensorPriceUsd || pos.entryPriceUsd)
-          );
         }
 
         if (exitSignal.shouldExit && exitSignal.type !== 'HOLD') {
@@ -1564,6 +1571,8 @@ async function runUltraFastExitMonitor(onlyMint: string) {
             console.error(`❌ [WATCHDOG ERRO] Falha ao executar liquidação defensiva de ${pos.symbol}:`, emergencyErr?.message || emergencyErr);
           }
         }
+      } finally {
+        fastExitInFlight.delete(pos.mint);
       }
     }
   } catch (err: any) {
@@ -1581,7 +1590,7 @@ const adaptiveExitPoller = new AdaptiveExitPoller(Date.now,
 
 /**
  * 🔍 SCANNER AUTÔNOMO 24/7 (Ciclo Independente de 30s)
- * Varredura DexScreener, Análise RugCheck + filtros determinísticos + Laya shadow e Execução Sniper
+ * Varredura DexScreener, Análise RugCheck + regras determinísticas e Execução Sniper
  */
 async function executeAutonomousCycle() {
   if (NEXUS_MAINTENANCE_MODE) return;
@@ -1672,7 +1681,7 @@ async function executeAutonomousCycle() {
 
     updateDashboardViews();
 
-    // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (MAX_CONCURRENT_POSITIONS = 2, máx 0.10 SOL)
+    // 🎯 CONCORRÊNCIA E ALOCAÇÃO DE CAPITAL (2 vagas DEX + 2 vagas Sentinel, máx 0.10 SOL)
     const activePositions = positionEngine.getAllPositions();
     exitPathHealth.retainOpenPositions(activePositions.map(position => position.mint));
     const currentExitHealth = exitPathHealth.snapshot();
@@ -1685,8 +1694,8 @@ async function executeAutonomousCycle() {
       );
       return;
     }
-    if (activePositions.length >= MAX_CONCURRENT_POSITIONS) {
-      console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
+    if (entrySlots.count('DEX',activePositions) >= 2) {
+      console.log(`🎯 [TETO DE CONCORRÊNCIA ATINGIDO] ${entrySlots.count('DEX', activePositions)}/2 vagas DEX ocupadas; total ${activePositions.length}/${MAX_CONCURRENT_POSITIONS} posições em custódia (${activePositions.map(p => p.symbol).join(', ')}). Scanner de novas compras em pausa.`);
       return;
     }
 
@@ -1794,6 +1803,7 @@ async function executeAutonomousCycle() {
           entryIntentId: decision.receipt.entryIntentId, accountingMode: 'SHADOW' } });
       break;
     }
+
     // Ciclo 5: Reprodução Darwinista legada removida (projeto anterior)
 
     console.log(`✅ [${new Date().toLocaleTimeString()}] Ciclo finalizado com proteção integral.`);
@@ -1811,6 +1821,7 @@ async function executeAutonomousCycle() {
  * permanecem visíveis como custódia, mas fora do PositionExitEngine.
  */
 interface RecoverablePositionRecord {
+  entrySource: 'DEX' | 'SENTINEL';
   traceId: string;
   mint: string;
   symbol: string;
@@ -1877,6 +1888,7 @@ async function queryRecoverablePositions(): Promise<Map<string, RecoverablePosit
         if (remainingAtomic > initialAtomic) throw new Error('RECOVERY_AMOUNT_EXCEEDS_INITIAL');
         positions.set(row.mint, {
           traceId: String(row.trace_id),
+          entrySource: metadata.sentinelHandoff === true || metadata.entrySource === 'SENTINEL' ? 'SENTINEL' : 'DEX',
           mint: String(row.mint),
           symbol: String(row.token_symbol || `${String(row.mint).slice(0, 4)}...${String(row.mint).slice(-4)}`),
           entryPriceUsd: Number(row.entry_price_usd),
@@ -1969,6 +1981,7 @@ async function rehydratePositionsFromWalletOnBoot() {
 
       positionEngine.addPosition({
         mint: spl.mint,
+        entrySource: recovery.entrySource,
         symbol: recovery.symbol,
         tokenAmount: managedAtomic,
         initialTokenAmount: recovery.initialTokenAmountAtomic,
@@ -2078,8 +2091,15 @@ async function rehydrateQuarantineFromDbOnBoot() {
 // ============================================================
 // PONTE SENTINEL HANDOFF — prova física e preflight pendente
 // ============================================================
-// O scanner só emite uma pool fisicamente confirmada. O índice aguarda
-// metadados de mercado verificáveis da Task 3 antes de tentar entrada.
+// Tokens entregues pelo nexus-pump-sentinel já foram auditados
+// na bonding curve (dev share <=5%); a compra depende dos gates locais do Quant.
+// Este handler implementa um warm-up de rota na Jupiter
+// (10-25s para indexar novas pools Raydium) e, quando a rota
+// estiver disponível dentro da janela de 45-90s pós-criação,
+// dispara a entrada via executeAutonomousCycle com bypass de
+// maturidade mínima (os 5 minutos do mercado geral).
+// O núcleo do Padrão Ouro (liquidez >= $15k, slippage 750bps,
+// Escada 4D, Regra Zero) permanece 100% intocado.
 // ============================================================
 
 const SOL_MINT_GLOBAL = 'So11111111111111111111111111111111111111112';
@@ -2088,6 +2108,14 @@ const sentinelActiveGraduations = new Set<string>(); // Impede processamento dup
 async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise<void> {
   const { mint, symbol, leaseId, poolEvidence } = token;
   if (sentinelActiveGraduations.has(mint)) return;
+  if (antiSpamMemory.shouldSkip(mint).skip) {
+    await sentinelHandoffScanner.recordHandoffOutcome(mint, 'DISCARDED_ENTRY_GUARD', 'Mint em quarentena local');
+    return;
+  }
+  if (!entrySlots.reserve(mint, 'SENTINEL', positionEngine.getAllPositions())) {
+    await sentinelHandoffScanner.recordHandoffOutcome(mint, 'DISCARDED_ENTRY_GUARD', 'Vagas Sentinel ocupadas');
+    return;
+  }
   sentinelActiveGraduations.add(mint);
   latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   try {
@@ -2096,32 +2124,28 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       await sentinelHandoffScanner.release(mint, leaseId, 'INVALID_POOL_PROOF');
       return;
     }
-    const discovered = await scanner.fetchCandidate(mint, token.leaseSignal);
-    await token.assertLeaseActive();
-    if (!discovered?.symbol || !discovered.name || discovered.priceUsd === null ||
-        discovered.liquidityUsd === null) {
-      await sentinelHandoffScanner.release(mint, leaseId, 'DADOS_INSUFICIENTES');
-      return;
-    }
-    const candidate = { mint, symbol: discovered.symbol, name: discovered.name,
-      priceUsd: discovered.priceUsd, liquidityUsd: discovered.liquidityUsd,
-      pairAddress: poolEvidence.poolAddress };
-    // Recovery is read-only and fenced to this source event/lease. It must run
-    // before the gate for a NEW position: the durable entry already owns a slot.
-    const recovered = IS_DRY_RUN ? await positionLedger.recover({ candidate,
-      abortSignal: token.leaseSignal,
-      lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(),
-        assertLeaseActive: token.assertLeaseActive } }) : null;
+    const recovered = IS_DRY_RUN ? await positionLedger.recover({ 
+      candidate: { mint, symbol, pairAddress: poolEvidence.poolAddress } as any, 
+      abortSignal: token.leaseSignal, 
+      lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(), assertLeaseActive: token.assertLeaseActive } 
+    }) : null;
     await token.assertLeaseActive();
     if (recovered) {
-      if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId))
-        console.warn(`[SentinelHandoff] ${symbol}: durable recovery complete, ACK failed.`);
+      if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId)) console.warn(`[SentinelHandoff] ACK failed.`);
       return;
     }
-    if (executionUncertainReason || latestState.circuitBreakerActive ||
-        positionEngine.getAllPositions().length >= MAX_CONCURRENT_POSITIONS ||
-        !exitPathHealth.snapshot().canOpenNewPosition) {
+    if (executionUncertainReason || latestState.circuitBreakerActive || positionEngine.getAllPositions().length >= MAX_CONCURRENT_POSITIONS || !exitPathHealth.snapshot().canOpenNewPosition) {
       await sentinelHandoffScanner.release(mint, leaseId, 'ENTRY_CAPACITY_UNAVAILABLE');
+      return;
+    }
+    console.log(`[SentinelHandoff] ${symbol}: fast-track Jupiter`);
+    const route = await waitForSentinelJupiterRoute(mint, async signal => {
+      const quote = await jupiterEngine.getQuote(SOL_MINT_GLOBAL, mint, 25_000_000, 750, priorityForJupiterWork('ENTRY_SIZING'), undefined, signal);
+      if (quote && referencesProgram(quote.rawQuote?.routePlan, PUMP_PROGRAM_ID.toBase58())) return null;
+      return quote;
+    });
+    if (!route) {
+      await sentinelHandoffScanner.recordHandoffOutcome(mint, 'DISCARDED_PRICE_IMPACT', 'Timeout rota');
       return;
     }
     const capitalObservation = await wallet.readFreshBalance();
@@ -2131,54 +2155,51 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       return;
     }
     const balanceSol = capitalObservation.lamports / 1e9;
-    const activePositions = positionEngine.getAllPositions();
     const capitalPolicy = buildEquitySizingPolicy({
-      cashBalanceSol: balanceSol,
-      positions: activePositions.map(p => ({ costBasisSol: Math.max(0, p.entrySol || 0),
-        executableValueSol: p.lastJupiterExecutableSolValue || p.entrySol })),
-      maxPositions: MAX_CONCURRENT_POSITIONS,
-      entryEquityPct: ENTRY_EQUITY_PCT,
-      maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT,
-      maxEntrySol: BUY_AMOUNT_SOL,
-      maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL,
-      minExecutableEntrySol: BUY_AMOUNT_SOL,
-      gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT,
-      minGasReserveSol: MIN_GAS_RESERVE_SOL,
+      cashBalanceSol: balanceSol, 
+      positions: positionEngine.getAllPositions().map(p => ({ costBasisSol: Math.max(0, p.entrySol || 0), executableValueSol: p.lastJupiterExecutableSolValue || p.entrySol })),
+      maxPositions: MAX_CONCURRENT_POSITIONS, 
+      entryEquityPct: ENTRY_EQUITY_PCT, 
+      maxTotalAllocationPct: MAX_TOTAL_ALLOCATION_PCT, 
+      maxEntrySol: BUY_AMOUNT_SOL, 
+      maxTotalAllocationSol: MAX_TOTAL_ALLOCATION_SOL, 
+      minExecutableEntrySol: BUY_AMOUNT_SOL, 
+      gasReserveEquityPct: GAS_RESERVE_EQUITY_PCT, 
+      minGasReserveSol: MIN_GAS_RESERVE_SOL, 
       maxGasReserveSol: MAX_GAS_RESERVE_SOL
     });
     if (!capitalPolicy.canOpenNextPosition || !capitalPolicy.ladderSol.length) {
       await sentinelHandoffScanner.release(mint, leaseId, 'ENTRY_CAPITAL_UNAVAILABLE');
       return;
     }
-    const stakeLamports = Math.floor(capitalPolicy.ladderSol[0] * 1e9);
-    const decision = await entryAdmission.attempt({ candidate, stakeLamports,
-      availableLamports: capitalObservation.lamports, capitalObservation,
+    const decision = await entryAdmission.attempt({
+      candidate: { mint, symbol, name: symbol, priceUsd: 0, liquidityUsd: 0, pairAddress: route.poolAddress } as any,
+      stakeLamports: Math.floor(capitalPolicy.ladderSol[0] * 1e9),
+      availableLamports: capitalObservation.lamports, 
+      capitalObservation,
       reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
-      poolHints: [poolEvidence.poolAddress, ...token.poolHints],
+      poolHints: [route.poolAddress, ...token.poolHints],
       signal: token.leaseSignal,
-      lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(),
-        assertLeaseActive: token.assertLeaseActive },
+      lease: { mint, leaseId, sourceEventAt: token.createdAt.toISOString(), assertLeaseActive: token.assertLeaseActive },
       verifySecurity: async facts => {
-        const audit = await entryGatekeeper.auditToken({ mint: facts.mint,
-          pairAddress: facts.pairAddress, liquidityUsd: facts.liquidityUsd,
-          priceUsd: facts.priceUsd });
+        const audit = await entryGatekeeper.auditToken({ mint: facts.mint, pairAddress: facts.pairAddress, sentinelJupiterDepthVerified: true, liquidityUsd: facts.liquidityUsd, priceUsd: facts.priceUsd });
         return { safe: audit.safe, reason: audit.reason };
-      } });
+      }
+    });
     await token.assertLeaseActive();
     if (!decision.accepted) {
+      await sentinelHandoffScanner.recordHandoffOutcome(mint, 'DISCARDED_ENTRY_GUARD', decision.reason);
       await sentinelHandoffScanner.release(mint, leaseId, decision.reason);
       return;
     }
-    // Acknowledgement is fenced and only follows a durable SHADOW entry receipt.
-    await token.assertLeaseActive();
-    if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId))
-      console.warn(`[SentinelHandoff] ${symbol}: durable registration complete, ACK failed.`);
-  } catch (error) {
-    const reason = token.leaseSignal.aborted ||
-      (error instanceof Error && error.message === 'LEASE_LOST')
-      ? 'LEASE_LOST' : 'HANDOFF_PROCESSING_FAILED';
+    await sentinelHandoffScanner.recordHandoffOutcome(mint, 'EXECUTED_BUY_SUCCESS', decision.receipt.traceId);
+    if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId)) console.warn(`[SentinelHandoff] ACK failed.`);
+  } catch (err: any) {
+    const reason = token.leaseSignal.aborted || (err instanceof Error && err.message === 'LEASE_LOST') ? 'LEASE_LOST' : String(err?.message || err);
+    await sentinelHandoffScanner.recordHandoffOutcome(mint, 'FAILED_HANDLER', reason);
     await sentinelHandoffScanner.release(mint, leaseId, reason);
   } finally {
+    entrySlots.release(mint);
     sentinelActiveGraduations.delete(mint);
     latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   }

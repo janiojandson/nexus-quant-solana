@@ -1,22 +1,76 @@
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { SentinelHandoffScanner, PostgresCandidateStore, type CandidateStore, type CandidateLease, type SentinelHandoffToken } from './sentinelHandoffScanner.js';
 import type { ConfirmedPoolEvidence, PoolReadResult } from '../pump/confirmedPoolReader.js';
-const proof:ConfirmedPoolEvidence={kind:'PHYSICAL_POOL_CONFIRMED',venue:'PumpSwap',slot:100,observedAt:new Date().toISOString(),programId:'fixture-program',poolAddress:'fixture-pool',baseMint:'mint',quoteMint:'sol',baseVault:'base',quoteVault:'quote',physicalSolLamports:'20000000000',tokenReserveAtomic:'5000000',poolCreatedAt:null};
-// Durable fixture survives scanner destruction; its clock models database lease expiry.
-class MemoryStore implements CandidateStore {
-  now=0; id=0; consumed=false; status='CANDIDATE'; next=0; expiry=0; lease=''; saved:ConfirmedPoolEvidence|null=null; retries=0;
-  async claim():Promise<CandidateLease[]> {
-    if(this.consumed||this.next>this.now||this.expiry>this.now)return [];
-    this.lease=String(++this.id);this.expiry=this.now+120000;this.retries++;
-    return [{mint:'mint',symbol:'SYM',devWallet:null,layaScore:null,pnlPercent:null,createdAt:new Date(0),leaseId:this.lease,poolHints:[]}];
+
+describe('recordHandoffOutcome (main)', () => {
+  function makePool(overrides: Partial<{
+    queryResults: Record<string, any>;
+    lockRowCount: number;
+    throwOnTable: boolean;
+    throwOnLock: boolean;
+  }> = {}) {
+    const results: Record<string, any> = overrides.queryResults ?? {};
+    const lockRowCount = overrides.lockRowCount ?? 1;
+
+    return {
+      query: async (sql: string, params?: unknown[]) => {
+        const sqlTrimmed = String(sql).trim().toLowerCase();
+
+        // Schema migration
+        if (sqlTrimmed.includes('alter table')) {
+          if (overrides.throwOnTable) throw new Error('relation "sentinel_handoff" does not exist');
+          return { rowCount: 0, rows: [] };
+        }
+
+        // Lock atomico UPDATE
+        if (sqlTrimmed.includes('update sentinel_handoff')) {
+          if (overrides.throwOnLock) throw new Error('lock error');
+          return { rowCount: lockRowCount, rows: [] };
+        }
+
+        // SELECT de candidatos
+        if (sqlTrimmed.includes('select mint')) {
+          const key = params ? String(params[0]) : 'default';
+          return { rowCount: (results[key] ?? results['default'] ?? []).length, rows: results[key] ?? results['default'] ?? [] };
+        }
+
+        return { rowCount: 0, rows: [] };
+      }
+    };
   }
-  async confirm(mint:string,lease:string,evidence:ConfirmedPoolEvidence){if(!this.owned(lease))return false;this.saved=evidence;this.status='POOL_CONFIRMED';return true;}
-  async renew(mint:string,lease:string){if(!this.owned(lease))return false;this.expiry=this.now+120000;return true;}
-  async acknowledgeAccepted(mint:string,lease:string){if(this.consumed)return this.lease===lease;if(!this.owned(lease)||!this.saved)return false;this.consumed=true;this.status='ACCEPTED';return true;}
-  async release(mint:string,lease:string,reason:string){if(!this.owned(lease)||this.consumed)return;this.expiry=0;this.lease='';this.next=this.now+1000;if(!this.saved)this.status='PENDING_POOL';}
-  private owned(lease:string){return this.lease===lease&&this.expiry>this.now;}
-}
+
+  test('handoff outcome persists exact status and detail without propagating database errors', async () => {
+    const calls: any[] = [];
+    const scanner = new SentinelHandoffScanner({ query: async (config: any) => {
+      calls.push({ sql: config.text, params: config.values, timeout: config.query_timeout }); return { rowCount: 1 };
+    } } as any);
+    await scanner.recordHandoffOutcome('mint', 'DISCARDED_RUGCHECK', 'Top5 81.5%');
+    assert.deepEqual(calls[0].params, ['DISCARDED_RUGCHECK', 'Top5 81.5%', 'mint']);
+    assert.match(calls[0].sql, /outcome_recorded_at = NOW\(\)/);
+    assert.equal(calls[0].timeout, 5000);
+    await new SentinelHandoffScanner(null).recordHandoffOutcome('mint', 'FAILED_SWAP');
+    await new SentinelHandoffScanner({ query: async () => { throw new Error('db unavailable'); } } as any)
+      .recordHandoffOutcome('mint', 'FAILED_SWAP', 'timeout');
+  });
+});
+
+describe('lease flow (codex)', () => {
+  const proof:ConfirmedPoolEvidence={kind:'PHYSICAL_POOL_CONFIRMED',venue:'PumpSwap',slot:100,observedAt:new Date().toISOString(),programId:'fixture-program',poolAddress:'fixture-pool',baseMint:'mint',quoteMint:'sol',baseVault:'base',quoteVault:'quote',physicalSolLamports:'20000000000',tokenReserveAtomic:'5000000',poolCreatedAt:null};
+  // Durable fixture survives scanner destruction; its clock models database lease expiry.
+  class MemoryStore implements CandidateStore {
+    now=0; id=0; consumed=false; status='CANDIDATE'; next=0; expiry=0; lease=''; saved:ConfirmedPoolEvidence|null=null; retries=0;
+    async claim():Promise<CandidateLease[]> {
+      if(this.consumed||this.next>this.now||this.expiry>this.now)return [];
+      this.lease=String(++this.id);this.expiry=this.now+120000;this.retries++;
+      return [{mint:'mint',symbol:'SYM',devWallet:null,layaScore:null,pnlPercent:null,createdAt:new Date(0),leaseId:this.lease,poolHints:[]}];
+    }
+    async confirm(mint:string,lease:string,evidence:ConfirmedPoolEvidence){if(!this.owned(lease))return false;this.saved=evidence;this.status='POOL_CONFIRMED';return true;}
+    async renew(mint:string,lease:string){if(!this.owned(lease))return false;this.expiry=this.now+120000;return true;}
+    async acknowledgeAccepted(mint:string,lease:string){if(this.consumed)return this.lease===lease;if(!this.owned(lease)||!this.saved)return false;this.consumed=true;this.status='ACCEPTED';return true;}
+    async release(mint:string,lease:string,reason:string){if(!this.owned(lease)||this.consumed)return;this.expiry=0;this.lease='';this.next=this.now+1000;if(!this.saved)this.status='PENDING_POOL';}
+    private owned(lease:string){return this.lease===lease&&this.expiry>this.now;}
+  }
 function scanner(store:MemoryStore,result:PoolReadResult={ok:true,evidence:proof}) {
   return new SentinelHandoffScanner(null,{store,reader:{read:async()=>result},pollingIntervalMs:999999});
 }
@@ -120,5 +174,6 @@ test('Postgres queries lock atomically, serialize evidence, and ACK only confirm
   assert.equal(JSON.parse(calls[1].params[2]).physicalSolLamports,'20000000000');
   assert.match(calls[2].sql,/POOL_CONFIRMED/);assert.match(calls[2].sql,/consumed_by_quant = TRUE/);assert.ok(calls[2].sql.includes('lease_id = $2'));
   assert.match(calls[3].sql,/consumed_by_quant = FALSE/);
+});
 });
 
