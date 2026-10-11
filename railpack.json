@@ -1,8 +1,5 @@
 {
   "steps": {
-    "install": {
-      "commands": ["npm ci --include=dev"]
-    },
     "build": {
       "commands": ["npm run build", "npm prune --omit=dev"]
     }
