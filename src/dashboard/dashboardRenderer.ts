@@ -91,6 +91,7 @@ export interface DashboardState {
     org3: { status: 'OK' | 'RATE_LIMITED' | 'ERROR'; requestsLeft: number };
     org4: { status: 'OK' | 'RATE_LIMITED' | 'ERROR'; requestsLeft: number };
     helius: { status: 'CRITICAL' | 'STATE' | 'OK'; requestsLeft: number };
+    orgCount: number;
   };
   /** Campos legados mantidos para compatibilidade com /api/status */
   pumpObservatory?: PumpObservatorySnapshot;
@@ -366,7 +367,7 @@ export function renderDashboardHtml(state: DashboardState): string {
           <span class="text-slate-600">|</span>
           <span>Modo: <strong class="${state.dryRun ? 'text-amber-400' : 'text-emerald-400'}">${state.dryRun ? 'DRY-RUN (Simulação)' : 'EXECUÇÃO REAL ON-CHAIN'}</strong></span>
           <span class="text-slate-600">|</span>
-          <span>Infraestrutura: <span class="font-mono text-slate-300 text-[11px]">Jupiter Multi-Org (4 Orgs) + Helius RPC Hub (6 Chaves)</span></span>
+          <span>Infraestrutura: <span class="font-mono text-slate-300 text-[11px]">Jupiter Multi-Org (${state.hubHealth?.orgCount ?? 4} Orgs) + Helius RPC Hub (6 Chaves)</span></span>
           <span class="text-slate-600">|</span>
           <span>Atualizado: <span id="last-updated" class="font-mono text-slate-300">${new Date(state.lastUpdated || Date.now()).toLocaleTimeString()}</span></span>
         </div>

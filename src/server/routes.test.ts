@@ -701,3 +701,19 @@ test('status exposes segregated slots and preserves position source',async()=>{
   const data=JSON.parse(body);assert.deepStrictEqual(data.slots,{total:4,active:2,dex:{active:1,max:2},sentinel:{active:1,max:2}});
   assert.equal(data.positions[1].entrySource,'SENTINEL');assert.equal(data.positions[1].isSentinelHandoff,true);
 });
+
+test('status maps jupiterHub snapshot to hubHealth orgs',async()=>{
+  let body='';await handleApiRoutes({url:'/api/status',method:'GET',headers:{}} as any,{writeHead(){},end(s:string){body=s;}} as any,
+    {latestState:{positions:[],closedTrades:[],recentAudits:[]},
+     jupiterHub:{snapshot:()=>({organizations:[
+       {role:'PROTECTION',mainUsed:0,mainCooldownUntil:0},
+       {role:'ENTRY',mainUsed:5,mainCooldownUntil:0},
+       {role:'ENTRY',mainUsed:60,mainCooldownUntil:Date.now()+60000},
+       {role:'DISCOVERY',mainUsed:0,mainCooldownUntil:0}]})}} as any);
+  const data=JSON.parse(body);
+  assert.equal(data.hubHealth.orgCount,4);
+  assert.equal(data.hubHealth.org1.status,'OK');assert.equal(data.hubHealth.org1.requestsLeft,60);
+  assert.equal(data.hubHealth.org2.status,'OK');assert.equal(data.hubHealth.org2.requestsLeft,55);
+  assert.equal(data.hubHealth.org3.status,'RATE_LIMITED');assert.equal(data.hubHealth.org3.requestsLeft,0);
+  assert.equal(data.hubHealth.org4.status,'OK');
+});

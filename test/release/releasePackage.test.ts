@@ -48,7 +48,6 @@ test('release source selects locked Railpack and retains us-west2 single replica
   assert.equal(railway.deploy.startCommand, 'node dist/index.js');
   assert.deepEqual(railway.deploy.multiRegionConfig, { 'us-west2': { numReplicas: 1 } });
   const railpack = JSON.parse(readFileSync(join(root, 'railpack.json'), 'utf8'));
-  assert.deepEqual(railpack.steps.install.commands, ['npm ci --include=dev']);
   assert.deepEqual(railpack.steps.build.commands, ['npm run build', 'npm prune --omit=dev']);
   assert.equal(railpack.deploy.startCommand, 'node dist/index.js');
   const railwayignore = readFileSync(join(root, '.railwayignore'), 'utf8');

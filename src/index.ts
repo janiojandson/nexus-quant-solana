@@ -17,6 +17,7 @@ import { buildEquitySizingPolicy } from './blockchain/equitySizingPolicy.js';
 import { MemeRiskGatekeeper } from './risk/memeRiskGatekeeper.js';
 import { RugCheckService } from './risk/rugCheckService.js';
 import { createLpBurnResolver } from './risk/lpBurnResolver.js';
+import { logFeed, getLogFeedEntries } from './telemetry/logFeed.js';
 import { createQuantHubs } from "./hubs/runtimeHubs.js";
 
 import { PreFlightEngine } from "./execution/preflightEngine.js";
@@ -430,6 +431,7 @@ const latestState: DashboardState = {
   walletHoldings: [],
   closedTrades: [],
   recentAudits: [],
+  scannerLogs: [],
   quarantineCount: 0,
   incubator: { waiting: 0, mature: 0, technicalDiscards: 0, entryEligible: 0 },
   pumpObservatory: pumpObservatory.snapshot(),
@@ -1117,6 +1119,7 @@ const server = http.createServer(async (req, res) => {
   const handled = await handleApiRoutes(req, res, {
     getReadiness: releaseReadiness,
     latestState,
+    jupiterHub,
     dailyPnlState: dailyPnlTracker.getState(),
     executeExitOrder: (mint, reason, pnlPct, exitSolValue, options) =>
       executeExitOrder(mint, reason as any, pnlPct, exitSolValue, options),
@@ -1797,6 +1800,7 @@ async function executeAutonomousCycle() {
             priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
           rejectionReason: decision.reason, metadata: { phase: 'TYPED_4D_PREFLIGHT',
             macroStatus: 'NOT_APPLICABLE', accountingMode: 'SHADOW' } });
+        logFeed('warn', '[DEX] ENTRY_REJECTED ' + token.symbol + ': ' + decision.reason);
         continue;
       }
       journal.logDecision({ traceId: decision.receipt.traceId, decision: 'ENTRY_APPROVED',
@@ -1805,6 +1809,7 @@ async function executeAutonomousCycle() {
           priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
         metadata: { phase: 'DURABLE_SHADOW_ENTRY',
           entryIntentId: decision.receipt.entryIntentId, accountingMode: 'SHADOW' } });
+      logFeed('success', '[DEX] ENTRY_APPROVED ' + token.symbol + ' (' + token.mint + ')');
       break;
     }
 
@@ -2193,14 +2198,17 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     if (!decision.accepted) {
       await sentinelHandoffScanner.recordHandoffOutcome(mint, 'DISCARDED_ENTRY_GUARD', decision.reason);
       await sentinelHandoffScanner.release(mint, leaseId, decision.reason);
+      logFeed('warn', '[SentinelHandoff] DISCARDED ' + symbol + ': ' + decision.reason);
       return;
     }
     await sentinelHandoffScanner.recordHandoffOutcome(mint, 'EXECUTED_BUY_SUCCESS', decision.receipt.traceId);
+    logFeed('success', '[SentinelHandoff] EXECUTED_BUY_SUCCESS ' + symbol + ' (' + mint + ')');
     if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId)) console.warn(`[SentinelHandoff] ACK failed.`);
   } catch (err: any) {
     const reason = token.leaseSignal.aborted || (err instanceof Error && err.message === 'LEASE_LOST') ? 'LEASE_LOST' : String(err?.message || err);
     await sentinelHandoffScanner.recordHandoffOutcome(mint, 'FAILED_HANDLER', reason);
     await sentinelHandoffScanner.release(mint, leaseId, reason);
+    logFeed('warn', '[SentinelHandoff] ' + symbol + ' release: ' + reason);
   } finally {
     entrySlots.release(mint);
     sentinelActiveGraduations.delete(mint);
@@ -2331,6 +2339,7 @@ async function main() {
 
   // Atualiza a métrica da fila Sentinel a partir do banco (fonte de verdade), não do set em memória.
   setInterval(() => {
+    latestState.scannerLogs = getLogFeedEntries();
     sentinelHandoffScanner.getPendingQueueCount()
       .then(count => { latestState.sentinelHandoffQueue = count; })
       .catch(() => {});

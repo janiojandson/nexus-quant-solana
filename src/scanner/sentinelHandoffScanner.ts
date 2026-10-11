@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { ConfirmedPoolReader, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
 import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
+import { logFeed } from '../telemetry/logFeed.js';
 
 export interface CandidateLease {
   mint:string; symbol:string; devWallet:string|null; layaScore:number|null; pnlPercent:number|null;
@@ -217,6 +218,7 @@ export class SentinelHandoffScanner extends EventEmitter {
       const result=await this.reader!.read(lease.mint,hints);
       if(!result.ok){reason=result.code;return;}
       if(!await this.store!.confirm(lease.mint,lease.leaseId,result.evidence)){reason='LEASE_LOST';return;}
+      logFeed('success', '[SentinelHandoff] POOL_CONFIRMED ' + lease.symbol + ' (' + lease.mint + ')');
       await assertLeaseActive();
       const token:SentinelHandoffToken={...lease,isSentinelPreAudited:true,poolEvidence:result.evidence,
         leaseSignal:controller.signal,assertLeaseActive};

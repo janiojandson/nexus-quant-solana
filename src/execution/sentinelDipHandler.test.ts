@@ -21,6 +21,7 @@ function scenario(options: {metadata?: boolean; decision?: {accepted:boolean;rea
     assertLeaseActive:()=>{if(options.loseLease||options.loseAfterMetadata)throw new Error('LEASE_LOST');}};
   const dependencies={
     sentinelActiveGraduations:new Set<string>(),latestState:{sentinelHandoffQueue:0,circuitBreakerActive:false},
+    logFeed:()=>{},
     sentinelHandoffScanner:{recordHandoffOutcome:async()=>{},
       acknowledgeAccepted:async()=>{events.push('ack');},
       release:async(_m:string,_l:string,reason:string)=>{events.push(`release:${reason}`);},

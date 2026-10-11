@@ -34,6 +34,7 @@ function run(decision:{accepted:boolean;reason?:string;receipt?:{traceId:string;
       await input.verifySecurity(input.candidate);return decision;}},
     entryGatekeeper:{auditToken:async()=>({safe:true,score:95})},
     journal:{logDecision:(value:any)=>decisions.push(value)},
+    logFeed:()=>{},
     randomUUID:()=> 'trace',Math,Number
   };
   const execute=vm.runInNewContext(js,context) as ()=>Promise<void>;

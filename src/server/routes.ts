@@ -30,6 +30,7 @@ export interface RouteContext {
   adminToken?: string;
   allowedCorsOrigins?: string[];
   enableLegacyPanicApi?: boolean;
+  jupiterHub?: { snapshot?: () => { organizations?: Array<{ role: string; mainUsed: number; mainCooldownUntil: number }> } };
 }
 
 function isProtectedMutation(pathname: string, method: string): boolean {
@@ -246,9 +247,30 @@ export async function handleApiRoutes(
       timestamp: a.timestamp
     }));
 
+    const hubHealth = (() => {
+      const orgs = ctx.jupiterHub?.snapshot?.().organizations ?? [];
+      const now = Date.now();
+      const pick = (role: string, index: number) => {
+        const org = orgs.filter(o => o.role === role)[index];
+        return {
+          status: org ? (org.mainCooldownUntil > now ? 'RATE_LIMITED' : 'OK') : 'OK',
+          requestsLeft: org ? Math.max(0, 60 - org.mainUsed) : 0
+        };
+      };
+      return {
+        org1: pick('PROTECTION', 0),
+        org2: pick('ENTRY', 0),
+        org3: pick('ENTRY', 1),
+        org4: pick('DISCOVERY', 0),
+        helius: { status: 'OK', requestsLeft: 0 },
+        orgCount: orgs.length
+      };
+    })();
+
     const responsePayload = {
       slots: s.slots ?? new EntrySlotPolicy().snapshot(s.positions || []),
       sentinelHandoffQueue: s.sentinelHandoffQueue ?? 0,
+      hubHealth,
       // Formato exigido para clientes avançados / ordem de execução
       wallet: {
         address: s.wallet,
