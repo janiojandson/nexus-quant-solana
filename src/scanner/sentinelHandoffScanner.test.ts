@@ -88,6 +88,13 @@ test('emit/early return do not consume and retained proof is refreshed on retry'
   store.now+=2000;const next=scanner(store,{ok:false,code:'RPC_UNAVAILABLE'});let count=0;next.on('sentinelGraduationToken',()=>{count++;});
   await next.poll();assert.equal(count,0);assert.equal(store.consumed,false);
 });
+test('empty poolHints triggers discovery and enriches the lease before read',async()=>{
+  const store=new MemoryStore();let discovered=0;const readHints:string[][]=[];
+  const s=new SentinelHandoffScanner(null,{store,reader:{read:async(_mint:string,hints:readonly string[]=[])=>{readHints.push([...hints]);return {ok:true,evidence:proof};}},discoverHints:async()=>{discovered++;return ['hint-pool-A','hint-pool-B'];},pollingIntervalMs:999999});
+  s.on('sentinelGraduationToken',async()=>{});
+  await s.poll();
+  assert.equal(discovered,1);assert.deepEqual(readHints[0],['hint-pool-A','hint-pool-B']);
+});
 test('handler failure releases for retry and missing reader never emits',async()=>{
   const store=new MemoryStore();const s=scanner(store);s.on('sentinelGraduationToken',()=>{throw new Error('handler');});await s.poll();
   assert.equal(store.consumed,false);assert.equal(store.lease,'');

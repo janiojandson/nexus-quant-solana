@@ -90,11 +90,13 @@ export class SentinelHandoffScanner extends EventEmitter {
   private readonly store:CandidateStore|null;
   private readonly reader:PoolEvidenceReader|null;
   private readonly pollingIntervalMs:number;
+  private readonly discoverHints:(mint:string)=>Promise<string[]>;
   private pollingTimer:ReturnType<typeof setInterval>|null=null;
   private isPolling=false;
-  constructor(private readonly pgPool:Pool|null,options:{pollingIntervalMs?:number;rpcHub?:HeliusRpcHub;reader?:PoolEvidenceReader;store?:CandidateStore}={}) {
+  constructor(private readonly pgPool:Pool|null,options:{pollingIntervalMs?:number;rpcHub?:HeliusRpcHub;reader?:PoolEvidenceReader;store?:CandidateStore;discoverHints?:(mint:string)=>Promise<string[]>}={}) {
     super();this.store=options.store??(pgPool?new PostgresCandidateStore(pgPool):null);
     this.reader=options.reader??(options.rpcHub?new ConfirmedPoolReader(options.rpcHub):null);
+    this.discoverHints=options.discoverHints??((mint:string)=>this.defaultDiscoverHints(mint));
     this.pollingIntervalMs=options.pollingIntervalMs??3000;
   }
   async start():Promise<void> {
@@ -111,6 +113,43 @@ export class SentinelHandoffScanner extends EventEmitter {
       await Promise.allSettled(leases.map(lease=>this.processLease(lease)));
     } catch {console.warn('[SentinelHandoff] HANDOFF_STORE_UNAVAILABLE');}
     finally {this.isPolling=false;}
+  }
+
+  /** Descobre endereços de pool quando o Sentinel não gravou pool_hints. */
+  private async defaultDiscoverHints(mint:string):Promise<string[]> {
+    const tryFetch = async (url:string, extract:(json:any)=>string[]):Promise<string[]> => {
+      try {
+        const response = await fetch(url, {
+          method: 'GET', headers: { accept: 'application/json' }, signal: AbortSignal.timeout(2000)
+        });
+        if (!response.ok) return [];
+        return extract(await response.json());
+      } catch { return []; }
+    };
+    const dex = await tryFetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`,
+      (j:any) => (j?.pairs ?? []).map((p:any) => p?.pairAddress).filter((a:unknown):a is string => typeof a === 'string' && a.length > 0));
+    if (dex.length) return dex.slice(0, 4);
+    const ray = await tryFetch(`https://api-v3.raydium.io/pools/info/mint?mint1=${mint}&poolType=all&poolSortField=default&sortType=desc&pageSize=4&page=1`,
+      (j:any) => (j?.data?.data ?? []).map((p:any) => p?.id ?? p?.poolId).filter((a:unknown):a is string => typeof a === 'string' && a.length > 0));
+    return ray.slice(0, 4);
+  }
+
+  /** Persiste os pool_hints descobertos (preenche campo novo, não reescreve histórico). */
+  private async persistPoolHints(mint:string,hints:string[]):Promise<void> {
+    if (!this.pgPool) return;
+    try {
+      await this.pgPool.query('UPDATE sentinel_handoff SET pool_hints = $1::jsonb WHERE mint = $2', [JSON.stringify(hints), mint]);
+    } catch { /* best-effort enrichment */ }
+  }
+
+  /** Conta a fila real do banco (fonte de verdade do painel). */
+  async getPendingQueueCount():Promise<number> {
+    if (!this.pgPool) return 0;
+    try {
+      const result = await this.pgPool.query(`SELECT COUNT(*)::int AS n FROM sentinel_handoff
+        WHERE consumed_by_quant = FALSE AND status IN ('CANDIDATE','PENDING_POOL','POOL_CONFIRMED')`);
+      return result.rows[0]?.n ?? 0;
+    } catch { return 0; }
   }
 
   public async recordHandoffOutcome(mint: string, outcome: SentinelHandoffOutcome, detail?: string): Promise<void> {
@@ -170,7 +209,12 @@ export class SentinelHandoffScanner extends EventEmitter {
     const renewal=setInterval(()=>{void assertLeaseActive().catch(()=>{});},LEASE_MS/3);
     renewal.unref?.();
     try {
-      const result=await this.reader!.read(lease.mint,lease.poolHints);
+      let hints = lease.poolHints;
+      if (hints.length === 0) {
+        hints = await this.discoverHints(lease.mint);
+        if (hints.length > 0) await this.persistPoolHints(lease.mint, hints);
+      }
+      const result=await this.reader!.read(lease.mint,hints);
       if(!result.ok){reason=result.code;return;}
       if(!await this.store!.confirm(lease.mint,lease.leaseId,result.evidence)){reason='LEASE_LOST';return;}
       await assertLeaseActive();

@@ -2121,7 +2121,6 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
     return;
   }
   sentinelActiveGraduations.add(mint);
-  latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
   try {
     await token.assertLeaseActive();
     if (poolEvidence?.kind !== 'PHYSICAL_POOL_CONFIRMED') {
@@ -2205,7 +2204,11 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
   } finally {
     entrySlots.release(mint);
     sentinelActiveGraduations.delete(mint);
-    latestState.sentinelHandoffQueue = sentinelActiveGraduations.size;
+    try {
+      if (typeof sentinelHandoffScanner?.getPendingQueueCount === 'function') {
+        latestState.sentinelHandoffQueue = await sentinelHandoffScanner.getPendingQueueCount();
+      }
+    } catch {}
   }
 }
 async function main() {
@@ -2325,6 +2328,13 @@ async function main() {
   //     com bypass cirúrgico da trava de 5 minutos.
   await sentinelHandoffScanner.start();
   sentinelHandoffScanner.on('sentinelGraduationToken', handleSentinelGraduationDip);
+
+  // Atualiza a métrica da fila Sentinel a partir do banco (fonte de verdade), não do set em memória.
+  setInterval(() => {
+    sentinelHandoffScanner.getPendingQueueCount()
+      .then(count => { latestState.sentinelHandoffQueue = count; })
+      .catch(() => {});
+  }, 3000);
 
   // 3. One position: 1.5s. Two positions: 2.5s each, staggered 1.25s.
   setInterval(() => {
