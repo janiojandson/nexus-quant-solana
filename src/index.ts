@@ -208,6 +208,7 @@ const scanner = new JupiterDiscoveryScanner(jupiterHub);
 const exitTelemetry = new NonBlockingTelemetry<any>();
 // DEX e Sentinel agendam advisory separadamente; shadow nativo não atrasa os hard gates.
 const entryGatekeeper = new MemeRiskGatekeeper({
+  minLiquidityUsd: Number(process.env.DEX_MIN_LIQUIDITY_USD) || 10000,
   rugCheckService: new RugCheckService({ resolveLpBurn: createLpBurnResolver(rpcHub) })
 });
 const layaPositionLastCheck = new Map<string, number>();
@@ -1762,15 +1763,18 @@ async function executeAutonomousCycle() {
     const discovered = await scanner.scanTrendingCandidates();
     latestState.incubator = { waiting: 0, mature: discovered.length,
       technicalDiscards: 0, entryEligible: 0 };
-    for (const token of discovered.slice(0, 3)) {
+    let evaluatedCount = 0;
+    for (const token of discovered) {
+      if (evaluatedCount >= 3) break;
       if (!token.symbol || !token.name || token.priceUsd === null ||
           token.liquidityUsd === null || !token.pairAddress) {
-        antiSpamMemory.recordTechnicalDiscard(token.mint, 'DADOS_INSUFICIENTES', 0.05);
+        antiSpamMemory.recordTechnicalDiscard(token.mint, 'DADOS_INSUFICIENTES', 5);
         latestState.incubator.technicalDiscards++;
         continue;
       }
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
       if (!classification.isEligibleForMemeScan || antiSpamMemory.shouldSkip(token.mint).skip) continue;
+      evaluatedCount++;
       latestState.incubator.entryEligible++;
       const candidate = { mint: token.mint, symbol: token.symbol, name: token.name,
         priceUsd: token.priceUsd, liquidityUsd: token.liquidityUsd, pairAddress: token.pairAddress };
@@ -1792,8 +1796,10 @@ async function executeAutonomousCycle() {
       if (!decision.accepted) {
         const durableSecurityVeto = securityAudit?.safe === false &&
           securityAudit.rugCheckReport?.factsComplete === true;
-        if (durableSecurityVeto) antiSpamMemory.recordVeto(token.mint, decision.reason, 24 * 60 * 60 * 1000);
-        else antiSpamMemory.recordTechnicalDiscard(token.mint, decision.reason, 0.05);
+        const structuralPoolVeto = decision.reason === 'UNSUPPORTED_POOL_PROGRAM' ||
+          decision.reason === 'TOKEN_2022_UNSUPPORTED';
+        if (durableSecurityVeto || structuralPoolVeto) antiSpamMemory.recordVeto(token.mint, decision.reason, 24 * 60 * 60 * 1000);
+        else antiSpamMemory.recordTechnicalDiscard(token.mint, decision.reason, 5);
         journal.logDecision({ traceId: randomUUID(), decision: 'ENTRY_REJECTED',
           token: { mint: token.mint, tokenSymbol: token.symbol,
             poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,

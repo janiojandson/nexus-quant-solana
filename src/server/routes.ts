@@ -314,7 +314,7 @@ export async function handleApiRoutes(
         maintenanceMode: Boolean(s.maintenanceMode),
         adminAuth: s.auth || { configured: false, needsBootstrap: false },
         rentRecovery: s.rentRecovery || null,
-        strategy: {mode:'DETERMINISTIC',dexMinPoolAgeSeconds:300,dexMaxPoolAgeSeconds:3600,dexMinLiquidityUsd:15000,dexM5Range:[3,85],sentinelPollingMs:2000,sentinelRouteWindowMs:45000,sentinelMaxPriceImpactPercent:2.5},
+        strategy: {mode:'DETERMINISTIC',dexMinPoolAgeSeconds:300,dexMaxPoolAgeSeconds:3600,dexMinLiquidityUsd:Number(process.env.DEX_MIN_LIQUIDITY_USD)||10000,dexM5Range:[3,85],sentinelPollingMs:2000,sentinelRouteWindowMs:45000,sentinelMaxPriceImpactPercent:2.5},
         exitCapacity: s.exitCapacity || null,
         exitPathHealth: s.exitPathHealth || null,
         pumpDirectSellFallback: s.pumpDirectSellFallback || {

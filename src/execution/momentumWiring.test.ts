@@ -9,12 +9,12 @@ const source=ts.createSourceFile('index.ts',readFileSync(join(__dirname,'../inde
   ts.ScriptTarget.Latest,true);
 let entryLoop:ts.ForOfStatement|undefined;
 function visit(node:ts.Node) {
-  if(ts.isForOfStatement(node) && node.expression.getText(source)==='discovered.slice(0, 3)')entryLoop=node;
+  if(ts.isForOfStatement(node) && node.expression.getText(source)==='discovered')entryLoop=node;
   ts.forEachChild(node,visit);
 }
 visit(source);
 assert.ok(entryLoop);
-const js=ts.transpileModule(`async function run(){${entryLoop.getText(source)}};run;`,{
+const js=ts.transpileModule(`async function run(){let evaluatedCount=0;${entryLoop.getText(source)}};run;`,{
   compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}
 }).outputText;
 const token={mint:'mint',symbol:'REAL',name:'Real',priceUsd:0.001,
