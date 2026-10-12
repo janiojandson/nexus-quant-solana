@@ -241,3 +241,19 @@ test('RugCheck markets null + resolveLpBurn false relata LP insuficiente (0%)', 
   assert.strictEqual(r.lpLockedPct, 0);
   assert.match(r.risks.join(' | '), /LP Trancada\/Queimada insuficiente/);
 });
+
+test('RugCheck markets null + resolveLpBurn undefined permanece fail-closed', async () => {
+  const service = new RugCheckService({
+    resolveLpBurn: async () => undefined,
+    fetchClient: async () => ({ data: {
+      token: { mintAuthority: null, freezeAuthority: null },
+      totalHolders: 500, topHolders: [{ pct: 5 }],
+      markets: null, risks: [], rugged: false
+    }})
+  });
+  const r = await service.auditToken('mint', undefined, { origin: 'RAYDIUM' });
+  assert.strictEqual(r.isSafe, false);
+  assert.strictEqual(r.factsComplete, false);
+  assert.strictEqual(r.lpLockedPct, undefined);
+  assert.match(r.risks.join(' | '), /lpLockedPct/);
+});

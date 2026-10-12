@@ -90,27 +90,29 @@ export async function verifyLpLockedOrBurnedOnChain(rpc: RpcCaller, lpMint: Publ
 export const verifyLpBurnOnChain = verifyLpLockedOrBurnedOnChain;
 
 /**
- * Resolve a prova de LP queimada:
+ * Resolve a prova de LP imobilizada (tri-state):
  * - PUMP_FUN: queima por construção do protocolo -> true.
- * - RAYDIUM/OTHER: deriva o lpMint da pool e verifica on-chain.
+ * - true:  >= 90% locked/burned on-chain.
+ * - false: verificado como NÃO imobilizada (LP em EOAs drenáveis).
+ * - undefined: não foi possível determinar (sem par, pool não-Raydium, RPC falhou).
  */
 export function createLpBurnResolver(rpc: RpcCaller) {
-  return async (mint: string, pairAddress?: string, origin?: TokenOrigin): Promise<boolean> => {
+  return async (mint: string, pairAddress?: string, origin?: TokenOrigin): Promise<boolean | undefined> => {
     if (origin === 'PUMP_FUN') return true;
-    if (!pairAddress) return false;
+    if (!pairAddress) return undefined;
     try {
       const acct = await rpc.call('STATE', 'getAccountInfo', [pairAddress, { encoding: 'base64' }]) as {
         value?: { owner: string; data: [string, string] | string } | null;
       };
       const info = acct?.value;
-      if (!info) return false;
+      if (!info) return undefined;
       const rawData = Array.isArray(info.data) ? info.data[0] : info.data;
       const buf = Buffer.from(rawData, 'base64');
       const lpMint = deriveRaydiumLpMint(buf, info.owner);
-      if (!lpMint) return false;
+      if (!lpMint) return undefined;
       return await verifyLpLockedOrBurnedOnChain(rpc, lpMint);
     } catch {
-      return false;
+      return undefined;
     }
   };
 }

@@ -20,14 +20,14 @@ export interface RugCheckReport {
 export interface RugCheckOptions {
   fetchClient?: (url: string) => Promise<{ data: any }>;
   retryDelayMs?: number;
-  /** Prova on-chain de LP queimada; se true, supre a ausência de lpLockedPct no RugCheck. */
-  resolveLpBurn?: (mint: string, pairAddress?: string, origin?: TokenOrigin) => Promise<boolean>;
+  /** Prova on-chain de LP trancada/queimada; true/false = provado, undefined = indeterminado. */
+  resolveLpBurn?: (mint: string, pairAddress?: string, origin?: TokenOrigin) => Promise<boolean | undefined>;
 }
 
 export class RugCheckService {
   private fetchClient: (url: string) => Promise<{ data: any }>;
   private readonly retryDelayMs: number;
-  private readonly resolveLpBurn?: (mint: string, pairAddress?: string, origin?: TokenOrigin) => Promise<boolean>;
+  private readonly resolveLpBurn?: (mint: string, pairAddress?: string, origin?: TokenOrigin) => Promise<boolean | undefined>;
   private static readonly RUGCHECK_BASE_URL = 'https://api.rugcheck.xyz/v1/tokens';
   public static readonly DANGER_SCORE_THRESHOLD = 500;
 
@@ -119,8 +119,9 @@ export class RugCheckService {
       if (lpLockedPct === undefined && this.resolveLpBurn) {
         try {
           const verified = await this.resolveLpBurn(mint, targetPairAddress, options?.origin);
-          if (verified) lpLockedPct = 100;
-          else lpLockedPct = 0;
+          if (verified === true) lpLockedPct = 100;
+          else if (verified === false) lpLockedPct = 0;
+          // undefined => lpLockedPct permanece undefined (fail-closed, sem over-veto por transitório)
         } catch {
           // resolver error leaves lpLockedPct undefined -> fail closed below
         }
