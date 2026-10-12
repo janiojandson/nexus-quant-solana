@@ -4,7 +4,7 @@ import type { JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
 import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
 import { ConfirmedPoolReader, parseToken2022Extensions, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
 import { PUMP_PROGRAM_ID } from '../pump/pumpBondingCurve.js';
-import { observeEntryMomentum, type EntryMomentumResult } from './entryMomentumGate.js';
+import { observeEntryMomentum, DEFAULT_ENTRY_MOMENTUM_CONFIG, type EntryMomentumResult } from './entryMomentumGate.js';
 import { publicTakerFeeEstimate } from './publicTakerFeeProof.js';
 import { assembleV0AccountKeys, hasBoundSwapCpi, isJupiterRouteInstruction,
   referencesProgram, validateEntryAuxiliaries } from './entryRoutePolicy.js';
@@ -138,11 +138,14 @@ export class PreFlightEngine {
           throw new Error('UNCONFIRMED_QUOTE_ROUTE');
         return order;
       };
+      const momentumIntervalMs = Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS);
+      const momentumConfig = Number.isFinite(momentumIntervalMs) && momentumIntervalMs > 0
+        ? { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: momentumIntervalMs } : undefined;
       const momentum = await observeEntryMomentum(async deadlineMs => {
         const order = await getOrder(SOL_MINT, mint, inputAmount, deadlineMs);
         return { inputAmountAtomic: order.inAmount ?? '', outputAmountAtomic: order.outAmount ?? '',
           tokenDecimals: decimals, observedAtMs: performance.now() };
-      }, undefined, undefined, request.signal);
+      }, momentumConfig, undefined, request.signal);
       await guard();
       if (!momentum.pass) return deny('MOMENTUM_' + momentum.reason);
       const forward = await getOrder(SOL_MINT, mint, inputAmount);
@@ -173,11 +176,10 @@ export class PreFlightEngine {
         return deny('FINAL_ORDER_INVALID');
       const entryFees = feeEstimate(final, this.walletPublicKey);
       if (!entryFees) return deny('FEE_ESTIMATE_UNAVAILABLE');
-      // feeBps may already affect quoted outAmount. Taking it again is a
-      // conservative haircut, never a claim about actual net PnL.
-      const feeBps = final.feeBps! + Math.max(reverse.feeBps!, adverse.feeBps!);
+      // otherAmountThreshold já é o mínimo líquido (após slippage e fee da Jupiter);
+      // não descontar feeBps de novo (evita dupla contagem em operações limítrofes).
       const network = entryFees.network + Math.max(expectedExitFees.network, adverseExitFees.network);
-      const conservative = Number(minOut < adverseMin ? minOut : adverseMin) * (1 - feeBps / 10_000) - network;
+      const conservative = Number(minOut < adverseMin ? minOut : adverseMin) - network;
       const lossPct = 100 * (1 - conservative / request.stakeLamports);
       if (!Number.isFinite(lossPct) || lossPct >= 5) return deny('ROUND_TRIP_LOSS');
       if (request.availableLamports - request.stakeLamports - entryFees.network - entryFees.rent <

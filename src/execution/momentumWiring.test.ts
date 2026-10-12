@@ -33,7 +33,12 @@ function run(decision:{accepted:boolean;reason?:string;receipt?:{traceId:string;
     capitalObservation:{available:true,lamports:100_000_000,slot:123,observedAtMs:1750000000000,provenance:'FRESH_CONFIRMED_RPC'},
     capitalPolicy:{gasReserveSol:0.005},
     entryAdmission:{attempt:async(input:any)=>{attempts.push(input);
-      await input.verifySecurity(input.candidate);return decision;}},
+      await input.verifySecurity(input.candidate);
+      if (input.executeSwap) {
+        const r = await input.executeSwap();
+        if (!r.success) return {accepted:false, reason: r.error || 'LIVE_EXECUTION_FAILED'};
+      }
+      return decision;}},
     entryGatekeeper:{auditToken:async()=>({safe:true,score:95})},
     journal:{logDecision:(value:any)=>decisions.push(value)},
     logFeed:()=>{},

@@ -30,6 +30,7 @@ export interface EntryAttempt {
   availableLamports: number; reservedGasLamports: number; poolHints?: readonly string[];
   capitalObservation?: WalletBalanceObservation;
   verifySecurity(candidate: EntryCandidate): Promise<{safe:boolean;reason?:string}>;
+  executeSwap?(): Promise<{ success: boolean; error?: string }>;
   signal?: AbortSignal; lease?: EntryLease;
 }
 export type EntryAdmissionResult = {accepted:false;reason:string}
@@ -85,6 +86,12 @@ export class EntryAdmission {
       const preflight = await this.preflight.run(request);
       await guard();
       if (!preflight.accepted) return fail(preflight.reason);
+      if (input.executeSwap) {
+        await guard();
+        const execution = await input.executeSwap();
+        await guard();
+        if (!execution.success) return fail(execution.error || 'LIVE_EXECUTION_FAILED');
+      }
       if (!this.registrar) return fail('PERSISTENCE_UNAVAILABLE');
       await guard();
       stage = 'persistence';

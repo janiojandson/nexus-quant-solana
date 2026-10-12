@@ -1793,10 +1793,30 @@ async function executeAutonomousCycle() {
         }
       }
       let securityAudit: Awaited<ReturnType<typeof entryGatekeeper.auditToken>> | undefined;
+      let liveTxSignature: string | undefined;
       const decision = await entryAdmission.attempt({ candidate, stakeLamports,
         availableLamports: capitalObservation.lamports, capitalObservation,
         reservedGasLamports: Math.ceil(capitalPolicy.gasReserveSol * 1e9),
         poolHints: [token.pairAddress],
+        executeSwap: IS_DRY_RUN ? undefined : async () => {
+          const execution = await jupiterEngine.executeSwap({
+            inputMint: 'So11111111111111111111111111111111111111112',
+            outputMint: token.mint,
+            amountLamports: stakeLamports,
+            userPublicKey: OFFICIAL_PHANTOM_WALLET,
+            keypair: getExecutionSigner(),
+            slippageBps: 100,
+            requiredPoolAddress: token.pairAddress ?? undefined,
+            forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
+            maxPriceImpactPct: 2.5,
+            poolLiquidityUsd: token.liquidityUsd
+          });
+          if (execution.status !== 'SUCCESS' || execution.isDryRun) {
+            return { success: false, error: execution.error || ('LIVE_EXECUTION_' + execution.status) };
+          }
+          liveTxSignature = execution.txSignature;
+          return { success: true };
+        },
         verifySecurity: async facts => {
           // Security still requires contract and pool facts from RugCheck. Historic M5
           // windows are not reused as a second momentum decision.
@@ -1824,34 +1844,6 @@ async function executeAutonomousCycle() {
             macroStatus: 'NOT_APPLICABLE', accountingMode: IS_DRY_RUN ? 'SHADOW' : 'LIVE' } });
         logFeed('warn', '[DEX] ENTRY_REJECTED ' + token.symbol + ': ' + decision.reason);
         continue;
-      }
-      let liveTxSignature: string | undefined;
-      if (!IS_DRY_RUN) {
-        const execution = await jupiterEngine.executeSwap({
-          inputMint: 'So11111111111111111111111111111111111111112',
-          outputMint: token.mint,
-          amountLamports: stakeLamports,
-          userPublicKey: OFFICIAL_PHANTOM_WALLET,
-          keypair: getExecutionSigner(),
-          slippageBps: 100,
-          requiredPoolAddress: token.pairAddress,
-          forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
-          maxPriceImpactPct: 2.5,
-          poolLiquidityUsd: token.liquidityUsd
-        });
-        if (execution.status !== 'SUCCESS' || execution.isDryRun) {
-          journal.logDecision({ traceId: decision.receipt.traceId, decision: 'ENTRY_REJECTED',
-            token: { mint: token.mint, tokenSymbol: token.symbol,
-              poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,
-              priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
-            rejectionReason: execution.error || ('LIVE_EXECUTION_' + execution.status),
-            metadata: { phase: 'LIVE_EXECUTION', accountingMode: 'LIVE',
-              entryIntentId: decision.receipt.entryIntentId } });
-          logFeed('warn', '[DEX] ENTRY_REJECTED ' + token.symbol + ': LIVE_EXECUTION ' +
-            (execution.error || execution.status));
-          continue;
-        }
-        liveTxSignature = execution.txSignature;
       }
       journal.logDecision({ traceId: decision.receipt.traceId, decision: 'ENTRY_APPROVED',
         token: { mint: token.mint, tokenSymbol: token.symbol,
@@ -2263,8 +2255,9 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       logFeed('warn', '[SentinelHandoff] DISCARDED ' + symbol + ': ' + decision.reason);
       return;
     }
-    await sentinelHandoffScanner.recordHandoffOutcome(mint, 'EXECUTED_BUY_SUCCESS', decision.receipt.traceId);
-    logFeed('success', '[SentinelHandoff] EXECUTED_BUY_SUCCESS ' + symbol + ' (' + mint + ')');
+    const outcome = IS_DRY_RUN ? 'DRY_RUN_BUY_SUCCESS' : 'EXECUTED_BUY_SUCCESS';
+    await sentinelHandoffScanner.recordHandoffOutcome(mint, outcome, decision.receipt.traceId);
+    logFeed('success', '[SentinelHandoff] ' + outcome + ' ' + symbol + ' (' + mint + ')');
     if (!await sentinelHandoffScanner.acknowledgeAccepted(mint, leaseId)) console.warn(`[SentinelHandoff] ACK failed.`);
   } catch (err: any) {
     const reason = token.leaseSignal.aborted || (err instanceof Error && err.message === 'LEASE_LOST') ? 'LEASE_LOST' : String(err?.message || err);

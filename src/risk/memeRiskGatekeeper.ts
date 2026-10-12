@@ -90,7 +90,7 @@ export class MemeRiskGatekeeper {
       };
     }
 
-    if (!token.sentinelJupiterDepthVerified && token.liquidityUsd < this.minLiquidityUsd) {
+    if (token.liquidityUsd < this.minLiquidityUsd) {
       return {
         safe: false,
         reason: `Liquidez insuficiente: $${token.liquidityUsd} < Mínimo seguro de $${this.minLiquidityUsd}.`,
