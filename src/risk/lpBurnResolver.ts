@@ -12,6 +12,8 @@ const RAYDIUM_AMM_V4 = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1M
 const RAYDIUM_CPMM = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
 // Destino de queima comum. É ON-curve, então entra explicitamente na prova.
 const SYSTEM_PROGRAM = new PublicKey('11111111111111111111111111111111');
+// Incinerador da Solana: destino canônico de queima (OFF-curve, sem chave).
+const INCINERATOR = new PublicKey('1nc1nerator11111111111111111111111111111111');
 
 /**
  * Deriva o mint de LP a partir dos bytes da conta da pool Raydium.
@@ -69,9 +71,10 @@ export async function verifyLpLockedOrBurnedOnChain(rpc: RpcCaller, lpMint: Publ
     let lockedOrBurned = 0n;
     for (const acct of (largest?.value ?? [])) {
       const owner = await ataOwner(rpc, acct.address);
-      // OFF-curve = PDA sem chave privada (locker/incinerador); System Program é ON-curve
-      // mas é um destino de queima comum, então entra explicitamente.
-      if (owner && (!PublicKey.isOnCurve(owner.toBytes()) || owner.equals(SYSTEM_PROGRAM))) {
+      // Conta como imobilizada APENAS queima verificável: incinerador ou System
+      // Program. PDA genérico NÃO é prova de lock (um programa pode retirar via
+      // invoke_signed), então entra como fail-closed (não somado).
+      if (owner && (owner.equals(SYSTEM_PROGRAM) || owner.equals(INCINERATOR))) {
         lockedOrBurned += BigInt(acct.amount);
         // Short-circuit: os holders vêm em ordem decrescente; atinge 90% => provado.
         if (lockedOrBurned * 100n >= total * 90n) return true;
@@ -97,8 +100,9 @@ export const verifyLpBurnOnChain = verifyLpLockedOrBurnedOnChain;
  * - undefined: não foi possível determinar (sem par, pool não-Raydium, RPC falhou).
  */
 export function createLpBurnResolver(rpc: RpcCaller) {
-  return async (mint: string, pairAddress?: string, origin?: TokenOrigin): Promise<boolean | undefined> => {
-    if (origin === 'PUMP_FUN') return true;
+  return async (mint: string, pairAddress?: string, _origin?: TokenOrigin): Promise<boolean | undefined> => {
+    // Sem atalho por origem: a origem PUMP_FUN NÃO comprova a LP de uma pool
+    // arbitrária. A prova é sempre on-chain (queima no incinerador/System).
     if (!pairAddress) return undefined;
     try {
       const acct = await rpc.call('STATE', 'getAccountInfo', [pairAddress, { encoding: 'base64' }]) as {

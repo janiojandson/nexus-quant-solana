@@ -46,9 +46,9 @@ test('LP 100% queimada no System Program (ON-curve) => imobilizada', async () =>
   assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), true);
 });
 
-test('LP 100% em locker PDA (OFF-curve) => imobilizada (trancada)', async () => {
+test('LP 100% em PDA genérico (OFF-curve) => NÃO imobilizada (fail-closed)', async () => {
   const rpc = makeRpc([{ amount: 1000, owner: LOCKER_PDA }]);
-  assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), true);
+  assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), false);
 });
 
 test('LP 100% em EOA (ON-curve) => não imobilizada', async () => {
@@ -56,17 +56,25 @@ test('LP 100% em EOA (ON-curve) => não imobilizada', async () => {
   assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), false);
 });
 
-test('LP 90% trancada + 10% EOA => imobilizada (>= 90%)', async () => {
+test('LP 90% queimada no incinerador + 10% EOA => imobilizada (>= 90%)', async () => {
   const rpc = makeRpc([
-    { amount: 900, owner: LOCKER_PDA },
+    { amount: 900, owner: INCINERATOR },
     { amount: 100, owner: Keypair.generate().publicKey }
   ]);
   assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), true);
 });
 
-test('LP 80% trancada + 20% EOA => não imobilizada (< 90%)', async () => {
+test('LP 90% em PDA genérico + 10% EOA => NÃO imobilizada (PDA não prova lock)', async () => {
   const rpc = makeRpc([
-    { amount: 800, owner: LOCKER_PDA },
+    { amount: 900, owner: LOCKER_PDA },
+    { amount: 100, owner: Keypair.generate().publicKey }
+  ]);
+  assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), false);
+});
+
+test('LP 80% queimada no incinerador + 20% EOA => não imobilizada (< 90%)', async () => {
+  const rpc = makeRpc([
+    { amount: 800, owner: INCINERATOR },
     { amount: 200, owner: Keypair.generate().publicKey }
   ]);
   assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), false);
