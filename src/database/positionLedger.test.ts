@@ -108,7 +108,7 @@ test('new SHADOW admission stops at the two-position cap under the serial transa
         poolAddress: 'pool', observedAt: new Date().toISOString() } } }, accountingMode: 'SHADOW' } as any;
   await assert.rejects(ledger.register(input), /POSITION_CAPACITY_EXCEEDED/);
   assert.ok(queries.some(q => q.includes('pg_advisory_xact_lock')));
-  assert.ok(queries.some(q => q.includes("accounting_mode = 'SHADOW' AND status <> 'FULLY_CLOSED'")));
+  assert.ok(queries.some(q => q.includes("accounting_mode = $1 AND status <> 'FULLY_CLOSED'")));
   assert.equal(queries.some(q => q.includes('INSERT INTO quant_position_ledger')), false);
   assert.ok(queries.includes('ROLLBACK'));
 });

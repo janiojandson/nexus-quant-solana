@@ -36,13 +36,13 @@ function memorySql() {
     }
     if (sql.startsWith('INSERT INTO quant_position_ledger')) {
       assert.equal(row, null, 'a duplicate purchase reached INSERT');
-      row = { accounting_mode: 'SHADOW', trace_id: args[0], entry_intent_id: args[1],
-        mint: args[2], symbol: args[3], entry_pair_address: args[4], entry_price_usd: args[5],
-        entry_liquidity_usd: args[6], initial_token_amount: args[7], token_amount: args[7],
-        initial_capital_sol: args[8], remaining_cost_sol: args[8],
-        entry_timestamp: new Date().toISOString(), entry_physical_sol_lamports: args[13],
+      row = { accounting_mode: args[0], trace_id: args[1], entry_intent_id: args[2],
+        mint: args[3], symbol: args[4], entry_pair_address: args[5], entry_price_usd: args[6],
+        entry_liquidity_usd: args[7], initial_token_amount: args[8], token_amount: args[8],
+        initial_capital_sol: args[9], remaining_cost_sol: args[9],
+        entry_timestamp: new Date().toISOString(), entry_physical_sol_lamports: args[14],
         highest_tp_step: 0, stop_loss_pct: -0.125, status: 'OPEN',
-        executable_peak_sol_value: args[8], observable_peak_sol_value: args[8],
+        executable_peak_sol_value: args[9], observable_peak_sol_value: args[9],
         cumulative_gross_proceeds_sol: 0, cumulative_net_proceeds_sol: 0,
         confirmed_real_principal_recovery_sol: 0 };
       return response([structuredClone(row)]);

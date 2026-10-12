@@ -9,7 +9,7 @@ export interface EntryLease {
   mint: string; leaseId: string; sourceEventAt?: string; assertLeaseActive(): Promise<void>;
 }
 export interface DurableEntryReceipt {
-  durable: true; positionRegistered: true; accountingMode: 'SHADOW';
+  durable: true; positionRegistered: true; accountingMode: 'SHADOW' | 'LIVE';
   entryIntentId: string; traceId: string;
 }
 export interface DurableEntryRegistrar {
@@ -18,7 +18,7 @@ export interface DurableEntryRegistrar {
   register(input: {
     candidate: EntryCandidate; stakeLamports: number;
     accepted: Extract<PreflightResult, {accepted:true}>;
-    accountingMode: 'SHADOW'; abortSignal?: AbortSignal;
+    accountingMode: 'SHADOW' | 'LIVE'; abortSignal?: AbortSignal;
     lease?: EntryLease;
   }): Promise<DurableEntryReceipt>;
   /** Recovery only reads an already committed active position under the current lease. */
@@ -40,7 +40,8 @@ export type EntryAdmissionResult = {accepted:false;reason:string}
 /** Shared admission for discovery and Sentinel handoff. No registration means no acceptance. */
 export class EntryAdmission {
   constructor(private readonly preflight: Pick<PreFlightEngine,'run'>,
-    private readonly registrar?: DurableEntryRegistrar) {}
+    private readonly registrar?: DurableEntryRegistrar,
+    private readonly accountingMode: 'SHADOW' | 'LIVE' = 'SHADOW') {}
 
   async attempt(input: EntryAttempt): Promise<EntryAdmissionResult> {
     const fail = (reason:string):EntryAdmissionResult => ({accepted:false,reason});
@@ -89,11 +90,11 @@ export class EntryAdmission {
       stage = 'persistence';
       const receipt = await this.registrar.register({candidate:input.candidate,
         stakeLamports:input.stakeLamports,accepted:preflight,
-        accountingMode:'SHADOW',abortSignal:input.signal,lease:input.lease});
+        accountingMode:this.accountingMode,abortSignal:input.signal,lease:input.lease});
       durableReceipt = receipt;
       await guard();
       if (receipt?.durable !== true || receipt.positionRegistered !== true ||
-          receipt.accountingMode !== 'SHADOW' || !receipt.entryIntentId || !receipt.traceId)
+          receipt.accountingMode !== this.accountingMode || !receipt.entryIntentId || !receipt.traceId)
         return fail('PERSISTENCE_UNAVAILABLE');
       return {accepted:true,receipt,preflight};
     } catch(error) {

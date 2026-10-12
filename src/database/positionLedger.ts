@@ -134,7 +134,7 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
       if (input.abortSignal?.aborted) throw new Error('LEASE_LOST');
     };
     await guard();
-    if (input.accountingMode !== 'SHADOW' || input.accepted.accepted !== true ||
+    if ((input.accountingMode !== 'SHADOW' && input.accountingMode !== 'LIVE') || input.accepted.accepted !== true ||
         input.accepted.order.inAmount !== String(input.stakeLamports) ||
         !Number.isSafeInteger(input.stakeLamports) || input.stakeLamports <= 0 ||
         input.accepted.evidence.pool.poolAddress !== input.candidate.pairAddress)
@@ -161,10 +161,10 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
         if (lease.rowCount !== 1) throw new Error('LEASE_LOST');
       }
       const existing = await client.query(`SELECT * FROM quant_position_ledger
-        WHERE accounting_mode = 'SHADOW' AND mint = $1
+        WHERE accounting_mode = $3 AND mint = $1
           AND (status <> 'FULLY_CLOSED' OR source_event_at = $2::timestamptz)
         ORDER BY entry_timestamp DESC LIMIT 1 FOR UPDATE`,
-        [input.candidate.mint, input.lease?.sourceEventAt ?? null]);
+        [input.candidate.mint, input.lease?.sourceEventAt ?? null, input.accountingMode]);
       if (existing.rowCount) {
         if (input.abortSignal?.aborted) throw new Error('LEASE_LOST');
         await client.query('COMMIT'); committed = true;
@@ -173,7 +173,7 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
         return receiptFromRow(existing.rows[0]);
       }
       const count = await client.query(`SELECT COUNT(*)::int AS active_count FROM quant_position_ledger
-        WHERE accounting_mode = 'SHADOW' AND status <> 'FULLY_CLOSED'`);
+        WHERE accounting_mode = $1 AND status <> 'FULLY_CLOSED'`, [input.accountingMode]);
       if (Number(count.rows[0]?.active_count) >= 2) throw new Error('POSITION_CAPACITY_EXCEEDED');
       if (input.abortSignal?.aborted) throw new Error('LEASE_LOST');
       const assertFreshEntryProof = () => {
@@ -195,8 +195,8 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
           token_amount, initial_capital_sol, remaining_cost_sol, highest_tp_step,
           stop_loss_pct, executable_peak_sol_value, observable_peak_sol_value,
           entry_request_id, entry_evidence, lease_id, source_event_at)
-        VALUES ('SHADOW',$1,$2,$3,$4,$5,$6,$7,$14,NOW(),$8,$8,$9,$9,0,-0.125,$9,$9,$10,$11::jsonb,$12,$13::timestamptz)
-        RETURNING *`, [traceId, intentId, input.candidate.mint, input.candidate.symbol,
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$15,NOW(),$9,$9,$10,$10,0,-0.125,$10,$10,$11,$12::jsonb,$13,$14::timestamptz)
+        RETURNING *`, [input.accountingMode, traceId, intentId, input.candidate.mint, input.candidate.symbol,
         input.candidate.pairAddress, input.candidate.priceUsd, input.candidate.liquidityUsd,
         String(tokenAmount), capitalSol, input.accepted.order.requestId,
         JSON.stringify({ evidence: input.accepted.evidence, order: {
@@ -225,7 +225,7 @@ export class PostgresPositionLedger implements DurableEntryRegistrar {
       if (!committed && error instanceof Error && error.message !== 'LEASE_LOST') {
         try {
           const recovered = await this.pool.query(`SELECT * FROM quant_position_ledger
-            WHERE accounting_mode = 'SHADOW' AND entry_intent_id = $1`, [intentId]);
+            WHERE accounting_mode = $2 AND entry_intent_id = $1`, [intentId, input.accountingMode]);
           if (recovered.rowCount === 1) {
             const position = fromRow(recovered.rows[0]);
             if (position.status !== 'FULLY_CLOSED') this.onRegistered?.(position);

@@ -291,7 +291,7 @@ const positionLedger = new PostgresPositionLedger(pgPool, position => {
   if (!position.mint || !position.traceId || position.status === 'FULLY_CLOSED') return;
   restoreShadowPosition(position);
 });
-entryAdmission = new EntryAdmission(shadowPreFlight, IS_DRY_RUN ? positionLedger : undefined);
+entryAdmission = new EntryAdmission(shadowPreFlight, positionLedger, IS_DRY_RUN ? 'SHADOW' : 'LIVE');
 const pumpStrategyRepository = new PumpStrategyRepository(pgPool as any);
 let latestShadowEntryLadderLamports = [PUMP_STRATEGY_SHADOW_ENTRY_LAMPORTS];
 const pumpStrategyLabRuntime = new PumpStrategyLabRuntime(
@@ -1821,16 +1821,46 @@ async function executeAutonomousCycle() {
             poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,
             priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
           rejectionReason: decision.reason, metadata: { phase: 'TYPED_4D_PREFLIGHT',
-            macroStatus: 'NOT_APPLICABLE', accountingMode: 'SHADOW' } });
+            macroStatus: 'NOT_APPLICABLE', accountingMode: IS_DRY_RUN ? 'SHADOW' : 'LIVE' } });
         logFeed('warn', '[DEX] ENTRY_REJECTED ' + token.symbol + ': ' + decision.reason);
         continue;
+      }
+      let liveTxSignature: string | undefined;
+      if (!IS_DRY_RUN) {
+        const execution = await jupiterEngine.executeSwap({
+          inputMint: 'So11111111111111111111111111111111111111112',
+          outputMint: token.mint,
+          amountLamports: stakeLamports,
+          userPublicKey: OFFICIAL_PHANTOM_WALLET,
+          keypair: getExecutionSigner(),
+          slippageBps: 100,
+          requiredPoolAddress: token.pairAddress,
+          forbiddenProgramIds: [PUMP_PROGRAM_ID.toBase58()],
+          maxPriceImpactPct: 2.5,
+          poolLiquidityUsd: token.liquidityUsd
+        });
+        if (execution.status !== 'SUCCESS' || execution.isDryRun) {
+          journal.logDecision({ traceId: decision.receipt.traceId, decision: 'ENTRY_REJECTED',
+            token: { mint: token.mint, tokenSymbol: token.symbol,
+              poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,
+              priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
+            rejectionReason: execution.error || ('LIVE_EXECUTION_' + execution.status),
+            metadata: { phase: 'LIVE_EXECUTION', accountingMode: 'LIVE',
+              entryIntentId: decision.receipt.entryIntentId } });
+          logFeed('warn', '[DEX] ENTRY_REJECTED ' + token.symbol + ': LIVE_EXECUTION ' +
+            (execution.error || execution.status));
+          continue;
+        }
+        liveTxSignature = execution.txSignature;
       }
       journal.logDecision({ traceId: decision.receipt.traceId, decision: 'ENTRY_APPROVED',
         token: { mint: token.mint, tokenSymbol: token.symbol,
           poolAddress: token.pairAddress, liquidityUsd: token.liquidityUsd,
           priceUsd: token.priceUsd }, market: { sentinelRegime: null }, gateEvaluations: [],
-        metadata: { phase: 'DURABLE_SHADOW_ENTRY',
-          entryIntentId: decision.receipt.entryIntentId, accountingMode: 'SHADOW' } });
+        metadata: { phase: IS_DRY_RUN ? 'DURABLE_SHADOW_ENTRY' : 'DURABLE_LIVE_ENTRY',
+          entryIntentId: decision.receipt.entryIntentId,
+          accountingMode: IS_DRY_RUN ? 'SHADOW' : 'LIVE',
+          ...(liveTxSignature ? { txSignature: liveTxSignature } : {}) } });
       logFeed('success', '[DEX] ENTRY_APPROVED ' + token.symbol + ' (' + token.mint + ')');
       break;
     }
