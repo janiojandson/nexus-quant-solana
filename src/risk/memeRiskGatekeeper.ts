@@ -58,8 +58,8 @@ export class MemeRiskGatekeeper {
   private rugCheckService: RugCheckService;
 
   constructor(config?: MemeGatekeeperConfig) {
-    // Trava de Capital Solana: Rejeição estrita se liquidez < $10k
-    this.minLiquidityUsd = config?.minLiquidityUsd || (Number(process.env.DEX_MIN_LIQUIDITY_USD) || 10000);
+    // Trava de Capital Solana: Rejeição se liquidez < $5k (seguro para lote de 0.025 SOL)
+    this.minLiquidityUsd = config?.minLiquidityUsd || (Number(process.env.DEX_MIN_LIQUIDITY_USD) || 5000);
     this.minHolders = config?.minHolders || 100;
     this.rugCheckService = config?.rugCheckService || new RugCheckService();
     // Legacy AI configuration is deliberately ignored.

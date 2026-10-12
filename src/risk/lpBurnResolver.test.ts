@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Keypair, PublicKey } from '@solana/web3.js';
-import { verifyLpLockedOrBurnedOnChain } from './lpBurnResolver.js';
+import { verifyLpLockedOrBurnedOnChain, createLpBurnResolver } from './lpBurnResolver.js';
 
 const MINT = Keypair.generate().publicKey;
 const INCINERATOR = new PublicKey('1nc1nerator11111111111111111111111111111111'); // OFF-curve
@@ -79,3 +79,17 @@ test('LP 80% queimada no incinerador + 20% EOA => não imobilizada (< 90%)', asy
   ]);
   assert.equal(await verifyLpLockedOrBurnedOnChain(rpc as any, MINT), false);
 });
+
+test('createLpBurnResolver: origem PUMP_FUN reconhecida como LP imobilizada', async () => {
+  const resolver = createLpBurnResolver({ call: async () => null } as any);
+  assert.equal(await resolver('mint', 'pool', 'PUMP_FUN'), true);
+});
+
+test('createLpBurnResolver: pool PumpSwap reconhecida como LP imobilizada por protocolo', async () => {
+  const rpc = {
+    call: async () => ({ value: { owner: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA', data: ['', 'base64'] } })
+  };
+  const resolver = createLpBurnResolver(rpc as any);
+  assert.equal(await resolver('mint', 'pool'), true);
+});
+

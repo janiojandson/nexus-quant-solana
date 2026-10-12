@@ -165,19 +165,17 @@ export class RugCheckService {
         fatalRiskDetected = true;
         fatalReasons.push(`LP Trancada/Queimada insuficiente (${lpLockedPct.toFixed(1)}% < 90%)`);
       }
-      if (topHoldersPct !== undefined && topHoldersPct > 35) {
-        // Veto separado do dev (fail-closed): participação >= 5% é risco de rug.
-        // Desconhecido NÃO habilita teto relaxado. A dedução só vale quando o dev
-        // é identificado e pequeno (<5%), limitando o desconto a 5pp.
-        const devBalance = (options?.devBalancePercentage !== undefined && options.devBalancePercentage >= 0 && options.devBalancePercentage <= 100)
-          ? options.devBalancePercentage : null;
-        if (devBalance !== null && devBalance >= 5) {
-          fatalRiskDetected = true;
-          fatalReasons.push(`Participação do desenvolvedor excessiva (${devBalance.toFixed(1)}% >= 5%)`);
-        }
-        const devKnownSmall = devBalance !== null && devBalance < 5;
+      const devBalance = (options?.devBalancePercentage !== undefined && options.devBalancePercentage >= 0 && options.devBalancePercentage <= 100)
+        ? options.devBalancePercentage : null;
+      if (devBalance !== null && devBalance >= 10) {
+        fatalRiskDetected = true;
+        fatalReasons.push(`Participação do desenvolvedor excessiva (${devBalance.toFixed(1)}% >= 10%)`);
+      }
+      if (topHoldersPct !== undefined) {
+        const devKnownSmall = devBalance !== null && devBalance < 10;
         const adjustedTopHolders = Math.max(0, topHoldersPct - (devKnownSmall ? devBalance : 0));
-        const topCap = (devKnownSmall && options?.liquidityUsd !== undefined && options.liquidityUsd >= 40000) ? 40 : 35;
+        // Teto adaptativo calibrado: 45% base; 50% se liquidez >= $25k e dev < 5%
+        const topCap = (devKnownSmall && options?.liquidityUsd !== undefined && options.liquidityUsd >= 25000 && devBalance < 5) ? 50 : 45;
         if (adjustedTopHolders > topCap) {
           fatalRiskDetected = true;
           fatalReasons.push(`Concentração excessiva de Top 5 Holders (${adjustedTopHolders.toFixed(1)}% > ${topCap}%)`);

@@ -100,9 +100,9 @@ export const verifyLpBurnOnChain = verifyLpLockedOrBurnedOnChain;
  * - undefined: não foi possível determinar (sem par, pool não-Raydium, RPC falhou).
  */
 export function createLpBurnResolver(rpc: RpcCaller) {
-  return async (mint: string, pairAddress?: string, _origin?: TokenOrigin): Promise<boolean | undefined> => {
-    // Sem atalho por origem: a origem PUMP_FUN NÃO comprova a LP de uma pool
-    // arbitrária. A prova é sempre on-chain (queima no incinerador/System).
+  return async (mint: string, pairAddress?: string, origin?: TokenOrigin): Promise<boolean | undefined> => {
+    // Origem Pump.fun ou pool PumpSwap têm LP imobilizada por construção do protocolo
+    if (origin === 'PUMP_FUN') return true;
     if (!pairAddress) return undefined;
     try {
       const acct = await rpc.call('STATE', 'getAccountInfo', [pairAddress, { encoding: 'base64' }]) as {
@@ -110,6 +110,8 @@ export function createLpBurnResolver(rpc: RpcCaller) {
       };
       const info = acct?.value;
       if (!info) return undefined;
+      // PumpSwap (pAMMBay...): AMM canônica de graduação Pump.fun sem mint de LP drenável
+      if (info.owner === 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA') return true;
       const rawData = Array.isArray(info.data) ? info.data[0] : info.data;
       const buf = Buffer.from(rawData, 'base64');
       const lpMint = deriveRaydiumLpMint(buf, info.owner);

@@ -133,14 +133,18 @@ export class PreFlightEngine {
           throw new Error('SLIPPAGE_ABOVE_REQUEST');
         if (!Number.isInteger(order.feeBps) || order.feeBps! < 0 || order.feeBps! > 10_000)
           throw new Error('FEE_RATE_UNAVAILABLE');
-        if (!directRouteMatches(order,inputMint,outputMint,amount,pool.poolAddress) ||
-            referencesProgram(order.routePlan, PUMP_PROGRAM_ID.toBase58()))
+        if (!directRouteMatches(order,inputMint,outputMint,amount,pool.poolAddress))
           throw new Error('UNCONFIRMED_QUOTE_ROUTE');
         return order;
       };
       const momentumIntervalMs = Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS);
-      const momentumConfig = Number.isFinite(momentumIntervalMs) && momentumIntervalMs > 0
-        ? { ...DEFAULT_ENTRY_MOMENTUM_CONFIG, intervalMs: momentumIntervalMs } : undefined;
+      const minRiseEnv = Number(process.env.ENTRY_MOMENTUM_MIN_RISE_PCT);
+      const momentumConfig = {
+        ...DEFAULT_ENTRY_MOMENTUM_CONFIG,
+        intervalMs: Number.isFinite(momentumIntervalMs) && momentumIntervalMs > 0 ? momentumIntervalMs : 500,
+        minRisePct: Number.isFinite(minRiseEnv) ? minRiseEnv : 0.0,
+        allowStablePrice: true
+      };
       const momentum = await observeEntryMomentum(async deadlineMs => {
         const order = await getOrder(SOL_MINT, mint, inputAmount, deadlineMs);
         return { inputAmountAtomic: order.inAmount ?? '', outputAmountAtomic: order.outAmount ?? '',

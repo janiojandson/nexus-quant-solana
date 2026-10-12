@@ -11,6 +11,8 @@ export interface EntryMomentumGateConfig {
   maxStartLatenessMs?: number;
   /** Maximum response RTT; defaults to 400 ms, below the 500 ms cadence. */
   maxQuoteLatencyMs?: number;
+  /** Allow price stability in short observation window without rejecting as stale. */
+  allowStablePrice?: boolean;
 }
 
 export interface EntryMomentumSample {
@@ -84,6 +86,17 @@ export function evaluateEntryMomentum(
 
   const uniquePrices = new Set(prices.map(price => price.toPrecision(15)));
   if (uniquePrices.size === 1) {
+    if (config.allowStablePrice || (Number.isFinite(config.minRisePct) && config.minRisePct <= 0)) {
+      return {
+        pass: true,
+        risePct: 0,
+        maxPullbackPct: 0,
+        risingSteps: 0,
+        staleSource: false,
+        reason: 'Preço estável confirmado na janela de observação.',
+        samples
+      };
+    }
     return {
       pass: false,
       risePct: 0,
@@ -112,18 +125,17 @@ export function evaluateEntryMomentum(
     maxPullbackPct = Math.max(maxPullbackPct, ((peak - current) / peak) * 100);
   }
 
-  const requiredRisingSteps = Math.ceil(2 * (samples.length - 1) / 3);
+  const requiredRisingSteps = (config.minRisePct > 0) ? Math.ceil(2 * (samples.length - 1) / 3) : 0;
   let reason = 'Momentum de alta confirmado pela fonte de micropreço.';
   let pass = true;
 
-  if (!Number.isFinite(config.minRisePct) || risePct <= 0 || risePct < config.minRisePct) {
+  if (!Number.isFinite(config.minRisePct) || (config.minRisePct > 0 && risePct <= 0) || risePct < config.minRisePct) {
     pass = false;
     reason = `Alta insuficiente: ${risePct.toFixed(3)}% < ${config.minRisePct}%.`;
   } else if (risePct > config.maxRisePct) {
     pass = false;
     reason = `Alta rápida demais: ${risePct.toFixed(3)}% > ${config.maxRisePct}%.`;
   } else if (risingSteps < requiredRisingSteps) {
-
     pass = false;
     reason = `Sequência sem continuidade: ${risingSteps}/${samples.length - 1} passos de alta.`;
   } else if (maxPullbackPct > config.maxPullbackPct) {

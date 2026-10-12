@@ -111,14 +111,14 @@ test('RugCheckService: deve vetar se freezeAuthority for ativa', async () => {
   assert.strictEqual(report.isRugged, true);
 });
 
-test('RugCheckService: deve vetar se top 5 holders possuírem mais de 35% do supply', async () => {
+test('RugCheckService: deve vetar se top 5 holders possuírem mais de 45% do supply', async () => {
   const mockFetch = async () => ({
     data: {
       score: 100,
       token: { mintAuthority: null, freezeAuthority: null },
       totalHolders: 500,
       markets: [{ lp: { lpLockedPct: 95 } }],
-      topHolders: [{ pct: 15 }, { pct: 12 }, { pct: 10 }] // Top 3 = 37% > 35%
+      topHolders: [{ pct: 20 }, { pct: 18 }, { pct: 10 }] // Top 3 = 48% > 45%
     }
   });
 
@@ -268,11 +268,11 @@ test('Top 5 holders: deduz dev e aplica teto adaptativo', async () => {
       }})
     }).auditToken('mint', undefined, { origin: 'RAYDIUM', topHoldersPct, devBalancePercentage, liquidityUsd });
 
-  assert.strictEqual((await base(37, 3, 45000)).isSafe, true);   // 37-3=34 <= 40 (com $40k+)
-  assert.strictEqual((await base(38, 3, 45000)).isSafe, true);   // 38-3=35 <= 40
-  assert.strictEqual((await base(45, 3, 45000)).isSafe, false);  // 45-3=42 > 40
-  assert.strictEqual((await base(38, 0, 10000)).isSafe, false);  // 38 > 35 (sem $40k)
-  // fail-closed: dev >= 5% é veto; dev desconhecido NÃO habilita teto 40%.
-  assert.strictEqual((await base(95, 90, 45000)).isSafe, false); // dev 90% >= 5% => veto
-  assert.strictEqual((await base(38, undefined, 45000)).isSafe, false); // dev desconhecido => teto 35%
+  assert.strictEqual((await base(42, 3, 45000)).isSafe, true);   // 42-3=39 <= 50 (com $25k+ e dev < 5%)
+  assert.strictEqual((await base(48, 3, 45000)).isSafe, true);   // 48-3=45 <= 50
+  assert.strictEqual((await base(55, 3, 45000)).isSafe, false);  // 55-3=52 > 50
+  assert.strictEqual((await base(48, 0, 10000)).isSafe, false);  // 48 > 45 (sem $25k)
+  // fail-closed: dev >= 10% é veto; dev desconhecido NÃO habilita teto 50%.
+  assert.strictEqual((await base(95, 90, 45000)).isSafe, false); // dev 90% >= 10% => veto
+  assert.strictEqual((await base(48, undefined, 45000)).isSafe, false); // dev desconhecido => teto 45%
 });

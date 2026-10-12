@@ -208,7 +208,7 @@ const scanner = new JupiterDiscoveryScanner(jupiterHub);
 const exitTelemetry = new NonBlockingTelemetry<any>();
 // DEX e Sentinel agendam advisory separadamente; shadow nativo não atrasa os hard gates.
 const entryGatekeeper = new MemeRiskGatekeeper({
-  minLiquidityUsd: Number(process.env.DEX_MIN_LIQUIDITY_USD) || 10000,
+  minLiquidityUsd: Number(process.env.DEX_MIN_LIQUIDITY_USD) || 5000,
   rugCheckService: new RugCheckService({ resolveLpBurn: createLpBurnResolver(rpcHub) })
 });
 const layaPositionLastCheck = new Map<string, number>();
