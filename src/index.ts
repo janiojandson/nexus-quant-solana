@@ -2203,7 +2203,17 @@ async function handleSentinelGraduationDip(token: SentinelHandoffToken): Promise
       return;
     }
     const decision = await entryAdmission.attempt({
-      candidate: { mint, symbol, name: symbol, priceUsd: 0, liquidityUsd: 0, pairAddress: route.poolAddress } as any,
+      candidate: {
+        mint, symbol, name: symbol,
+        // Preço/liquidez positivos aproximados (SOL ~$140, 6 decimais) para o gate
+        // de capital; o gatekeeper usa sentinelJupiterDepthVerified e não depende
+        // destes valores para a decisão de risco.
+        priceUsd: route.quote.outAmount > 0
+          ? ((route.quote.inAmount / 1e9) / (route.quote.outAmount / 1e6)) * 140
+          : 1e-6,
+        liquidityUsd: Math.max((Number(poolEvidence?.physicalSolLamports ?? '0') / 1e9) * 2 * 140, 0.001),
+        pairAddress: route.poolAddress
+      } as any,
       stakeLamports: Math.floor(capitalPolicy.ladderSol[0] * 1e9),
       availableLamports: capitalObservation.lamports, 
       capitalObservation,
