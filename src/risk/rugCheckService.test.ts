@@ -257,3 +257,19 @@ test('RugCheck markets null + resolveLpBurn undefined permanece fail-closed', as
   assert.strictEqual(r.lpLockedPct, undefined);
   assert.match(r.risks.join(' | '), /lpLockedPct/);
 });
+
+test('Top 5 holders: deduz dev e aplica teto adaptativo', async () => {
+  const base = (topHoldersPct: number, devBalancePercentage: number, liquidityUsd: number) =>
+    new RugCheckService({
+      resolveLpBurn: async () => true,
+      fetchClient: async () => ({ data: {
+        token: { mintAuthority: null, freezeAuthority: null },
+        totalHolders: 500, markets: null, risks: [], rugged: false
+      }})
+    }).auditToken('mint', undefined, { origin: 'RAYDIUM', topHoldersPct, devBalancePercentage, liquidityUsd });
+
+  assert.strictEqual((await base(37, 3, 45000)).isSafe, true);   // 37-3=34 <= 40 (com $40k+)
+  assert.strictEqual((await base(38, 3, 45000)).isSafe, true);   // 38-3=35 <= 40
+  assert.strictEqual((await base(45, 3, 45000)).isSafe, false);  // 45-3=42 > 40
+  assert.strictEqual((await base(38, 0, 10000)).isSafe, false);  // 38 > 35 (sem $40k)
+});

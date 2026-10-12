@@ -50,7 +50,7 @@ export class RugCheckService {
     }));
   }
 
-  public async auditToken(mint: string, targetPairAddress?: string, options?: { origin?: TokenOrigin; topHoldersPct?: number; holdersCount?: number; mintAuthority?: string | null; freezeAuthority?: string | null }): Promise<RugCheckReport> {
+  public async auditToken(mint: string, targetPairAddress?: string, options?: { origin?: TokenOrigin; topHoldersPct?: number; holdersCount?: number; mintAuthority?: string | null; freezeAuthority?: string | null; devBalancePercentage?: number; liquidityUsd?: number }): Promise<RugCheckReport> {
     try {
       const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
       let response: {data:any};
@@ -166,8 +166,16 @@ export class RugCheckService {
         fatalReasons.push(`LP Trancada/Queimada insuficiente (${lpLockedPct.toFixed(1)}% < 90%)`);
       }
       if (topHoldersPct !== undefined && topHoldersPct > 35) {
-        fatalRiskDetected = true;
-        fatalReasons.push(`Concentração excessiva de Top 5 Holders (${topHoldersPct.toFixed(1)}% > 35%)`);
+        // Deduz o dev (já checado à parte via devBalancePercentage) e aplica teto
+        // adaptativo: 40% quando liquidez >= $40k e dev < 5%, senão 35%.
+        const devBalance = (options?.devBalancePercentage !== undefined && options.devBalancePercentage >= 0 && options.devBalancePercentage <= 100)
+          ? options.devBalancePercentage : 0;
+        const adjustedTopHolders = Math.max(0, topHoldersPct - devBalance);
+        const topCap = (options?.liquidityUsd !== undefined && options.liquidityUsd >= 40000 && devBalance < 5) ? 40 : 35;
+        if (adjustedTopHolders > topCap) {
+          fatalRiskDetected = true;
+          fatalReasons.push(`Concentração excessiva de Top 5 Holders (${adjustedTopHolders.toFixed(1)}% > ${topCap}%)`);
+        }
       }
 
       // Checa se há algum risco com nível "danger" que não seja benigno

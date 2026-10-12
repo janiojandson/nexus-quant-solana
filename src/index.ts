@@ -1804,7 +1804,8 @@ async function executeAutonomousCycle() {
             pairAddress: facts.pairAddress, liquidityUsd: facts.liquidityUsd,
             priceUsd: facts.priceUsd, origin: 'PUMP_FUN',
             mintAuthority: token.mintAuthority, freezeAuthority: token.freezeAuthority,
-            holdersCount: token.holdersCount ?? undefined, topHoldersPct: token.topHoldersPercentage ?? undefined });
+            holdersCount: token.holdersCount ?? undefined, topHoldersPct: token.topHoldersPercentage ?? undefined,
+            devBalancePercentage: token.devBalancePercentage ?? undefined });
           return { safe: securityAudit.safe, reason: securityAudit.reason };
         } });
       if (!decision.accepted) {

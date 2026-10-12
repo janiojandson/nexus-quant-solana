@@ -15,6 +15,7 @@ export interface TokenSecurityMetadata {
   freezeAuthority?: string | null;
   holdersCount?: number;
   topHoldersPct?: number;
+  devBalancePercentage?: number;
   buyTaxPct?: number;
   sellTaxPct?: number;
   priceChangeM5?: number;
@@ -126,7 +127,8 @@ export class MemeRiskGatekeeper {
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
     const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress, {
       origin: token.origin, topHoldersPct: token.topHoldersPct, holdersCount: token.holdersCount,
-      mintAuthority: token.mintAuthority, freezeAuthority: token.freezeAuthority });
+      mintAuthority: token.mintAuthority, freezeAuthority: token.freezeAuthority,
+      devBalancePercentage: token.devBalancePercentage, liquidityUsd: token.liquidityUsd });
     if (!rugReport.isSafe) {
       return {
       rugCheckReport: rugReport,
