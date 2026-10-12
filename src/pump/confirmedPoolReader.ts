@@ -118,7 +118,7 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
       // Exact historical field boundaries or current allocation with zero reserved bytes.
       demand([211,243,244,245,261,269,270,271,279,287,300,301].includes(b.length)&&b.subarray(0,8).equals(PUMP_DISC),'INVALID_POOL_LAYOUT');
       if(b.length>287)demand(b.subarray(287).every(v=>v===0),'UNSUPPORTED_POOL_LAYOUT');
-      demand((b[243]??0)===0 && (b[244]??0)===0 && (b[269]??0)===0 && (b[270]??0)===0,'UNSUPPORTED_POOL_MODE');
+      demand((b[243]??0)===0 && (b[244]??0)===0 && (b[269]??0)===0 && ((b[270]??0)<=1),'UNSUPPORTED_POOL_MODE');
       const mints=[pk(b,43),pk(b,75)];
       demand(mints[0].equals(token)&&mints[1].equals(WSOL),'POOL_MINT_MISMATCH');
       const [derived,bump]=PublicKey.findProgramAddressSync([Buffer.from('pool'),b.subarray(9,11),pk(b,11).toBuffer(),...mints.map(m=>m.toBuffer())],PUMP_SWAP_PROGRAM);
