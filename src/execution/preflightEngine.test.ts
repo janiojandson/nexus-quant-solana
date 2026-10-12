@@ -67,7 +67,7 @@ function fixture(overrides: { mintOwner?: string; mintData?: Buffer; simulationE
   staleSimulation?: boolean; refreshedPoolDrained?: boolean; refreshedPoolStale?: boolean;
   refreshedPoolChanged?: boolean; withSetup?: boolean;
   setupMalice?: 'owner'|'destination'|'amount'|'cleanup'; cpiWrongUserAta?: boolean;
-  expensiveCompute?: boolean; finalRentFee?: number; lease?: () => Promise<void> } = {}) {
+  expensiveCompute?: boolean; finalRentFee?: number; lease?: () => Promise<void>; entryFeeBps?: number } = {}) {
   const calls: string[] = [];
   const requests: any[] = [];
   const mintData = overrides.mintData ?? Buffer.alloc(82);
@@ -107,11 +107,13 @@ function fixture(overrides: { mintOwner?: string; mintData?: Buffer; simulationE
         rentFeeLamports: overrides.finalRentFee ?? (overrides.withSetup ? 4_078_560 : 2039280), rentFeePayer: taker } : {})
     } };
     const outAmount = prices[forward++] ?? '988142';
+    const feeBps = overrides.entryFeeBps ?? 0;
+    const grossOut = feeBps > 0 ? String(BigInt(outAmount) * 10000n / BigInt(10000 - feeBps)) : outAmount;
     return { status: 200, headers: noHeaders, body: {
       inAmount: '25000000', outAmount, otherAmountThreshold: overrides.forwardMin ?? outAmount,
-      slippageBps: 100, feeBps: 0, routePlan: [{ swapInfo: { ammKey: pool,
+      slippageBps: 100, feeBps, routePlan: [{ swapInfo: { ammKey: pool,
         inputMint: payload.inputMint, outputMint: payload.outputMint,
-        inAmount: payload.amount, outAmount } }]
+        inAmount: payload.amount, outAmount: grossOut } }]
     } };
   }};
   const rpc = { call: async (work: string, method: string, _params: any[], options: any) => {
@@ -178,6 +180,13 @@ test('4D accepts real 25M lamport size with unsigned final compiled order and no
   assert.equal(result.evidence.momentum.samples.length, 4);
   assert.ok(calls.includes('CRITICAL:simulateTransaction'));
   assert.ok(calls.every(call => !call.includes('execute')));
+});
+
+test('4D tolerates Jupiter platform fee on direct route (gross AMM out vs net order out)', async () => {
+  const f = fixture({ entryFeeBps: 10 });
+  const result = await f.preflight.run({ mint, stakeLamports: 25_000_000, availableLamports: 100_000_000,
+    reservedGasLamports: 5_000_000, poolHints: [pool] });
+  assert.equal(result.accepted, true, JSON.stringify(result));
 });
 
 test('4D rejects Token-2022 and losing reverse minOut before final order', async () => {

@@ -48,9 +48,15 @@ function directRouteMatches(order: V2Order, inputMint: string, outputMint: strin
   if (!Array.isArray(order.routePlan) || order.routePlan.length !== 1) return false;
   const step = order.routePlan[0] as {swapInfo?: Record<string,unknown>} | null;
   const info = step?.swapInfo;
-  return info?.ammKey === poolAddress && info.inputMint === inputMint &&
-    info.outputMint === outputMint && info.inAmount === amount &&
-    info.outAmount === order.outAmount;
+  if (info?.ammKey !== poolAddress || info.inputMint !== inputMint ||
+      info.outputMint !== outputMint || info.inAmount !== amount) return false;
+  // A saída bruta da AMM (swapInfo.outAmount) pode exceder a líquida (order.outAmount)
+  // pela taxa de plataforma (feeBps). Toleramos a diferença da taxa + folga de 1 bps.
+  const gross = positiveInteger(info?.outAmount);
+  const net = positiveInteger(order.outAmount);
+  if (gross === null || net === null || gross < net) return false;
+  const feeBps = typeof order.feeBps === 'number' && Number.isInteger(order.feeBps) && order.feeBps >= 0 ? order.feeBps : 0;
+  return gross - net <= (gross * BigInt(feeBps)) / 10000n + 1n;
 }
 /** One typed, unsigned entry preflight. It never calls /execute or exposes a signer. */
 export class PreFlightEngine {
