@@ -7,7 +7,7 @@ import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountId
   createCloseAccountInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { PreFlightEngine, directRouteMatches, feeEstimate } from './preflightEngine.js';
 import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
-import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM, validateEntryAuxiliaries } from './entryRoutePolicy.js';
+import { assembleV0AccountKeys, hasBoundSwapCpi, isJupiterRouteInstruction, JUPITER_SWAP_PROGRAM, validateEntryAuxiliaries } from './entryRoutePolicy.js';
 
 const key = (n: number) => new PublicKey(Buffer.alloc(32, n));
 const mint = key(5).toBase58();
@@ -565,6 +565,54 @@ test('feeEstimate: aceita taxa deterministica de 5.000 lamports em cotacao rever
   assert.equal(forwardResult, null);
 });
 
+test('isJupiterRouteInstruction: reconhece route_v2 e shared_accounts_route_v2 da Jupiter v6', () => {
+  const routeV2Disc = createHash('sha256').update('global:route_v2').digest().subarray(0, 8);
+  const sharedV2Disc = createHash('sha256').update('global:shared_accounts_route_v2').digest().subarray(0, 8);
+  const dummyPayload = Buffer.concat([routeV2Disc, Buffer.alloc(20)]);
+  const dummySharedPayload = Buffer.concat([sharedV2Disc, Buffer.alloc(20)]);
 
+  assert.equal(isJupiterRouteInstruction(JUPITER_SWAP_PROGRAM, dummyPayload, [taker], taker), true,
+    'Deve aceitar instrucao route_v2 da Jupiter v6');
+  assert.equal(isJupiterRouteInstruction(JUPITER_SWAP_PROGRAM, dummySharedPayload, [taker], taker), true,
+    'Deve aceitar instrucao shared_accounts_route_v2 da Jupiter v6');
+  assert.equal(isJupiterRouteInstruction('WrongProgramId111111111111111111111111111111', dummyPayload, [taker], taker), false,
+    'Deve rejeitar programId diferente da Jupiter');
+});
 
+test('4D tolera variacao micro de AMM (20 bps) na ordem final sem disparar FINAL_ORDER_INVALID', async () => {
+  // forward.outAmount = 988142
+  // final.outAmount com queda de 20 bps = 986165 (988142 * 0.998)
+  const slightDrop = fixture({ finalMin: '986165' });
+  const result = await slightDrop.preflight.run({
+    mint,
+    stakeLamports: 25_000_000,
+    availableLamports: 100_000_000,
+    reservedGasLamports: 5_000_000
+  });
+  assert.equal(result.accepted, true, 'Deve aceitar variacao micro de 20 bps na ordem final');
+});
 
+test('4D aceita cotacao reversa multirrota (split AMM) na simulacao de saida para round-trip', async () => {
+  const multiRouteReverse = fixture();
+  // Override para simular resposta da Jupiter com 2 pernas (Pump AMM + Meteora DLMM) na cotacao reversa
+  const originalRequest = (multiRouteReverse.preflight as any).jupiterHub.request;
+  (multiRouteReverse.preflight as any).jupiterHub.request = async (work: string, endpoint: string, payload: any, options: any) => {
+    const res = await originalRequest(work, endpoint, payload, options);
+    if (payload.inputMint === mint) {
+      // Cotacao reversa com 2 pernas
+      res.body.routePlan = [
+        { swapInfo: { ammKey: 'MeteoraPool1111111111111111111111111111111', inputMint: mint, outputMint: 'So11111111111111111111111111111111111111112', percent: 20 } },
+        { swapInfo: { ammKey: pool, inputMint: mint, outputMint: 'So11111111111111111111111111111111111111112', percent: 80 } }
+      ];
+    }
+    return res;
+  };
+
+  const result = await multiRouteReverse.preflight.run({
+    mint,
+    stakeLamports: 25_000_000,
+    availableLamports: 100_000_000,
+    reservedGasLamports: 5_000_000
+  });
+  assert.equal(result.accepted, true, 'Deve aprovar preflight quando cotacao reversa agrega multiplas AMMs');
+});

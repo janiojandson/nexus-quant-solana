@@ -13,7 +13,20 @@ const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const PUMP_BUY_EXACT_QUOTE_IN = Buffer.from([198,46,21,82,180,217,232,112]);
 const RAYDIUM_SWAP_BASE_INPUT = Buffer.from([143,190,90,218,196,30,51,222]);
 const anchorDisc = (name: string): Buffer => createHash('sha256').update(`global:${name}`).digest().subarray(0,8);
-const JUPITER_ROUTE_DISCS = [anchorDisc('route'),anchorDisc('shared_accounts_route')];
+const JUPITER_ROUTE_DISCS = [
+  anchorDisc('route'),
+  anchorDisc('route_v2'),
+  anchorDisc('shared_accounts_route'),
+  anchorDisc('shared_accounts_route_v2'),
+  anchorDisc('route_with_token_ledger'),
+  anchorDisc('route_with_token_ledger_v2'),
+  anchorDisc('shared_accounts_route_with_token_ledger'),
+  anchorDisc('shared_accounts_route_with_token_ledger_v2'),
+  anchorDisc('exact_out_route'),
+  anchorDisc('exact_out_route_v2'),
+  anchorDisc('shared_accounts_exact_out_route'),
+  anchorDisc('shared_accounts_exact_out_route_v2')
+];
 
 /** Match explicit addresses only; labels such as Pump AMM are not program IDs. */
 export function referencesProgram(value: unknown, programId: string): boolean {

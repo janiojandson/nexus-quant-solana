@@ -13,6 +13,7 @@ const SOL_MINT = 'So11111111111111111111111111111111111111112';
 const DEADLINE_MS = 10_000;
 interface V2Order {
   taker?: string;
+  inputMint?: string; outputMint?: string;
   requestId?: string; transaction?: string | null; inAmount?: string; outAmount?: string;
   otherAmountThreshold?: string; slippageBps?: number; feeBps?: number;
   routePlan?: unknown; errorCode?: number; transactionVersion?: number;
@@ -139,10 +140,15 @@ export class PreFlightEngine {
       if (decimals > 18) return deny('INVALID_MINT_DECIMALS');
       const inputAmount = String(request.stakeLamports);
       const getOrder = async (inputMint: string, outputMint: string, amount: string,
-        deadlineMs = Date.now() + DEADLINE_MS, taker?: string): Promise<V2Order> => {
-        const response = await this.jupiterHub.request('ENTRY','/swap/v2/order',{
+        deadlineMs = Date.now() + DEADLINE_MS, taker?: string, isEntryQuote = true): Promise<V2Order> => {
+        const payload: Record<string, unknown> = {
           inputMint, outputMint, amount, slippageBps: 100, ...(taker ? { taker } : {})
-        }, { deadlineMs, signal: request.signal });
+        };
+        if (isEntryQuote) {
+          payload.directRoutesOnly = 'true';
+        }
+        const response = await this.jupiterHub.request('ENTRY','/swap/v2/order', payload,
+          { deadlineMs, signal: request.signal });
         await guard();
         if (response.status !== 200 || !response.body || typeof response.body !== 'object') throw new Error('ORDER_UNAVAILABLE');
         const order = response.body as V2Order;
@@ -150,8 +156,17 @@ export class PreFlightEngine {
           throw new Error('SLIPPAGE_ABOVE_REQUEST');
         if (!Number.isInteger(order.feeBps) || order.feeBps! < 0 || order.feeBps! > 10_000)
           throw new Error('FEE_RATE_UNAVAILABLE');
-        if (!directRouteMatches(order,inputMint,outputMint,amount,pool.poolAddress))
-          throw new Error('UNCONFIRMED_QUOTE_ROUTE');
+        if (isEntryQuote) {
+          if (!directRouteMatches(order,inputMint,outputMint,amount,pool.poolAddress))
+            throw new Error('UNCONFIRMED_QUOTE_ROUTE');
+        } else {
+          if (!order.routePlan || !Array.isArray(order.routePlan) || order.routePlan.length === 0)
+            throw new Error('UNCONFIRMED_QUOTE_ROUTE');
+          if ((order.inputMint && order.inputMint !== inputMint) || (order.outputMint && order.outputMint !== outputMint))
+            throw new Error('UNCONFIRMED_QUOTE_ROUTE');
+          if (referencesProgram(order.routePlan, PUMP_PROGRAM_ID.toBase58()))
+            throw new Error('BONDING_CURVE_ROUTE');
+        }
         return order;
       };
       const momentumIntervalMs = Number(process.env.ENTRY_MOMENTUM_INTERVAL_MS);
@@ -174,24 +189,29 @@ export class PreFlightEngine {
       const forwardMin = positiveInteger(forward.otherAmountThreshold);
       if (!out || !forwardMin || forwardMin > out || positiveInteger(forward.inAmount) !== BigInt(inputAmount))
         return deny('FORWARD_QUOTE_INVALID');
-      const reverse = await getOrder(mint, SOL_MINT, out.toString(), Date.now() + DEADLINE_MS, this.walletPublicKey);
+      const reverse = await getOrder(mint, SOL_MINT, out.toString(), Date.now() + DEADLINE_MS, this.walletPublicKey, false);
       const minOut = positiveInteger(reverse.otherAmountThreshold);
       if (!minOut || positiveInteger(reverse.inAmount) !== out || !positiveInteger(reverse.outAmount))
         return deny('REVERSE_QUOTE_INVALID');
       // The expected output and the guaranteed forward minimum are distinct
       // swap sizes. Price both explicitly; never extrapolate an AMM curve.
       const adverse = forwardMin === out ? reverse : await getOrder(mint, SOL_MINT, forwardMin.toString(),
-        Date.now() + DEADLINE_MS, this.walletPublicKey);
+        Date.now() + DEADLINE_MS, this.walletPublicKey, false);
       const adverseMin = positiveInteger(adverse.otherAmountThreshold);
       if (!adverseMin || positiveInteger(adverse.inAmount) !== forwardMin || !positiveInteger(adverse.outAmount))
         return deny('ADVERSE_REVERSE_QUOTE_INVALID');
       const expectedExitFees = feeEstimate(reverse, this.walletPublicKey, true);
       const adverseExitFees = feeEstimate(adverse, this.walletPublicKey, true);
       if (!expectedExitFees || !adverseExitFees) return deny('FEE_ESTIMATE_UNAVAILABLE');
-      const final = await getOrder(SOL_MINT, mint, inputAmount, Date.now() + DEADLINE_MS, this.walletPublicKey);
+      const final = await getOrder(SOL_MINT, mint, inputAmount, Date.now() + DEADLINE_MS, this.walletPublicKey, true);
+      const finalOut = positiveInteger(final.outAmount);
+      const finalThreshold = positiveInteger(final.otherAmountThreshold);
+      const toleranceBps = BigInt(Math.min(200, Math.max(0, Number(process.env.FINAL_ORDER_SLIPPAGE_TOLERANCE_BPS) || 50)));
+      const minAcceptableOut = (out * (10000n - toleranceBps)) / 10000n;
+      const minAcceptableThreshold = (forwardMin * (10000n - toleranceBps)) / 10000n;
       if (!final.requestId || !final.transaction || positiveInteger(final.inAmount) !== BigInt(inputAmount) ||
-          !positiveInteger(final.outAmount) || !positiveInteger(final.otherAmountThreshold) ||
-          positiveInteger(final.outAmount)! < out || positiveInteger(final.otherAmountThreshold)! < forwardMin ||
+          !finalOut || !finalThreshold ||
+          finalOut < minAcceptableOut || finalThreshold < minAcceptableThreshold ||
           (final.transactionVersion !== undefined && final.transactionVersion !== 0) ||
           (final.expireAt !== undefined && (!Number.isFinite(Date.parse(final.expireAt)) || Date.parse(final.expireAt) <= Date.now())))
         return deny('FINAL_ORDER_INVALID');
