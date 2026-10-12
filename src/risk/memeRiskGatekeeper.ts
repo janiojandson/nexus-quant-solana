@@ -14,6 +14,7 @@ export interface TokenSecurityMetadata {
   mintAuthority?: string | null;
   freezeAuthority?: string | null;
   holdersCount?: number;
+  topHoldersPct?: number;
   buyTaxPct?: number;
   sellTaxPct?: number;
   priceChangeM5?: number;
@@ -123,7 +124,9 @@ export class MemeRiskGatekeeper {
     // 0. Macro Sentinel check removed by user request
 
     // 2. Consulta à Sentinela On-Chain RugCheck (Honeypot, Top Holders e Liquidez Trancada)
-    const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress, { origin: token.origin });
+    const rugReport = await this.rugCheckService.auditToken(token.mint, token.pairAddress, {
+      origin: token.origin, topHoldersPct: token.topHoldersPct, holdersCount: token.holdersCount,
+      mintAuthority: token.mintAuthority, freezeAuthority: token.freezeAuthority });
     if (!rugReport.isSafe) {
       return {
       rugCheckReport: rugReport,

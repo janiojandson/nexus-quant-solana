@@ -13,6 +13,11 @@ export interface DiscoveredToken {
   volumeSellsM5: number | null;
   pairAddress: string | null;
   pairCreatedAt: number | null;
+  mintAuthority: string | null;
+  freezeAuthority: string | null;
+  holdersCount: number | null;
+  topHoldersPercentage: number | null;
+  devBalancePercentage: number | null;
 }
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -39,13 +44,21 @@ function parseTokensV2(body: unknown): DiscoveredToken[] {
       if (!mint) return [];
       const stats = record(token?.stats5m);
       const firstPool = record(token?.firstPool);
+      const audit = record(token?.audit);
       return [{
         mint, symbol: string(token?.symbol), name: string(token?.name),
         priceUsd: positive(token?.usdPrice), liquidityUsd: positive(token?.liquidity),
-        priceChangeM5: finite(stats?.priceChange), buysM5: finite(stats?.buyCount),
-        sellsM5: finite(stats?.sellCount), volumeBuysM5: finite(stats?.buyVolume),
+        priceChangeM5: finite(stats?.priceChange),
+        buysM5: finite(stats?.numBuys ?? stats?.buyCount),
+        sellsM5: finite(stats?.numSells ?? stats?.sellCount),
+        volumeBuysM5: finite(stats?.buyVolume),
         volumeSellsM5: finite(stats?.sellVolume),
-        pairAddress: string(firstPool?.id), pairCreatedAt: time(firstPool?.createdAt)
+        pairAddress: string(firstPool?.id), pairCreatedAt: time(firstPool?.createdAt),
+        mintAuthority: string(token?.mintAuthority),
+        freezeAuthority: string(token?.freezeAuthority),
+        holdersCount: finite(token?.holderCount),
+        topHoldersPercentage: finite(audit?.topHoldersPercentage),
+        devBalancePercentage: finite(audit?.devBalancePercentage)
       }];
     });
 }

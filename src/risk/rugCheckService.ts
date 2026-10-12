@@ -50,7 +50,7 @@ export class RugCheckService {
     }));
   }
 
-  public async auditToken(mint: string, targetPairAddress?: string, options?: { origin?: TokenOrigin }): Promise<RugCheckReport> {
+  public async auditToken(mint: string, targetPairAddress?: string, options?: { origin?: TokenOrigin; topHoldersPct?: number; holdersCount?: number; mintAuthority?: string | null; freezeAuthority?: string | null }): Promise<RugCheckReport> {
     try {
       const url = `${RugCheckService.RUGCHECK_BASE_URL}/${mint}/report`;
       let response: {data:any};
@@ -74,13 +74,17 @@ export class RugCheckService {
 
       const tokenData = data.token && typeof data.token === 'object' ? data.token : {};
       const hasOwn = (obj: any, key: string) => Object.prototype.hasOwnProperty.call(obj || {}, key);
-      const mintAuthority = hasOwn(tokenData, 'mintAuthority') ? tokenData.mintAuthority : data.mintAuthority;
-      const freezeAuthority = hasOwn(tokenData, 'freezeAuthority') ? tokenData.freezeAuthority : data.freezeAuthority;
+      let mintAuthority = hasOwn(tokenData, 'mintAuthority') ? tokenData.mintAuthority : data.mintAuthority;
+      let freezeAuthority = hasOwn(tokenData, 'freezeAuthority') ? tokenData.freezeAuthority : data.freezeAuthority;
       const validAuthority = (value: unknown) => value === null || (typeof value === 'string' && value.length > 0);
+      // Fallback Jupiter: preenche autoridades ausentes no RugCheck com fatos do caller.
+      if (!validAuthority(mintAuthority) && options?.mintAuthority !== undefined) mintAuthority = options.mintAuthority;
+      if (!validAuthority(freezeAuthority) && options?.freezeAuthority !== undefined) freezeAuthority = options.freezeAuthority;
       const mintAuthorityKnown = validAuthority(mintAuthority);
       const freezeAuthorityKnown = validAuthority(freezeAuthority);
       const holdersRaw = data.totalHolders == null ? NaN : Number(data.totalHolders);
-      const holdersCount = Number.isFinite(holdersRaw) && holdersRaw >= 0 ? holdersRaw : undefined;
+      let holdersCount = Number.isFinite(holdersRaw) && holdersRaw >= 0 ? holdersRaw : undefined;
+      if (holdersCount === undefined && options?.holdersCount !== undefined && options.holdersCount >= 0) holdersCount = options.holdersCount;
 
       // 1. Verificações fatais inequívocas. Campo ausente nunca significa autoridade revogada.
       const isMintAuthActive = mintAuthorityKnown && Boolean(mintAuthority);
@@ -112,6 +116,10 @@ export class RugCheckService {
           const sum = percentages.sort((a: number, b: number) => b - a).slice(0, 5).reduce((acc: number, pct: number) => acc + pct, 0);
           if (sum <= 100) topHoldersPct = sum;
         }
+      }
+      // Fallback Jupiter: topHoldersPercentage quando o RugCheck omite a lista de holders.
+      if (topHoldersPct === undefined && options?.topHoldersPct !== undefined && options.topHoldersPct >= 0 && options.topHoldersPct <= 100) {
+        topHoldersPct = options.topHoldersPct;
       }
 
       // On-chain LP locked/burned resolution: quando o RugCheck não retorna
