@@ -6,13 +6,14 @@ import { PUMP_PROGRAM_ID } from './pumpBondingCurve.js';
 
 export const PUMP_SWAP_PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
 export const RAYDIUM_CPMM_PROGRAM = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
+export const RAYDIUM_AMM_V4_PROGRAM = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
 const PUMP_DISC = Buffer.from([241,154,109,4,17,177,109,188]);
 const PUMP_GLOBAL_DISC = Buffer.from([149,8,156,202,160,252,176,217]);
 const PUMP_GLOBAL_CONFIG = PublicKey.findProgramAddressSync([Buffer.from('global_config')], PUMP_SWAP_PROGRAM)[0];
 const CPMM_DISC = createHash('sha256').update('account:PoolState').digest().subarray(0,8);
 export interface ConfirmedPoolEvidence {
-  kind: 'PHYSICAL_POOL_CONFIRMED'; venue: 'PumpSwap' | 'Raydium CPMM';
+  kind: 'PHYSICAL_POOL_CONFIRMED'; venue: 'PumpSwap' | 'Raydium CPMM' | 'Raydium AMM V4';
   slot: number; observedAt: string; programId: string; poolAddress: string;
   baseMint: string; quoteMint: string; baseVault: string; quoteVault: string;
   physicalSolLamports: string; tokenReserveAtomic: string;
@@ -94,7 +95,7 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
     const b=bytes(account);
     if(account.owner===PUMP_SWAP_PROGRAM.toBase58()) {
       // Exact historical field boundaries or current allocation with zero reserved bytes.
-      demand([211,243,244,245,261,269,270,271,279,287,300].includes(b.length)&&b.subarray(0,8).equals(PUMP_DISC),'INVALID_POOL_LAYOUT');
+      demand([211,243,244,245,261,269,270,271,279,287,300,301].includes(b.length)&&b.subarray(0,8).equals(PUMP_DISC),'INVALID_POOL_LAYOUT');
       if(b.length>287)demand(b.subarray(287).every(v=>v===0),'UNSUPPORTED_POOL_LAYOUT');
       demand((b[243]??0)===0 && (b[244]??0)===0 && (b[269]??0)===0 && (b[270]??0)===0,'UNSUPPORTED_POOL_MODE');
       const mints=[pk(b,43),pk(b,75)];
@@ -126,6 +127,17 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
       demand(vaults.every((v,i)=>v.equals(PublicKey.findProgramAddressSync([Buffer.from('pool_vault'),address.toBuffer(),mints[i].toBuffer()],RAYDIUM_CPMM_PROGRAM)[0])),'INVALID_VAULT_PDA');
       const fees=[0,1].map(i=>b.readBigUInt64LE(341+i*8)+b.readBigUInt64LE(357+i*8)+b.readBigUInt64LE(397+i*8));
       return {venue:'Raydium CPMM',program:RAYDIUM_CPMM_PROGRAM,mints,vaults,authority,fees};
+    }
+    if(account.owner===RAYDIUM_AMM_V4_PROGRAM.toBase58()) {
+      demand(b.length===752,'INVALID_POOL_LAYOUT');
+      const status=b.readBigUInt64LE(0);
+      demand(status===1n||status===6n,'POOL_NOT_OPEN');
+      const mints=[pk(b,400),pk(b,432)];
+      demand(mints.some(m=>m.equals(token))&&mints.some(m=>m.equals(WSOL)),'POOL_MINT_MISMATCH');
+      const [authority,bump]=PublicKey.findProgramAddressSync([Buffer.from('amm authority')],RAYDIUM_AMM_V4_PROGRAM);
+      demand(b.readBigUInt64LE(8)===BigInt(bump),'INVALID_AUTHORITY_BUMP');
+      const vaults=[pk(b,336),pk(b,368)];
+      return {venue:'Raydium AMM V4',program:RAYDIUM_AMM_V4_PROGRAM,mints,vaults,authority,fees:[0n,0n]};
     }
     throw new Error('UNSUPPORTED_POOL_PROGRAM');
   }

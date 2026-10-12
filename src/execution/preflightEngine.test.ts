@@ -6,7 +6,7 @@ import bs58 from 'bs58';
 import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { PreFlightEngine } from './preflightEngine.js';
-import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM } from '../pump/confirmedPoolReader.js';
+import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
 import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM } from './entryRoutePolicy.js';
 
 const key = (n: number) => new PublicKey(Buffer.alloc(32, n));
@@ -295,6 +295,33 @@ test('official Raydium CPMM swap_base_input CPI binds pool, vaults, mints, amoun
   assert.equal(hasBoundSwapCpi(trace(data,[...accounts.slice(0,6),key(22).toBase58(),...accounts.slice(7)]),
     2,rayPool,mint,taker,25_000_000n,988_142n),false);
   assert.equal(hasBoundSwapCpi(trace(data),1,rayPool,mint,taker,25_000_000n,988_142n),false);
+});
+
+test('official Raydium AMM V4 SwapBaseIn CPI binds pool, authority, user ATAs, amount and minimum', () => {
+  const [authority] = PublicKey.findProgramAddressSync([Buffer.from('amm authority')], RAYDIUM_AMM_V4_PROGRAM);
+  const v4Pool = { ...evidence, venue: 'Raydium AMM V4' as const,
+    programId: RAYDIUM_AMM_V4_PROGRAM.toBase58() };
+  const data = Buffer.alloc(17);
+  data[0] = 9;
+  data.writeBigUInt64LE(25_000_000n, 1);
+  data.writeBigUInt64LE(988_142n, 9);
+  const inputAta = getAssociatedTokenAddressSync(new PublicKey('So11111111111111111111111111111111111111112'),
+    new PublicKey(taker), true).toBase58();
+  const outputAta = getAssociatedTokenAddressSync(new PublicKey(mint), new PublicKey(taker), true).toBase58();
+  const accounts = [
+    TOKEN_PROGRAM_ID.toBase58(), pool, authority.toBase58(), key(10).toBase58(), key(11).toBase58(),
+    evidence.quoteVault, evidence.baseVault, key(12).toBase58(), key(13).toBase58(), key(14).toBase58(),
+    key(15).toBase58(), key(16).toBase58(), key(17).toBase58(), key(18).toBase58(), key(19).toBase58(),
+    inputAta, outputAta, taker
+  ];
+  const trace = (payload: Buffer, keys = accounts) => [{index: 2, instructions: [{
+    programId: RAYDIUM_AMM_V4_PROGRAM.toBase58(), stackHeight: 2, accounts: keys, data: bs58.encode(payload)
+  }]}];
+  assert.equal(hasBoundSwapCpi(trace(data), 2, v4Pool, mint, taker, 25_000_000n, 988_142n), true);
+  const wrongAmount = Buffer.from(data); wrongAmount.writeBigUInt64LE(24_000_000n, 1);
+  assert.equal(hasBoundSwapCpi(trace(wrongAmount), 2, v4Pool, mint, taker, 25_000_000n, 988_142n), false);
+  assert.equal(hasBoundSwapCpi(trace(data), 2, v4Pool, mint, taker, 25_000_000n, 988_143n), false);
+  assert.equal(hasBoundSwapCpi(trace(data), 1, v4Pool, mint, taker, 25_000_000n, 988_142n), false);
 });
 
 test('fresh physical reserve proof is required after quotes before final simulation', async () => {

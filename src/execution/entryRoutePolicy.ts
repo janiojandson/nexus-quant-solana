@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
 import type { ConfirmedPoolEvidence } from '../pump/confirmedPoolReader.js';
-import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM } from '../pump/confirmedPoolReader.js';
+import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
 import { ComputeBudgetInstruction, ComputeBudgetProgram, SystemInstruction, SystemProgram,
   TransactionInstruction, PublicKey } from '@solana/web3.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID,
@@ -121,7 +121,7 @@ export function hasBoundSwapCpi(groups: unknown, parentIndex: number,
   if (!Array.isArray(groups)) return false;
   const parent = groups.filter((group: InnerGroup) => group?.index === parentIndex);
   if (parent.length !== 1 || !Array.isArray(parent[0]?.instructions)) return false;
-  const dexPrograms = new Set([PUMP_SWAP_PROGRAM.toBase58(), RAYDIUM_CPMM_PROGRAM.toBase58()]);
+  const dexPrograms = new Set([PUMP_SWAP_PROGRAM.toBase58(), RAYDIUM_CPMM_PROGRAM.toBase58(), RAYDIUM_AMM_V4_PROGRAM.toBase58()]);
   const swaps = parent[0].instructions.filter((ix: InnerInstruction) => dexPrograms.has(String(ix?.programId)));
   if (swaps.length !== 1) return false;
   const ix = swaps[0] as InnerInstruction;
@@ -150,6 +150,12 @@ export function hasBoundSwapCpi(groups: unknown, parentIndex: number,
         accounts[11] !== mint || accounts[6] !== inputVault || accounts[7] !== outputVault ||
         bytes.length !== 24 || !bytes.subarray(0,8).equals(RAYDIUM_SWAP_BASE_INPUT)) return false;
     input = bytes.readBigUInt64LE(8); minimum = bytes.readBigUInt64LE(16);
+  } else if (pool.programId === RAYDIUM_AMM_V4_PROGRAM.toBase58()) {
+    const ammAuthority = PublicKey.findProgramAddressSync([Buffer.from('amm authority')], RAYDIUM_AMM_V4_PROGRAM)[0].toBase58();
+    if (accounts.length < 17 || accounts[1] !== pool.poolAddress || accounts[2] !== ammAuthority ||
+        !accounts.includes(inputAta) || !accounts.includes(outputAta) ||
+        bytes.length < 17 || bytes[0] !== 9) return false;
+    input = bytes.readBigUInt64LE(1); minimum = bytes.readBigUInt64LE(9);
   } else return false;
   return input === stake && minimum >= minOut;
 }

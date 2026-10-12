@@ -1,4 +1,4 @@
-import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM,
+import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM,
   type ConfirmedPoolEvidence } from '../pump/confirmedPoolReader.js';
 
 const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -20,7 +20,8 @@ export function physicalGrossSpotMark(pool: ConfirmedPoolEvidence | null | undef
       !((pool.baseMint === mint && pool.quoteMint === SOL_MINT) ||
         (pool.quoteMint === mint && pool.baseMint === SOL_MINT)) ||
       !((pool.venue === 'PumpSwap' && pool.programId === PUMP_SWAP_PROGRAM.toBase58()) ||
-        (pool.venue === 'Raydium CPMM' && pool.programId === RAYDIUM_CPMM_PROGRAM.toBase58())) ||
+        (pool.venue === 'Raydium CPMM' && pool.programId === RAYDIUM_CPMM_PROGRAM.toBase58()) ||
+        (pool.venue === 'Raydium AMM V4' && pool.programId === RAYDIUM_AMM_V4_PROGRAM.toBase58())) ||
       !/^[0-9]{1,20}$/.test(pool.physicalSolLamports) ||
       !/^[0-9]{1,20}$/.test(pool.tokenReserveAtomic)) return null;
   const observed = Date.parse(pool.observedAt);

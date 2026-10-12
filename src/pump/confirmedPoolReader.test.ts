@@ -8,33 +8,43 @@ import { ConfirmedPoolReader } from './confirmedPoolReader.js';
 const pump = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
 const curve = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 const cpmm = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
+const ammV4 = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const sol = new PublicKey('So11111111111111111111111111111111111111112');
 const mint = new PublicKey(Buffer.alloc(32, 5));
 const globalConfig = PublicKey.findProgramAddressSync([Buffer.from('global_config')], pump)[0];
 const key = (n: number) => new PublicKey(Buffer.alloc(32, n));
 const put = (b: Buffer, offset: number, value: PublicKey) => value.toBuffer().copy(b, offset);
-function fixture(venue: 'pump' | 'cpmm' = 'pump', reserve = 20_000_000_000n) {
-  const program = venue === 'pump' ? pump : cpmm;
+function fixture(venue: 'pump' | 'cpmm' | 'amm_v4' = 'pump', reserve = 20_000_000_000n) {
+  const program = venue === 'pump' ? pump : venue === 'cpmm' ? cpmm : ammV4;
   const creator = PublicKey.findProgramAddressSync([Buffer.from('pool-authority'), mint.toBuffer()], curve)[0];
   const [address, bump] = PublicKey.findProgramAddressSync(venue === 'pump'
     ? [Buffer.from('pool'), Buffer.alloc(2), creator.toBuffer(), mint.toBuffer(), sol.toBuffer()]
-    : [Buffer.from('pool'), key(9).toBuffer(), mint.toBuffer(), sol.toBuffer()], program);
-  const [authority, authBump] = venue === 'pump' ? [address, bump] : PublicKey.findProgramAddressSync([Buffer.from('vault_and_lp_mint_auth_seed')], program);
+    : [Buffer.from('pool'), key(9).toBuffer(), mint.toBuffer(), sol.toBuffer()], venue === 'pump' ? pump : cpmm);
+  const [ammV4Auth, ammV4Bump] = PublicKey.findProgramAddressSync([Buffer.from('amm authority')], ammV4);
+  const [authority, authBump] = venue === 'pump' ? [address, bump]
+    : venue === 'cpmm' ? PublicKey.findProgramAddressSync([Buffer.from('vault_and_lp_mint_auth_seed')], program)
+    : [ammV4Auth, ammV4Bump];
   const vaults = venue === 'pump' ? [mint, sol].map(m => getAssociatedTokenAddressSync(m, address, true))
-    : [mint, sol].map(m => PublicKey.findProgramAddressSync([Buffer.from('pool_vault'), address.toBuffer(), m.toBuffer()], program)[0]);
-  const pool = Buffer.alloc(venue === 'pump' ? 287 : 637);
+    : venue === 'cpmm' ? [mint, sol].map(m => PublicKey.findProgramAddressSync([Buffer.from('pool_vault'), address.toBuffer(), m.toBuffer()], program)[0])
+    : [key(31), key(32)];
+  const pool = Buffer.alloc(venue === 'pump' ? 287 : venue === 'cpmm' ? 637 : 752);
   const config = Buffer.alloc(949);
   Buffer.from([149,8,156,202,160,252,176,217]).copy(config);
   if (venue === 'pump') {
     Buffer.from([241,154,109,4,17,177,109,188]).copy(pool);
     pool[8] = bump; put(pool,11,creator); put(pool,43,mint); put(pool,75,sol);
     put(pool,139,vaults[0]); put(pool,171,vaults[1]); pool.writeBigUInt64LE(100n,203);
-  } else {
+  } else if (venue === 'cpmm') {
     createHash('sha256').update('account:PoolState').digest().subarray(0,8).copy(pool);
     put(pool,8,key(9)); put(pool,72,vaults[0]); put(pool,104,vaults[1]);
     put(pool,168,mint); put(pool,200,sol); put(pool,232,TOKEN_PROGRAM_ID); put(pool,264,TOKEN_PROGRAM_ID);
     pool[328] = authBump; pool[331] = 6; pool[332] = 9; pool.writeBigUInt64LE(100n,333);
     pool.writeBigUInt64LE(1n,373);
+  } else {
+    pool.writeBigUInt64LE(6n, 0);
+    pool.writeBigUInt64LE(BigInt(ammV4Bump), 8);
+    put(pool, 336, vaults[0]); put(pool, 368, vaults[1]);
+    put(pool, 400, mint); put(pool, 432, sol);
   }
   const amounts = [5_000_000n, reserve];
   const vaultBuffers = [mint,sol].map((m,i) => {
@@ -61,13 +71,13 @@ function fixture(venue: 'pump' | 'cpmm' = 'pump', reserve = 20_000_000_000n) {
   }};
   return {pool,config,vaultBuffers,accounts,address,refresh,calls,hub,setSlot:(s:number)=>{slot=s;}};
 }
-for(const venue of ['pump','cpmm'] as const) {
+for(const venue of ['pump','cpmm','amm_v4'] as const) {
   test(`${venue}: proves physical reserve at inclusive 20 SOL boundary with fresh coherent slots`, async()=>{
     const f=fixture(venue); const result=await new ConfirmedPoolReader(f.hub as any).read(mint.toBase58(),[f.address.toBase58()]);
     assert.equal(result.ok,true); if(!result.ok)return;
     assert.equal(result.evidence.physicalSolLamports,'20000000000');
     assert.equal(result.evidence.tokenReserveAtomic,'5000000');
-    assert.equal(result.evidence.venue,venue==='pump'?'PumpSwap':'Raydium CPMM');
+    assert.equal(result.evidence.venue,venue==='pump'?'PumpSwap':venue==='cpmm'?'Raydium CPMM':'Raydium AMM V4');
     assert.equal(result.evidence.slot,100); assert.equal(result.evidence.poolCreatedAt,null);
     assert.doesNotThrow(()=>JSON.stringify(result.evidence));
     assert.equal(f.calls.at(-1).params[1].minContextSlot,100);
@@ -79,8 +89,8 @@ for(const venue of ['pump','cpmm'] as const) {
   for(const kind of ['discriminator','length','mint','authority','vaultMint','frozen','owner'] as const) {
     test(`${venue}: rejects corrupt ${kind}`,async()=>{
       const f=fixture(venue);
-      if(kind==='discriminator')f.pool[0]^=255;
-      if(kind==='mint')put(f.pool,venue==='pump'?43:168,key(99));
+      if(kind==='discriminator'){if(venue==='amm_v4')f.pool.writeBigUInt64LE(0n,0);else f.pool[0]^=255;}
+      if(kind==='mint')put(f.pool,venue==='pump'?43:venue==='cpmm'?168:400,key(99));
       if(kind==='authority')put(f.vaultBuffers[0],32,key(99));
       if(kind==='vaultMint')put(f.vaultBuffers[1],0,key(99));
       if(kind==='frozen')f.vaultBuffers[0][108]=2;
@@ -91,6 +101,17 @@ for(const venue of ['pump','cpmm'] as const) {
     });
   }
 }
+test('PumpSwap accepts 301-byte layout with trailing zero padding', async () => {
+  const f = fixture('pump');
+  const pool301 = Buffer.alloc(301);
+  f.pool.copy(pool301);
+  f.accounts.get(f.address.toBase58()).data = [pool301.toString('base64'), 'base64'];
+  const result = await new ConfirmedPoolReader(f.hub as any).read(mint.toBase58(), [f.address.toBase58()]);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.evidence.venue, 'PumpSwap');
+  }
+});
 test('canonical PumpSwap is resolved without hints; missing accounts and DAS prices cannot confirm',async()=>{
   const f=fixture(); assert.equal((await new ConfirmedPoolReader(f.hub as any).read(mint.toBase58())).ok,true);
   f.accounts.clear(); assert.equal((await new ConfirmedPoolReader(f.hub as any).read(mint.toBase58())).ok,false);

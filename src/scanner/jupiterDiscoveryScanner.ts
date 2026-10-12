@@ -54,7 +54,7 @@ function parseTokensV2(body: unknown): DiscoveredToken[] {
         sellsM5: finite(stats?.numSells ?? stats?.sellCount),
         volumeBuysM5: finite(stats?.buyVolume),
         volumeSellsM5: finite(stats?.sellVolume),
-        pairAddress: string(firstPool?.id), pairCreatedAt: time(firstPool?.createdAt),
+        pairAddress: string(token?.graduatedPool) ?? (string(firstPool?.id) !== mint ? string(firstPool?.id) : null), pairCreatedAt: time(firstPool?.createdAt),
         mintAuthority: string(token?.mintAuthority),
         freezeAuthority: string(token?.freezeAuthority),
         holdersCount: finite(token?.holderCount),
