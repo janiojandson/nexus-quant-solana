@@ -43,19 +43,28 @@ const deny = (reason: string): PreflightResult => ({ accepted: false, reason });
 function feeEstimate(order: V2Order, taker: string): {network: number; rent: number} | null {
   return publicTakerFeeEstimate(order as unknown as Record<string, unknown>, taker);
 }
-function directRouteMatches(order: V2Order, inputMint: string, outputMint: string,
+export function directRouteMatches(order: V2Order, inputMint: string, outputMint: string,
   amount: string, poolAddress: string): boolean {
   if (!Array.isArray(order.routePlan) || order.routePlan.length !== 1) return false;
   const step = order.routePlan[0] as {swapInfo?: Record<string,unknown>} | null;
   const info = step?.swapInfo;
   if (info?.ammKey !== poolAddress || info.inputMint !== inputMint ||
-      info.outputMint !== outputMint || info.inAmount !== amount) return false;
+      info.outputMint !== outputMint) return false;
+  const feeBps = typeof order.feeBps === 'number' && Number.isInteger(order.feeBps) && order.feeBps >= 0 ? order.feeBps : 0;
+  // Tolera taxa de plataforma deduzida na entrada (quando feeMint === inputMint / SOL)
+  const inRequested = positiveInteger(amount);
+  const inActual = positiveInteger(info?.inAmount);
+  if (inRequested === null || inActual === null) return false;
+  if (inActual !== inRequested) {
+    const inDiff = inRequested - inActual;
+    const maxInDiff = (inRequested * BigInt(feeBps)) / 10000n + 1n;
+    if (inDiff < 0n || inDiff > maxInDiff) return false;
+  }
   // A saída bruta da AMM (swapInfo.outAmount) pode exceder a líquida (order.outAmount)
   // pela taxa de plataforma (feeBps). Toleramos a diferença da taxa + folga de 1 bps.
   const gross = positiveInteger(info?.outAmount);
   const net = positiveInteger(order.outAmount);
   if (gross === null || net === null || gross < net) return false;
-  const feeBps = typeof order.feeBps === 'number' && Number.isInteger(order.feeBps) && order.feeBps >= 0 ? order.feeBps : 0;
   return gross - net <= (gross * BigInt(feeBps)) / 10000n + 1n;
 }
 /** One typed, unsigned entry preflight. It never calls /execute or exposes a signer. */

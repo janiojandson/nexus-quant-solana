@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
-import { PreFlightEngine } from './preflightEngine.js';
+import { PreFlightEngine, directRouteMatches } from './preflightEngine.js';
 import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
 import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM, validateEntryAuxiliaries } from './entryRoutePolicy.js';
 
@@ -487,5 +487,63 @@ test('validateEntryAuxiliaries and hasBoundSwapCpi accept Token-2022 target ATA'
   const pass = hasBoundSwapCpi(innerGroups, 4, evidence, mint, taker, 25_000_000n, 988_142n);
   assert.equal(pass, true, 'hasBoundSwapCpi should bind Token-2022 output ATA');
 });
+
+test('directRouteMatches: tolera taxa deduzida na entrada (SOL) e na saida (Token)', () => {
+  const inputMint = 'So11111111111111111111111111111111111111112';
+  const outputMint = mint;
+  const poolAddress = pool;
+
+  // 1. Taxa deduzida na entrada: solicitado 25_000_000, swapInfo.inAmount = 24_975_000 (10 bps de fee)
+  const orderInputFee: any = {
+    feeBps: 10,
+    outAmount: '1000000',
+    routePlan: [{
+      swapInfo: {
+        ammKey: poolAddress,
+        inputMint,
+        outputMint,
+        inAmount: '24975000',
+        outAmount: '1000000'
+      }
+    }]
+  };
+  assert.equal(directRouteMatches(orderInputFee, inputMint, outputMint, '25000000', poolAddress), true, 'Deve aceitar taxa deduzida na entrada');
+
+  // 2. Taxa deduzida na saida: gross > net com feeBps
+  const orderOutputFee: any = {
+    feeBps: 10,
+    outAmount: '999000',
+    routePlan: [{
+      swapInfo: {
+        ammKey: poolAddress,
+        inputMint,
+        outputMint,
+        inAmount: '25000000',
+        outAmount: '1000000'
+      }
+    }]
+  };
+  assert.equal(directRouteMatches(orderOutputFee, inputMint, outputMint, '25000000', poolAddress), true, 'Deve aceitar taxa deduzida na saida');
+
+  // 3. Rejeita se a pool divergente
+  assert.equal(directRouteMatches(orderInputFee, inputMint, outputMint, '25000000', 'wrong-pool'), false, 'Deve rejeitar pool divergente');
+
+  // 4. Rejeita se diferenca de entrada exceder feeBps
+  const orderExcessiveInputDiff: any = {
+    feeBps: 10,
+    outAmount: '1000000',
+    routePlan: [{
+      swapInfo: {
+        ammKey: poolAddress,
+        inputMint,
+        outputMint,
+        inAmount: '24000000', // 1_000_000 de diferenca > 25_000 (10 bps)
+        outAmount: '1000000'
+      }
+    }]
+  };
+  assert.equal(directRouteMatches(orderExcessiveInputDiff, inputMint, outputMint, '25000000', poolAddress), false, 'Deve rejeitar desconto de entrada maior que feeBps');
+});
+
 
 
