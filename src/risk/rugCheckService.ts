@@ -120,6 +120,7 @@ export class RugCheckService {
         try {
           const verified = await this.resolveLpBurn(mint, targetPairAddress, options?.origin);
           if (verified) lpLockedPct = 100;
+          else lpLockedPct = 0;
         } catch {
           // resolver error leaves lpLockedPct undefined -> fail closed below
         }

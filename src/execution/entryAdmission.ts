@@ -66,7 +66,7 @@ export class EntryAdmission {
           !Number.isSafeInteger(capital.lamports) || capital.lamports < 0 ||
           !Number.isSafeInteger(capital.slot) || capital.slot <= 0 ||
           !Number.isSafeInteger(capital.observedAtMs) || Date.now() - capital.observedAtMs < 0 ||
-          Date.now() - capital.observedAtMs > 15_000 || input.availableLamports !== capital.lamports)
+          Date.now() - capital.observedAtMs > 30_000 || input.availableLamports !== capital.lamports)
         return fail('ENTRY_CAPITAL_UNAVAILABLE');
       if (!Number.isSafeInteger(input.stakeLamports) || input.stakeLamports <= 0 ||
           !input.candidate.mint || !input.candidate.symbol || !input.candidate.name ||

@@ -1621,7 +1621,7 @@ async function executeAutonomousCycle() {
     console.log(`====================================================`);
 
     // Ciclo 1: Leitura de Vitalidade On-Chain
-    const capitalObservation = await wallet.readFreshBalance();
+    let capitalObservation = await wallet.readFreshBalance();
     latestState.walletBalanceAvailable = capitalObservation.available;
     if (!capitalObservation.available) {
       latestState.balanceSol = null;
@@ -1780,6 +1780,16 @@ async function executeAutonomousCycle() {
         priceUsd: token.priceUsd, liquidityUsd: token.liquidityUsd, pairAddress: token.pairAddress };
       const stakeLamports = latestShadowEntryLadderLamports[0];
       if (!Number.isSafeInteger(stakeLamports) || stakeLamports <= 0) continue;
+      if (Date.now() - capitalObservation.observedAtMs > 10_000) {
+        try {
+          const fresh = await wallet.readFreshBalance();
+          if (fresh.available) {
+            capitalObservation = fresh;
+          }
+        } catch {
+          // Mantém observação anterior se houver falha de rede transiente
+        }
+      }
       let securityAudit: Awaited<ReturnType<typeof entryGatekeeper.auditToken>> | undefined;
       const decision = await entryAdmission.attempt({ candidate, stakeLamports,
         availableLamports: capitalObservation.lamports, capitalObservation,
