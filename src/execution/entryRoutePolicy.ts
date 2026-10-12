@@ -4,7 +4,7 @@ import type { ConfirmedPoolEvidence } from '../pump/confirmedPoolReader.js';
 import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
 import { ComputeBudgetInstruction, ComputeBudgetProgram, SystemInstruction, SystemProgram,
   TransactionInstruction, PublicKey } from '@solana/web3.js';
-import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID,
+import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction, createCloseAccountInstruction,
   createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 
@@ -49,9 +49,13 @@ export function validateEntryAuxiliaries(instructions: readonly TransactionInstr
   declaredPriorityFeeLamports: number): number | null {
   const wallet = new PublicKey(taker), target = new PublicKey(mint), wsol = new PublicKey(SOL_MINT);
   const wsolAta = getAssociatedTokenAddressSync(wsol,wallet,true);
-  const targetAta = getAssociatedTokenAddressSync(target,wallet,true);
-  const allowedAta = new Map([['wsol',createAssociatedTokenAccountIdempotentInstruction(wallet,wsolAta,wallet,wsol)],
-    ['target',createAssociatedTokenAccountIdempotentInstruction(wallet,targetAta,wallet,target)]]);
+  const targetAtaSpl = getAssociatedTokenAddressSync(target,wallet,true,TOKEN_PROGRAM_ID);
+  const targetAta2022 = getAssociatedTokenAddressSync(target,wallet,true,TOKEN_2022_PROGRAM_ID);
+  const allowedAta = new Map([
+    ['wsol',createAssociatedTokenAccountIdempotentInstruction(wallet,wsolAta,wallet,wsol)],
+    ['target_spl',createAssociatedTokenAccountIdempotentInstruction(wallet,targetAtaSpl,wallet,target,TOKEN_PROGRAM_ID)],
+    ['target_2022',createAssociatedTokenAccountIdempotentInstruction(wallet,targetAta2022,wallet,target,TOKEN_2022_PROGRAM_ID)]
+  ]);
   const sync = createSyncNativeInstruction(wsolAta);
   const close = createCloseAccountInstruction(wsolAta,wallet,wallet);
   const seen = new Set<string>();
@@ -80,8 +84,10 @@ export function validateEntryAuxiliaries(instructions: readonly TransactionInstr
     if (ix.programId.equals(ASSOCIATED_TOKEN_PROGRAM_ID)) {
       if (index > jupiterIndex) return null;
       const entry = [...allowedAta].find(([,expected])=>sameInstruction(ix,expected));
-      if (!entry || seen.has(entry[0])) return null;
-      seen.add(entry[0]); continue;
+      if (!entry) return null;
+      const canonical = entry[0].startsWith('target') ? 'target' : entry[0];
+      if (seen.has(canonical)) return null;
+      seen.add(canonical); continue;
     }
     if (ix.programId.equals(SystemProgram.programId)) {
       if (index > jupiterIndex || wrapped || !seen.has('wsol')) return null;
@@ -131,14 +137,16 @@ export function hasBoundSwapCpi(groups: unknown, parentIndex: number,
   if (!accounts.every(account => typeof account === 'string')) return false;
   const user = new PublicKey(taker);
   const inputAta = getAssociatedTokenAddressSync(new PublicKey(SOL_MINT),user,true).toBase58();
-  const outputAta = getAssociatedTokenAddressSync(new PublicKey(mint),user,true).toBase58();
+  const outputAtaSpl = getAssociatedTokenAddressSync(new PublicKey(mint),user,true,TOKEN_PROGRAM_ID).toBase58();
+  const outputAta2022 = getAssociatedTokenAddressSync(new PublicKey(mint),user,true,TOKEN_2022_PROGRAM_ID).toBase58();
+  const isOutputAta = (addr: unknown) => addr === outputAtaSpl || addr === outputAta2022;
   let bytes: Buffer;
   try { bytes = Buffer.from(bs58.decode(ix.data)); } catch { return false; }
   let input: bigint, minimum: bigint;
   if (pool.programId === PUMP_SWAP_PROGRAM.toBase58()) {
     if (pool.baseMint !== mint || pool.quoteMint !== SOL_MINT || accounts.length < 9 ||
         accounts[0] !== pool.poolAddress || accounts[3] !== mint || accounts[4] !== SOL_MINT ||
-        accounts[5] !== outputAta || accounts[6] !== inputAta ||
+        !isOutputAta(accounts[5]) || accounts[6] !== inputAta ||
         accounts[7] !== pool.baseVault || accounts[8] !== pool.quoteVault ||
         bytes.length !== 25 || !bytes.subarray(0,8).equals(PUMP_BUY_EXACT_QUOTE_IN) || bytes[24] > 1) return false;
     input = bytes.readBigUInt64LE(8); minimum = bytes.readBigUInt64LE(16);
@@ -146,14 +154,14 @@ export function hasBoundSwapCpi(groups: unknown, parentIndex: number,
     const inputVault = pool.baseMint === SOL_MINT ? pool.baseVault : pool.quoteVault;
     const outputVault = pool.baseMint === mint ? pool.baseVault : pool.quoteVault;
     if (accounts.length < 13 || accounts[3] !== pool.poolAddress || accounts[10] !== SOL_MINT ||
-        accounts[4] !== inputAta || accounts[5] !== outputAta ||
+        accounts[4] !== inputAta || !isOutputAta(accounts[5]) ||
         accounts[11] !== mint || accounts[6] !== inputVault || accounts[7] !== outputVault ||
         bytes.length !== 24 || !bytes.subarray(0,8).equals(RAYDIUM_SWAP_BASE_INPUT)) return false;
     input = bytes.readBigUInt64LE(8); minimum = bytes.readBigUInt64LE(16);
   } else if (pool.programId === RAYDIUM_AMM_V4_PROGRAM.toBase58()) {
     const ammAuthority = PublicKey.findProgramAddressSync([Buffer.from('amm authority')], RAYDIUM_AMM_V4_PROGRAM)[0].toBase58();
     if (accounts.length < 17 || accounts[1] !== pool.poolAddress || accounts[2] !== ammAuthority ||
-        !accounts.includes(inputAta) || !accounts.includes(outputAta) ||
+        !accounts.includes(inputAta) || (!accounts.includes(outputAtaSpl) && !accounts.includes(outputAta2022)) ||
         bytes.length < 17 || bytes[0] !== 9) return false;
     input = bytes.readBigUInt64LE(1); minimum = bytes.readBigUInt64LE(9);
   } else return false;

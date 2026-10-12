@@ -1811,7 +1811,8 @@ async function executeAutonomousCycle() {
         const durableSecurityVeto = securityAudit?.safe === false &&
           securityAudit.rugCheckReport?.factsComplete === true;
         const structuralPoolVeto = decision.reason === 'UNSUPPORTED_POOL_PROGRAM' ||
-          decision.reason === 'TOKEN_2022_UNSUPPORTED';
+          decision.reason === 'TOKEN_2022_UNSUPPORTED' ||
+          decision.reason === 'UNSAFE_TOKEN_2022_EXTENSIONS';
         if (durableSecurityVeto || structuralPoolVeto) antiSpamMemory.recordVeto(token.mint, decision.reason, 24 * 60 * 60 * 1000);
         else antiSpamMemory.recordTechnicalDiscard(token.mint, decision.reason, 5);
         journal.logDecision({ traceId: randomUUID(), decision: 'ENTRY_REJECTED',

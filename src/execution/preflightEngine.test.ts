@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { ComputeBudgetProgram, PublicKey, SystemProgram, TransactionInstruction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
-import { TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction,
+import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { PreFlightEngine } from './preflightEngine.js';
 import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
-import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM } from './entryRoutePolicy.js';
+import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM, validateEntryAuxiliaries } from './entryRoutePolicy.js';
 
 const key = (n: number) => new PublicKey(Buffer.alloc(32, n));
 const mint = key(5).toBase58();
@@ -59,7 +59,7 @@ function unsignedOrder(options: {payer?: PublicKey; unusedPool?: boolean; wrongD
     recentBlockhash: key(10).toBase58(), instructions }).compileToV0Message();
   return Buffer.from(new VersionedTransaction(message).serialize()).toString('base64');
 }
-function fixture(overrides: { mintOwner?: string; simulationError?: unknown; reverseMin?: string;
+function fixture(overrides: { mintOwner?: string; mintData?: Buffer; simulationError?: unknown; reverseMin?: string;
   forwardMin?: string; adverseReverseMin?: string; finalMin?: string; finalSlippageBps?: number;
   reverseNetworkFee?: number; finalNetworkFee?: number; missingFees?: boolean;
   wrongTaker?: boolean; unusedPool?: boolean; wrongDiscriminator?: boolean;
@@ -70,8 +70,8 @@ function fixture(overrides: { mintOwner?: string; simulationError?: unknown; rev
   expensiveCompute?: boolean; finalRentFee?: number; lease?: () => Promise<void> } = {}) {
   const calls: string[] = [];
   const requests: any[] = [];
-  const mintData = Buffer.alloc(82);
-  mintData[44] = 6;
+  const mintData = overrides.mintData ?? Buffer.alloc(82);
+  if (!overrides.mintData) mintData[44] = 6;
   const prices = ['1000000', '996016', '992063', '988142'];
   let forward = 0;
   const jupiter = { request: async (work: string, endpoint: string, payload: any, options: any) => {
@@ -362,10 +362,121 @@ test('simulation CPI cannot deliver bought tokens to a foreign user account', as
 test('auxiliary ATA rent and compute priority cannot exceed declared capital estimate', async () => {
   for (const options of [{withSetup:true,finalRentFee:2_039_280},
     {expensiveCompute:true}]) {
-    const f = fixture(options);
-    const denied = await f.preflight.run({mint,stakeLamports:25_000_000,
-      availableLamports:100_000_000,reservedGasLamports:5_000_000});
-    assert.equal(denied.accepted,false,JSON.stringify(options));
-    assert.ok(f.calls.every(call=>call!=='CRITICAL:simulateTransaction'));
-  }
+      const f = fixture(options);
+      const denied = await f.preflight.run({mint,stakeLamports:25_000_000,
+        availableLamports:100_000_000,reservedGasLamports:5_000_000});
+      assert.equal(denied.accepted,false,JSON.stringify(options));
+      assert.ok(f.calls.every(call=>call!=='CRITICAL:simulateTransaction'));
+    }
 });
+
+test('preflightEngine accepts Token-2022 mint with safe metadata extensions [18, 19]', async () => {
+  const mintBuf = Buffer.alloc(166 + 4 + 10 + 4 + 20);
+  mintBuf[44] = 6;
+  mintBuf[45] = 1;
+  mintBuf[165] = 1;
+  mintBuf.writeUInt16LE(18, 166);
+  mintBuf.writeUInt16LE(10, 168);
+  mintBuf.writeUInt16LE(19, 166 + 14);
+  mintBuf.writeUInt16LE(20, 166 + 16);
+
+  const f = fixture({ mintOwner: TOKEN_2022_PROGRAM_ID.toBase58(), mintData: mintBuf });
+  const result = await f.preflight.run({ mint, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000, poolHints: [pool] });
+  assert.equal(result.accepted, true);
+});
+
+test('preflightEngine rejects Token-2022 mint with dangerous extension or active authority', async () => {
+  // Case 1: TransferFeeConfig (extension 1)
+  const feeMintBuf = Buffer.alloc(166 + 4 + 10);
+  feeMintBuf[44] = 6;
+  feeMintBuf[45] = 1;
+  feeMintBuf[165] = 1;
+  feeMintBuf.writeUInt16LE(1, 166);
+  feeMintBuf.writeUInt16LE(10, 168);
+
+  const f1 = fixture({ mintOwner: TOKEN_2022_PROGRAM_ID.toBase58(), mintData: feeMintBuf });
+  const res1 = await f1.preflight.run({ mint, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000, poolHints: [pool] });
+  assert.equal(res1.accepted, false);
+  assert.equal(res1.reason, 'UNSAFE_TOKEN_2022_EXTENSIONS');
+
+  // Case 2: PermanentDelegate (extension 12)
+  const delMintBuf = Buffer.alloc(166 + 4 + 10);
+  delMintBuf[44] = 6;
+  delMintBuf[45] = 1;
+  delMintBuf[165] = 1;
+  delMintBuf.writeUInt16LE(12, 166);
+  delMintBuf.writeUInt16LE(10, 168);
+
+  const f2 = fixture({ mintOwner: TOKEN_2022_PROGRAM_ID.toBase58(), mintData: delMintBuf });
+  const res2 = await f2.preflight.run({ mint, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000, poolHints: [pool] });
+  assert.equal(res2.accepted, false);
+  assert.equal(res2.reason, 'UNSAFE_TOKEN_2022_EXTENSIONS');
+
+  // Case 3: Token-2022 with active mint authority
+  const authMintBuf = Buffer.alloc(166 + 4 + 10);
+  authMintBuf.writeUInt32LE(1, 0); // mint authority active!
+  authMintBuf[44] = 6;
+  authMintBuf[45] = 1;
+  authMintBuf[165] = 1;
+  authMintBuf.writeUInt16LE(18, 166);
+  authMintBuf.writeUInt16LE(10, 168);
+
+  const f3 = fixture({ mintOwner: TOKEN_2022_PROGRAM_ID.toBase58(), mintData: authMintBuf });
+  const res3 = await f3.preflight.run({ mint, stakeLamports: 25_000_000,
+    availableLamports: 100_000_000, reservedGasLamports: 5_000_000, poolHints: [pool] });
+  assert.equal(res3.accepted, false);
+  assert.equal(res3.reason, 'MINT_OR_FREEZE_AUTHORITY_ACTIVE');
+});
+
+test('validateEntryAuxiliaries and hasBoundSwapCpi accept Token-2022 target ATA', () => {
+  const wallet = new PublicKey(taker);
+  const target = new PublicKey(mint);
+  const wsol = new PublicKey('So11111111111111111111111111111111111111112');
+  const wsolAta = getAssociatedTokenAddressSync(wsol, wallet, true);
+  const targetAta2022 = getAssociatedTokenAddressSync(target, wallet, true, TOKEN_2022_PROGRAM_ID);
+  
+  const instructions = [
+    createAssociatedTokenAccountIdempotentInstruction(wallet, wsolAta, wallet, wsol),
+    createAssociatedTokenAccountIdempotentInstruction(wallet, targetAta2022, wallet, target, TOKEN_2022_PROGRAM_ID),
+    SystemProgram.transfer({ fromPubkey: wallet, toPubkey: wsolAta, lamports: 25_000_000 }),
+    createSyncNativeInstruction(wsolAta),
+    new TransactionInstruction({ programId: new PublicKey(JUPITER_SWAP_PROGRAM), keys: [], data: Buffer.alloc(0) }),
+    createCloseAccountInstruction(wsolAta, wallet, wallet)
+  ];
+
+  const seen = validateEntryAuxiliaries(instructions, 4, taker, mint, 25_000_000, 10_000);
+  assert.equal(seen, 2, 'Should accept Token-2022 target ATA preparation');
+
+  const cpiData = Buffer.alloc(25);
+  Buffer.from([198, 46, 21, 82, 180, 217, 232, 112]).copy(cpiData);
+  cpiData.writeBigUInt64LE(25_000_000n, 8);
+  cpiData.writeBigUInt64LE(988_142n, 16);
+
+  const innerGroups = [{
+    index: 4,
+    instructions: [{
+      programId: PUMP_SWAP_PROGRAM.toBase58(),
+      stackHeight: 2,
+      data: bs58.encode(cpiData),
+      accounts: [
+        pool,
+        key(20).toBase58(),
+        key(21).toBase58(),
+        mint,
+        'So11111111111111111111111111111111111111112',
+        targetAta2022.toBase58(),
+        wsolAta.toBase58(),
+        key(8).toBase58(),
+        key(9).toBase58()
+      ]
+    }]
+  }];
+
+  const pass = hasBoundSwapCpi(innerGroups, 4, evidence, mint, taker, 25_000_000n, 988_142n);
+  assert.equal(pass, true, 'hasBoundSwapCpi should bind Token-2022 output ATA');
+});
+
+

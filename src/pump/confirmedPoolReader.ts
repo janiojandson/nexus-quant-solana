@@ -1,8 +1,29 @@
 import { createHash } from 'node:crypto';
 import { PublicKey } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
 import { PUMP_PROGRAM_ID } from './pumpBondingCurve.js';
+
+export function parseToken2022Extensions(b: Buffer, expectedType: 'mint' | 'account'): number[] {
+  const baseSize = expectedType === 'mint' ? 82 : 165;
+  if (b.length < baseSize) throw new Error('BUFFER_TOO_SHORT');
+  if (b.length === baseSize) return [];
+  if (b.length <= 165) throw new Error('INVALID_EXTENSION_PADDING');
+  const expectedAccountType = expectedType === 'mint' ? 1 : 2;
+  if (b[165] !== expectedAccountType) throw new Error('INVALID_ACCOUNT_TYPE');
+  let offset = 166;
+  const extensions: number[] = [];
+  while (offset + 4 <= b.length) {
+    const type = b.readUInt16LE(offset);
+    const length = b.readUInt16LE(offset + 2);
+    offset += 4;
+    if (offset + length > b.length) throw new Error('MALFORMED_TLV_EXTENSION');
+    if (type === 0) break;
+    extensions.push(type);
+    offset += length;
+  }
+  return extensions;
+}
 
 export const PUMP_SWAP_PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
 export const RAYDIUM_CPMM_PROGRAM = new PublicKey('CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C');
@@ -79,7 +100,7 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
   }
   private code(error:unknown):string {
     const code=error instanceof Error?error.message:'';
-    return /^[A-Z][A-Z_]+$/.test(code)?code:'INVALID_POOL_DATA';
+    return /^[A-Z][A-Z0-9_]+$/.test(code)?code:'INVALID_POOL_DATA';
   }
   private async rpc(method:string,params:unknown[]):Promise<any> {
     try{return await this.hub.call('STATE',method,params,{bypassCache:true});}
@@ -103,7 +124,10 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
       const [derived,bump]=PublicKey.findProgramAddressSync([Buffer.from('pool'),b.subarray(9,11),pk(b,11).toBuffer(),...mints.map(m=>m.toBuffer())],PUMP_SWAP_PROGRAM);
       demand(derived.equals(address)&&bump===b[8],'INVALID_POOL_PDA');
       const vaults=[pk(b,139),pk(b,171)];
-      demand(vaults.every((v,i)=>v.equals(getAssociatedTokenAddressSync(mints[i],address,true))),'INVALID_VAULT_PDA');
+      demand(vaults[1].equals(getAssociatedTokenAddressSync(mints[1],address,true)),'INVALID_VAULT_PDA');
+      const validVault0 = vaults[0].equals(getAssociatedTokenAddressSync(mints[0],address,true,TOKEN_PROGRAM_ID)) ||
+                          vaults[0].equals(getAssociatedTokenAddressSync(mints[0],address,true,TOKEN_2022_PROGRAM_ID));
+      demand(validVault0,'INVALID_VAULT_PDA');
       demand(b.readBigUInt64LE(203)>0n,'INVALID_LP_SUPPLY');
       // Virtual quote reserves are intentionally never added. Accrued fees are unavailable liquidity.
       const fees=(b.length>=279?b.readBigUInt64LE(271):0n)+(b.length>=287?b.readBigUInt64LE(279):0n);
@@ -114,7 +138,8 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
       const mints=[pk(b,168),pk(b,200)];
       demand(mints.some(m=>m.equals(token))&&mints.some(m=>m.equals(WSOL)),'POOL_MINT_MISMATCH');
       demand(Buffer.compare(mints[0].toBuffer(),mints[1].toBuffer())<0,'INVALID_MINT_ORDER');
-      demand(pk(b,232).equals(TOKEN_PROGRAM_ID)&&pk(b,264).equals(TOKEN_PROGRAM_ID),'UNSUPPORTED_TOKEN_PROGRAM');
+      const isTokProg = (p: PublicKey) => p.equals(TOKEN_PROGRAM_ID) || p.equals(TOKEN_2022_PROGRAM_ID);
+      demand(isTokProg(pk(b,232))&&isTokProg(pk(b,264)),'UNSUPPORTED_TOKEN_PROGRAM');
       const derived=PublicKey.findProgramAddressSync([Buffer.from('pool'),pk(b,8).toBuffer(),...mints.map(m=>m.toBuffer())],RAYDIUM_CPMM_PROGRAM)[0];
       demand(derived.equals(address),'INVALID_POOL_PDA');
       const [authority,bump]=PublicKey.findProgramAddressSync([Buffer.from('vault_and_lp_mint_auth_seed')],RAYDIUM_CPMM_PROGRAM);
@@ -149,10 +174,19 @@ export class ConfirmedPoolReader implements PoolEvidenceReader {
     demand((b[56]&0b00011000)===0,'POOL_PAUSED');
   }
   private vault(account:Account,mint:PublicKey,authority:PublicKey):bigint {
-    demand(account.owner===TOKEN_PROGRAM_ID.toBase58(),'UNSUPPORTED_TOKEN_PROGRAM');
+    const isSpl = account.owner===TOKEN_PROGRAM_ID.toBase58();
+    const is2022 = account.owner===TOKEN_2022_PROGRAM_ID.toBase58();
+    demand(isSpl || is2022,'UNSUPPORTED_TOKEN_PROGRAM');
     const b=bytes(account);
-    demand(b.length===165&&b[108]===1&&pk(b,0).equals(mint)&&pk(b,32).equals(authority),'INVALID_VAULT');
+    if (isSpl) demand(b.length===165,'INVALID_VAULT');
+    else demand(b.length>=165,'INVALID_VAULT');
+    demand(b[108]===1&&pk(b,0).equals(mint)&&pk(b,32).equals(authority),'INVALID_VAULT');
     demand(b.readUInt32LE(72)===0&&b.readUInt32LE(129)===0,'INVALID_VAULT_AUTHORITY');
+    if (is2022) {
+      const ext = parseToken2022Extensions(b, 'account');
+      const allowedAccountExt = new Set([7, 8, 11]);
+      demand(ext.every(t => allowedAccountExt.has(t)), 'UNSAFE_TOKEN_2022_EXTENSIONS');
+    }
     const amount=b.readBigUInt64LE(64);
     if(mint.equals(WSOL)) {
       demand(b.readUInt32LE(109)===1&&Number.isSafeInteger(account.lamports),'INVALID_NATIVE_VAULT');

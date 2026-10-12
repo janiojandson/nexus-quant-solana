@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { PublicKey } from '@solana/web3.js';
-import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID } from '@solana/spl-token';
-import { ConfirmedPoolReader } from './confirmedPoolReader.js';
+import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
+import { ConfirmedPoolReader, parseToken2022Extensions } from './confirmedPoolReader.js';
 
 const pump = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
 const curve = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
@@ -162,3 +162,91 @@ test('explicit invalid reserve config rejects; absence defaults to 20',()=>{
     else process.env.MIN_POOL_RESERVE_SOL=prior;
   }
 });
+
+test('parseToken2022Extensions accurately parses and enforces TLV layouts', () => {
+  assert.deepEqual(parseToken2022Extensions(Buffer.alloc(82), 'mint'), []);
+  assert.deepEqual(parseToken2022Extensions(Buffer.alloc(165), 'account'), []);
+  assert.throws(() => parseToken2022Extensions(Buffer.alloc(50), 'mint'), /BUFFER_TOO_SHORT/);
+  assert.throws(() => parseToken2022Extensions(Buffer.alloc(100), 'mint'), /INVALID_EXTENSION_PADDING/);
+  
+  // Mint with extensions 18 and 19
+  const mintBuf = Buffer.alloc(166 + 4 + 10 + 4 + 20);
+  mintBuf[165] = 1;
+  mintBuf.writeUInt16LE(18, 166);
+  mintBuf.writeUInt16LE(10, 168);
+  mintBuf.writeUInt16LE(19, 166 + 14);
+  mintBuf.writeUInt16LE(20, 166 + 16);
+  assert.deepEqual(parseToken2022Extensions(mintBuf, 'mint'), [18, 19]);
+
+  // Account with extensions 7, 8, 11
+  const accBuf = Buffer.alloc(166 + 4 + 4 + 4 + 4 + 4 + 4);
+  accBuf[165] = 2;
+  accBuf.writeUInt16LE(7, 166);
+  accBuf.writeUInt16LE(4, 168);
+  accBuf.writeUInt16LE(8, 174);
+  accBuf.writeUInt16LE(4, 176);
+  accBuf.writeUInt16LE(11, 182);
+  accBuf.writeUInt16LE(4, 184);
+  assert.deepEqual(parseToken2022Extensions(accBuf, 'account'), [7, 8, 11]);
+
+  // Wrong account type
+  const badTypeBuf = Buffer.alloc(170);
+  badTypeBuf[165] = 2; // is account, but parsed as mint
+  assert.throws(() => parseToken2022Extensions(badTypeBuf, 'mint'), /INVALID_ACCOUNT_TYPE/);
+
+  // Malformed TLV (length exceeds buffer)
+  const malformedBuf = Buffer.alloc(170);
+  malformedBuf[165] = 2;
+  malformedBuf.writeUInt16LE(7, 166);
+  malformedBuf.writeUInt16LE(50, 168); // length 50 > buffer
+  assert.throws(() => parseToken2022Extensions(malformedBuf, 'account'), /MALFORMED_TLV_EXTENSION/);
+});
+
+test('PumpSwap accepts Token-2022 vault with safe extensions and rejects dangerous extensions', async () => {
+  // Baseline PumpSwap fixture
+  const f = fixture('pump');
+  const oldVaultAddress = getAssociatedTokenAddressSync(mint, f.address, true, TOKEN_PROGRAM_ID);
+  const baseVaultAddress = getAssociatedTokenAddressSync(mint, f.address, true, TOKEN_2022_PROGRAM_ID);
+  
+  // Convert vault 0 to Token-2022 ATA
+  const safeVaultBuf = Buffer.alloc(166 + 4 + 4);
+  f.vaultBuffers[0].subarray(0, 165).copy(safeVaultBuf, 0);
+  safeVaultBuf[165] = 2; // Account
+  safeVaultBuf.writeUInt16LE(7, 166); // ImmutableOwner
+  safeVaultBuf.writeUInt16LE(4, 168);
+
+  // Register under new Token-2022 ATA
+  f.accounts.delete(oldVaultAddress.toBase58());
+  f.accounts.set(baseVaultAddress.toBase58(), {
+    owner: TOKEN_2022_PROGRAM_ID.toBase58(),
+    data: [safeVaultBuf.toString('base64'), 'base64'],
+    executable: false,
+    lamports: 2_000_000
+  });
+  // Update vault 0 address in pool account data
+  put(f.pool, 139, baseVaultAddress);
+  f.refresh();
+
+  const reader = new ConfirmedPoolReader(f.hub as any);
+  const result = await reader.read(mint.toBase58());
+  assert.equal(result.ok, true, 'Token-2022 safe vault should succeed');
+
+  // Now corrupt vault with dangerous extension 2 (TransferFeeAmount)
+  const dangerousVaultBuf = Buffer.alloc(166 + 4 + 4);
+  f.vaultBuffers[0].subarray(0, 165).copy(dangerousVaultBuf, 0);
+  dangerousVaultBuf[165] = 2;
+  dangerousVaultBuf.writeUInt16LE(2, 166); // TransferFeeAmount!
+  dangerousVaultBuf.writeUInt16LE(4, 168);
+
+  f.accounts.set(baseVaultAddress.toBase58(), {
+    owner: TOKEN_2022_PROGRAM_ID.toBase58(),
+    data: [dangerousVaultBuf.toString('base64'), 'base64'],
+    executable: false,
+    lamports: 2_000_000
+  });
+
+  const dangerousResult = await reader.read(mint.toBase58());
+  assert.equal(dangerousResult.ok, false);
+  assert.equal((dangerousResult as any).code, 'UNSAFE_TOKEN_2022_EXTENSIONS');
+});
+

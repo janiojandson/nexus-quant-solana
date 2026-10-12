@@ -2,7 +2,7 @@ import { AddressLookupTableAccount, AddressLookupTableProgram, ComputeBudgetProg
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import type { JupiterOrgHub } from '../hubs/jupiterOrgHub.js';
 import type { HeliusRpcHub } from '../hubs/heliusRpcHub.js';
-import { ConfirmedPoolReader, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
+import { ConfirmedPoolReader, parseToken2022Extensions, type ConfirmedPoolEvidence, type PoolEvidenceReader } from '../pump/confirmedPoolReader.js';
 import { PUMP_PROGRAM_ID } from '../pump/pumpBondingCurve.js';
 import { observeEntryMomentum, type EntryMomentumResult } from './entryMomentumGate.js';
 import { publicTakerFeeEstimate } from './publicTakerFeeProof.js';
@@ -95,11 +95,23 @@ export class PreFlightEngine {
       const account = mintResult.value;
       if (!Number.isSafeInteger(mintSlot) || (mintSlot as number) < pool.slot || !account || account.executable !== false)
         return deny('MINT_STATE_UNAVAILABLE');
-      if (account.owner === TOKEN_2022_PROGRAM_ID.toBase58()) return deny('TOKEN_2022_UNSUPPORTED');
-      if (account.owner !== TOKEN_PROGRAM_ID.toBase58() || account.data?.[1] !== 'base64') return deny('INVALID_MINT_PROGRAM');
+      const isSpl = account.owner === TOKEN_PROGRAM_ID.toBase58();
+      const is2022 = account.owner === TOKEN_2022_PROGRAM_ID.toBase58();
+      if ((!isSpl && !is2022) || account.data?.[1] !== 'base64') return deny('INVALID_MINT_PROGRAM');
       const data = Buffer.from(account.data[0], 'base64');
-      if (data.length !== 82 || data.readUInt32LE(0) !== 0 || data.readUInt32LE(46) !== 0)
+      if (isSpl && data.length !== 82) return deny('INVALID_MINT_LAYOUT');
+      if (is2022 && data.length < 82) return deny('INVALID_MINT_LAYOUT');
+      if (data.readUInt32LE(0) !== 0 || data.readUInt32LE(46) !== 0)
         return deny('MINT_OR_FREEZE_AUTHORITY_ACTIVE');
+      if (is2022) {
+        try {
+          const ext = parseToken2022Extensions(data, 'mint');
+          const allowedMintExt = new Set([18, 19]);
+          if (!ext.every(t => allowedMintExt.has(t))) return deny('UNSAFE_TOKEN_2022_EXTENSIONS');
+        } catch {
+          return deny('UNSAFE_TOKEN_2022_EXTENSIONS');
+        }
+      }
       const decimals = data[44];
       if (decimals > 18) return deny('INVALID_MINT_DECIMALS');
       const inputAmount = String(request.stakeLamports);
