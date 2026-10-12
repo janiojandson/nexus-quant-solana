@@ -18,7 +18,7 @@ const js=ts.transpileModule(`async function run(){let evaluatedCount=0;${entryLo
   compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}
 }).outputText;
 const token={mint:'mint',symbol:'REAL',name:'Real',priceUsd:0.001,
-  liquidityUsd:30000,pairAddress:'pool',priceChangeM5:0.1,buysM5:0,sellsM5:100};
+  liquidityUsd:30000,pairAddress:'pool',priceChangeM5:0.1,buysM5:0,sellsM5:100,launchpad:'pump.fun'};
 function run(decision:{accepted:boolean;reason?:string;receipt?:{traceId:string;entryIntentId:string}}) {
   const decisions:any[]=[];
   const attempts:any[]=[];

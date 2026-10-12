@@ -18,6 +18,7 @@ export interface DiscoveredToken {
   holdersCount: number | null;
   topHoldersPercentage: number | null;
   devBalancePercentage: number | null;
+  launchpad: string | null;
 }
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -58,7 +59,8 @@ function parseTokensV2(body: unknown): DiscoveredToken[] {
         freezeAuthority: string(token?.freezeAuthority),
         holdersCount: finite(token?.holderCount),
         topHoldersPercentage: finite(audit?.topHoldersPercentage),
-        devBalancePercentage: finite(audit?.devBalancePercentage)
+        devBalancePercentage: finite(audit?.devBalancePercentage),
+        launchpad: string(token?.launchpad)
       }];
     });
 }

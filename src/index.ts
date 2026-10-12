@@ -1772,6 +1772,8 @@ async function executeAutonomousCycle() {
         latestState.incubator.technicalDiscards++;
         continue;
       }
+      // Foco em memecoins: descarta tokens institucionais/wrapped (mint authority legítima).
+      if (token.launchpad !== 'pump.fun') continue;
       const classification = TokenClassifier.classify(token.mint, token.symbol, token.liquidityUsd);
       if (!classification.isEligibleForMemeScan || antiSpamMemory.shouldSkip(token.mint).skip) continue;
       evaluatedCount++;
@@ -1800,7 +1802,7 @@ async function executeAutonomousCycle() {
           // windows are not reused as a second momentum decision.
           securityAudit = await entryGatekeeper.auditToken({ mint: facts.mint,
             pairAddress: facts.pairAddress, liquidityUsd: facts.liquidityUsd,
-            priceUsd: facts.priceUsd,
+            priceUsd: facts.priceUsd, origin: 'PUMP_FUN',
             mintAuthority: token.mintAuthority, freezeAuthority: token.freezeAuthority,
             holdersCount: token.holdersCount ?? undefined, topHoldersPct: token.topHoldersPercentage ?? undefined });
           return { safe: securityAudit.safe, reason: securityAudit.reason };

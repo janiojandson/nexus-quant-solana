@@ -8,9 +8,10 @@ test('TokensV2 direct array id yields real metadata and leaves absent fields unk
     calls.push(args);
     return { status: 200, body: [{
       id: 'Mint111111111111111111111111111111111111111', symbol: 'REAL', name: 'Real Token',
-      usdPrice: 0.00125, liquidity: 31250,
-      stats5m: { priceChange: 1.2, buyCount: 13, sellCount: 7, buyVolume: 1000, sellVolume: 700 },
-      firstPool: { id: 'Pool111111111111111111111111111111111111111', createdAt: '2026-10-09T12:00:00Z' }
+      usdPrice: 0.00125, liquidity: 31250, holderCount: 42, launchpad: 'pump.fun',
+      stats5m: { priceChange: 1.2, numBuys: 13, numSells: 7, buyVolume: 1000, sellVolume: 700 },
+      firstPool: { id: 'Pool111111111111111111111111111111111111111', createdAt: '2026-10-09T12:00:00Z' },
+      audit: { topHoldersPercentage: 18.5, devBalancePercentage: 2.1 }
     }, { id: 'Mint222222222222222222222222222222222222222' }] };
   }};
   const result = await new JupiterDiscoveryScanner(hub as any).scanTrendingCandidates();
@@ -21,6 +22,10 @@ test('TokensV2 direct array id yields real metadata and leaves absent fields unk
   assert.equal(result[0]?.buysM5, 13);
   assert.equal(result[0]?.pairAddress, 'Pool111111111111111111111111111111111111111');
   assert.equal(result[0]?.pairCreatedAt, Date.parse('2026-10-09T12:00:00Z'));
+  assert.equal(result[0]?.holdersCount, 42);
+  assert.equal(result[0]?.topHoldersPercentage, 18.5);
+  assert.equal(result[0]?.devBalancePercentage, 2.1);
+  assert.equal(result[0]?.launchpad, 'pump.fun');
   assert.equal(result[1]?.priceUsd, null);
   assert.equal(result[1]?.liquidityUsd, null);
   assert.equal(result[1]?.pairCreatedAt, null);
