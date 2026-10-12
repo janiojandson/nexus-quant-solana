@@ -89,8 +89,8 @@ export class RugCheckService {
 
       // 2. Extração de métricas de LP trancada/queimada. Ausência permanece UNKNOWN.
       const directLp = data.lpLockedPct == null ? NaN : Number(data.lpLockedPct);
-      // A target pool must supply its own LP facts; never borrow token-level or another pool's data.
-      let lpLockedPct: number | undefined = !targetPairAddress && Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
+      // Fallback: o nível do token é usado quando markets é null ou não resolve a pool alvo.
+      let lpLockedPct: number | undefined = Number.isFinite(directLp) && directLp >= 0 && directLp <= 100 ? directLp : undefined;
       if (Array.isArray(data.markets)) {
         const raydiumMarket = targetPairAddress
           ? data.markets.find((m: any) => m.pubkey === targetPairAddress)
@@ -114,8 +114,8 @@ export class RugCheckService {
         }
       }
 
-      // On-chain LP burn resolution: when RugCheck no longer returns lpLockedPct,
-      // let the caller supply a verified proof instead of vetoing.
+      // On-chain LP locked/burned resolution: quando o RugCheck não retorna
+      // lpLockedPct, o caller fornece prova verificada (burn ou locker) em vez de vetar.
       if (lpLockedPct === undefined && this.resolveLpBurn) {
         try {
           const verified = await this.resolveLpBurn(mint, targetPairAddress, options?.origin);

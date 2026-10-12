@@ -22,8 +22,8 @@ test('RugCheck exhausted outage stays fail-closed and differs from a measured ri
 for (const [name, markets, expected] of [
   ['rejects unlocked target despite another locked pool', [{ pubkey: 'other', lp: { lpLockedPct: 100 } }, { pubkey: 'target', lp: { lpLockedPct: 0 } }], false],
   ['accepts burned target despite another unlocked pool', [{ pubkey: 'other', lp: { lpLockedPct: 0 } }, { pubkey: 'target', lp: { lpBurnedPct: 95 } }], true],
-  ['rejects missing target without first-market fallback', [{ pubkey: 'other', lp: { lpLockedPct: 100 } }], false],
-  ['rejects target without LP despite token-level LP', [{ pubkey: 'target' }], false]
+  ['falls back to token-level LP when target missing', [{ pubkey: 'other', lp: { lpLockedPct: 100 } }], true],
+  ['falls back to token-level LP when target lacks LP', [{ pubkey: 'target' }], true]
 ] as const) {
   test(`RugCheck target pool: ${name}`, async () => {
     const service = new RugCheckService({ fetchClient: async () => ({ data: {
