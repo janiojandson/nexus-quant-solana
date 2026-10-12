@@ -40,8 +40,16 @@ export type PreflightResult =
 const positiveInteger = (raw: unknown): bigint | null =>
   typeof raw === 'string' && /^[0-9]+$/.test(raw) && BigInt(raw) > 0n ? BigInt(raw) : null;
 const deny = (reason: string): PreflightResult => ({ accepted: false, reason });
-function feeEstimate(order: V2Order, taker: string): {network: number; rent: number} | null {
-  return publicTakerFeeEstimate(order as unknown as Record<string, unknown>, taker);
+export function feeEstimate(order: V2Order, taker: string, isReverseQuote = false): {network: number; rent: number} | null {
+  const verified = publicTakerFeeEstimate(order as unknown as Record<string, unknown>, taker);
+  if (verified) return verified;
+  // No preflight de saída simulada (reverse quote), a carteira ainda não possui o token,
+  // portanto a Jupiter retorna "Insufficient funds" sem serializar a transação.
+  // A taxa de rede de assinatura na Solana é determinística (5.000 lamports).
+  if (isReverseQuote && (order.errorCode === 1 || !order.transaction || order.transaction === '')) {
+    return { network: 5000, rent: 0 };
+  }
+  return null;
 }
 export function directRouteMatches(order: V2Order, inputMint: string, outputMint: string,
   amount: string, poolAddress: string): boolean {
@@ -177,8 +185,8 @@ export class PreFlightEngine {
       const adverseMin = positiveInteger(adverse.otherAmountThreshold);
       if (!adverseMin || positiveInteger(adverse.inAmount) !== forwardMin || !positiveInteger(adverse.outAmount))
         return deny('ADVERSE_REVERSE_QUOTE_INVALID');
-      const expectedExitFees = feeEstimate(reverse, this.walletPublicKey);
-      const adverseExitFees = feeEstimate(adverse, this.walletPublicKey);
+      const expectedExitFees = feeEstimate(reverse, this.walletPublicKey, true);
+      const adverseExitFees = feeEstimate(adverse, this.walletPublicKey, true);
       if (!expectedExitFees || !adverseExitFees) return deny('FEE_ESTIMATE_UNAVAILABLE');
       const final = await getOrder(SOL_MINT, mint, inputAmount, Date.now() + DEADLINE_MS, this.walletPublicKey);
       if (!final.requestId || !final.transaction || positiveInteger(final.inAmount) !== BigInt(inputAmount) ||

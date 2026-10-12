@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction,
   createCloseAccountInstruction, createSyncNativeInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
-import { PreFlightEngine, directRouteMatches } from './preflightEngine.js';
+import { PreFlightEngine, directRouteMatches, feeEstimate } from './preflightEngine.js';
 import { PUMP_SWAP_PROGRAM, RAYDIUM_CPMM_PROGRAM, RAYDIUM_AMM_V4_PROGRAM } from '../pump/confirmedPoolReader.js';
 import { assembleV0AccountKeys, hasBoundSwapCpi, JUPITER_SWAP_PROGRAM, validateEntryAuxiliaries } from './entryRoutePolicy.js';
 
@@ -544,6 +544,27 @@ test('directRouteMatches: tolera taxa deduzida na entrada (SOL) e na saida (Toke
   };
   assert.equal(directRouteMatches(orderExcessiveInputDiff, inputMint, outputMint, '25000000', poolAddress), false, 'Deve rejeitar desconto de entrada maior que feeBps');
 });
+
+test('feeEstimate: aceita taxa deterministica de 5.000 lamports em cotacao reversa sem fundos do token', () => {
+  const reverseOrderWithoutFunds: any = {
+    errorCode: 1,
+    errorMessage: 'Insufficient funds',
+    transaction: '',
+    outAmount: '16000000'
+  };
+  const result = feeEstimate(reverseOrderWithoutFunds, taker, true);
+  assert.deepEqual(result, { network: 5000, rent: 0 });
+
+  // Rejeita na ordem de entrada (forward buy), onde a transação real é mandatória
+  const forwardOrderWithoutFunds: any = {
+    errorCode: 1,
+    errorMessage: 'Insufficient funds',
+    transaction: ''
+  };
+  const forwardResult = feeEstimate(forwardOrderWithoutFunds, taker, false);
+  assert.equal(forwardResult, null);
+});
+
 
 
 
